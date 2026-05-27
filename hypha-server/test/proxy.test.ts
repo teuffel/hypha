@@ -1,15 +1,19 @@
 /**
- * Integration test for the /sync + /asset reverse proxy.
+ * Integration test for the reverse proxy.
  *
  * Spins up
  *   - a fake upstream HTTP server (stand-in for node-adapter) that echoes
  *     back request path + headers + body so we can verify what reached it,
  *   - a real hypha-server instance pointed at that fake upstream,
  *
- * and verifies that requests for /sync/* and /asset/* are forwarded with
- * headers (notably `Authorization`) and bodies intact. WebSocket-upgrade
- * proxying is covered in the M4 headless smoke test (Playwright); doing
- * it here would require a separate ws-client dependency.
+ * and verifies that requests for /sync/*, /graphs/*, /e2ee/*, /assets/*
+ * are forwarded with headers (notably `Authorization`) and bodies intact.
+ * WebSocket-upgrade proxying is covered in the M4 headless smoke test
+ * (Playwright); doing it here would require a separate ws-client dependency.
+ *
+ * Phase-1.6 (M8) added the /graphs, /e2ee, /assets prefixes. The /asset
+ * (singular) prefix was a Phase-1 typo and is gone — see
+ * docs/hypha/phase-1.6-cross-device.md §V8 for the diagnosis.
  */
 
 import test from "node:test";
@@ -138,28 +142,90 @@ test("/sync/* — POST body is forwarded intact", async () => {
   }
 });
 
-test("/asset/* — request is forwarded with query string preserved", async () => {
+test("/assets/* — request is forwarded with query string preserved", async () => {
   const upstream = await startFakeUpstream();
   const { app, baseUrl } = await startHyphaWith(upstream.url);
   try {
-    const res = await fetch(`${baseUrl}/asset/abc.png?sig=xyz`, {
+    // Frontend builds URLs like /assets/<graph-id>/<asset-uuid>.<ext>
+    // (worker/sync/large_title.cljs:62); preserve query strings for
+    // signed-URL flows.
+    const res = await fetch(`${baseUrl}/assets/graph-abc/uuid-xyz.png?sig=xyz`, {
       headers: { Authorization: "Bearer test-jwt" },
     });
     assert.equal(res.status, 200);
     assert.equal(upstream.calls.length, 1);
     const call = upstream.calls[0]!;
-    assert.equal(call.url, "/asset/abc.png?sig=xyz");
+    assert.equal(call.url, "/assets/graph-abc/uuid-xyz.png?sig=xyz");
   } finally {
     await app.close();
     await upstream.close();
   }
 });
 
-test("/auth/* — auth endpoints are NOT proxied, /sync prefix is", async () => {
+test("/graphs — GET is forwarded (the list-remote-graphs endpoint)", async () => {
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    const res = await fetch(`${baseUrl}/graphs`, {
+      headers: { Authorization: "Bearer test-jwt" },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    const call = upstream.calls[0]!;
+    assert.equal(call.method, "GET");
+    assert.equal(call.url, "/graphs");
+    assert.equal(call.headers["authorization"], "Bearer test-jwt");
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("/graphs/<id>/members — POST body forwarded intact", async () => {
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    const payload = JSON.stringify({ email: "x@y.z", role: "member" });
+    const res = await fetch(`${baseUrl}/graphs/some-uuid/members`, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: "Bearer test-jwt" },
+      body: payload,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    const call = upstream.calls[0]!;
+    assert.equal(call.method, "POST");
+    assert.equal(call.url, "/graphs/some-uuid/members");
+    assert.equal(call.body, payload);
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("/e2ee/* — request is forwarded (RSA key management)", async () => {
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    const res = await fetch(`${baseUrl}/e2ee/user-keys`, {
+      headers: { Authorization: "Bearer test-jwt" },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0]!.url, "/e2ee/user-keys");
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("/health — local route, NOT proxied (precedence over upstream)", async () => {
   const upstream = await startFakeUpstream();
   const { app, baseUrl } = await startHyphaWith(upstream.url);
   try {
     // /health is a hypha-server local route, must not be forwarded.
+    // Phase-1.6 §V7 — this also implicitly verifies that the new
+    // /graphs, /e2ee, /assets prefix routes don't shadow exact local routes.
     const res = await fetch(`${baseUrl}/health`);
     assert.equal(res.status, 200);
     assert.equal(upstream.calls.length, 0, "upstream must not see /health");
@@ -175,8 +241,12 @@ test("proxy is skipped when buildApp() is called without syncUpstreamUrl", async
   await app.listen({ port: 0, host: "127.0.0.1" });
   const { port } = app.server.address() as AddressInfo;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/sync/anything`);
-    assert.equal(res.status, 404);
+    // All four proxy prefixes share a single syncUpstreamUrl gate in
+    // app.ts:104. Verify each one is absent when the gate is off.
+    for (const path of ["/sync/anything", "/graphs", "/e2ee/user-keys", "/assets/x"]) {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`);
+      assert.equal(res.status, 404, `expected 404 for ${path} when no upstream`);
+    }
   } finally {
     await app.close();
   }
