@@ -22,6 +22,12 @@
             [frontend.config :as config]
             [frontend.flows :as flows]
             [frontend.handler.user :as user-handler]
+            ;; Required for its side-effecting defonce: the plugin-init ns
+            ;; patches `window.fetch` and installs the `window.apis` shim at
+            ;; namespace-load time, which lands before frontend.handler/start!
+            ;; runs and so before frontend.handler.plugin/setup! gets a chance
+            ;; to install its own bare EventEmitter3.
+            [frontend.hypha.plugin-init]
             [frontend.state :as state]))
 
 (defn set-hypha-id-token!
