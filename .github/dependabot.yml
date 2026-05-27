@@ -1,0 +1,43 @@
+# Dependabot policy for Hypha-server npm dependencies.
+#
+# See docs/hypha/phase-1-plan.md section 8.5 for the rationale and decision
+# matrix per update type (auto-merge vs. manual review).
+#
+# Logseq's own dependencies (root package.json, deps.edn, etc.) are NOT
+# managed here — those follow upstream and are out of Hypha's scope.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /hypha-server
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - hypha-deps
+    target-branch: develop
+    commit-message:
+      prefix: "deps(hypha-server)"
+    groups:
+      jose-fastify-security:
+        patterns:
+          - jose
+          - fastify
+          - "@fastify/*"
+        update-types:
+          - patch
+          - minor
+      types:
+        patterns:
+          - "@types/*"
+    ignore:
+      # Major bumps for fastify need manual review (API surface).
+      - dependency-name: fastify
+        update-types:
+          - version-update:semver-major
+      # http-proxy minor + major bumps need manual review (proxy behaviour
+      # changes can be subtle and affect WS upgrade semantics).
+      - dependency-name: "@fastify/http-proxy"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
