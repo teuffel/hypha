@@ -455,42 +455,90 @@ Patch #4, ~4 LoC inkl. require von `frontend.hypha.config`.
 - `bb lint:worker-and-frontend-separate` grün
 - Patches-Bilanz: 4/20
 
-### M10 — End-to-End Cross-Browser Smoke (Playwright)
+### M10 — Cross-Device Drift-Gate (Playwright)
 
-**Datei:** `hypha-server/test/playwright/cross-device.spec.ts` (NEU, ~120 LoC Test)
+**Datei:** `hypha-server/test/playwright/cross-device.spec.ts` (NEU, ~140 LoC Test)
 
-Test-Topologie wie M7 (Phase 1.5): hermetisch, ein hypha-server, ein
-db-sync-Node-Adapter, _zwei_ Playwright-`BrowserContext`s parallel.
+**Scope-Anpassung gegenüber dem ursprünglichen Plan-Entwurf:**
 
-Test-Schritte:
-1. Setup: hypha-server hochfahren (`globalSetup` aus M7 wiederverwenden)
-2. Context A öffnet `http://localhost:<port>/`, gibt Access-Code ein → authentifiziert
-3. Context A erstellt einen neuen Graph "cross-device-test" (Default-Cloud sollte aktiv sein, Test prüft das explizit)
-4. Context A wartet auf `:rtc/loading-graphs?=false` und sichtbaren Graph
-5. Context A editiert einen Block (sichtbar im Editor)
-6. Context A wartet auf erfolgreichen Tx-Sync (`/sync`-WS-Frame-Count oder Indicator-State)
-7. Context B öffnet dieselbe URL, gibt denselben Access-Code ein
-8. Context B wartet auf `:rtc/graphs`-State (Auto-Fetch nach M9.1)
-9. Context B klickt den Graph in der Liste → Download
-10. Context B verifiziert: Graph-Name sichtbar im Picker, editierter Block-Inhalt enthalten
+Der Original-§4-M10-Plan beschrieb einen **vollen Cross-Browser-Roundtrip**:
+Browser A erstellt Cloud-Graph + editiert Block, Browser B fetched Liste +
+downloaded Snapshot + sieht editierten Block. Das setzt aber einen
+**stateful echten db-sync-Adapter** im Test voraus:
+
+- `POST /graphs` muss neue Graph-UUID erstellen und persistieren
+- `GET /graphs` muss die soeben erstellte Graph in der Liste haben
+- WebSocket `/sync/<uuid>` muss Tx-Stream akzeptieren und echo'n
+- Snapshot-Download muss editierten Block-Inhalt zurückliefern
+
+Heute im Test-Setup steht aber der `fake-adapter.js`: ein No-Op-Stub, der
+nur die Ready-Line ausgibt und nicht antwortet. Der echte
+`deps/db-sync/worker/dist/node-adapter.js` ist verfügbar, benötigt aber
+das `better-sqlite3`-Native-Modul (das auf vielen Entwicklungs-Systemen
+inkl. der lokalen Maschine fehlt — sichtbar als pre-existing
+`integration.test.ts`-Fail).
+
+Eine **mockSync-Erweiterung um Stateful-Graph-Storage** (in-memory
+Map<graph-id, graph-data>) wäre eine Eigen-Implementation von
+~200-300 LoC und replikat von Logik, die in
+`deps/db-sync/src/.../worker/handler/`-Familie schon lebt. Das ist
+out-of-proportion für einen Smoke-Test.
+
+**M10-Scope reduziert auf Drift-Gates für die M9-Mechaniken:** das
+sind die Code-Pfade, die durch zukünftige Upstream-Sync-Merges silent
+brechen könnten. Funktionale Cross-Device-Verifikation ist V10
+(manueller Lokal-Smoke nach M9) und Phase-2-M11 (echter Adapter im
+CI-Image inkl. better-sqlite3-binary).
+
+**Tests (4 Stück):**
+
+1. **T1 — M9.1 Auto-Fetch Drift-Gate:** Nach Login (fresh access-code)
+   feuert `GET /graphs` automatisch. Network-Tap auf `page.on("request", ...)`.
+   Bricht, wenn jemand `<fetch-remote-graphs-after-login!` aus
+   `set-hypha-id-token!` entfernt.
+
+2. **T2 — M9.1 Robustness across Reload:** Cookie-Session-Restore-Pfad
+   (Reload mit gültigem Cookie) feuert ebenfalls `GET /graphs`. Bricht,
+   wenn Hypha-Init's `start!` den Auto-Fetch nur bei einer der beiden
+   Codepfade triggert.
+
+3. **T3 — Cross-Device User-Identity:** Zwei `BrowserContext` mit
+   demselben Access-Code bekommen JWTs mit identischem `sub`-Claim
+   (UUID-formatiert, gleicher Wert). Bricht, wenn `hypha-server/src/auth/jwt.ts`
+   den `sub` jemals zufällig per Session generieren würde (was Cross-Device
+   sofort unmöglich machte).
+
+4. **T4 — Cookie-Jar-Isolation:** Two contexts haben separate
+   Session-Cookies. Context A's `/auth/login` macht Context B nicht
+   authentifiziert. Bestätigt die Cross-Device-Semantik (jedes Gerät
+   muss eigene Auth-Geste machen), und schützt vor Cookie-Domain-Mistakes.
 
 #### M10 — Use Cases erfüllt
 
-- **U7**: Deterministischer CI-Test verifiziert U1, U2, U3, U4 end-to-end
-  - Bricht, wenn `/graphs`-Proxy zukünftig regressiert
-  - Bricht, wenn Hypha-Default-Cloud-Off versehentlich rückgängig gemacht wird
-  - Bricht, wenn `logged-in?` zukünftig wieder strikter wird
+- **U7** (eingeschränkt): Deterministischer CI-Test verifiziert die
+  drei M9-Mechaniken (Auto-Fetch + Identity + Isolation). Bricht
+  zuverlässig, wenn:
+  - Hypha-Init das Auto-Fetch silent verliert (T1+T2)
+  - Server-side JWT-Generation zufällig wird (T3)
+  - Cookie-Setup leaks zwischen Contexts (T4)
 
-#### M10 — Use Cases bewusst nicht erfüllt
+#### M10 — Use Cases bewusst nicht erfüllt (alle deferred to Phase 2 M11)
 
-- **U21** (Phase 2): Test prüft _nicht_ Live-Sync (A und B parallel) — Context B kommt nach A's Sync-Commit. Realtime-Bidi-Test ist Phase-2-Material
-- **U6** (verifiziert anderswo): Asset-Sync-Test bleibt orthogonal — wird optional als separater Test in M10b ergänzt, sonst von M8-Unit-Tests abgedeckt
+- **U7-full**: Browser A erstellt Cloud-Graph → Browser B sieht echten
+  Inhalt nach Download. Braucht stateful db-sync-Adapter im CI.
+- **U21**: Live-Sync (A+B parallel editieren, sehen sich live).
+- **U6-end-to-end**: Asset-Upload-Roundtrip Browser A → Browser B
+  (M8-Unit-Tests prüfen Proxy-Pfad; voller Roundtrip braucht
+  Stateful-Asset-Storage).
 
 #### M10 — DoD
 
-- `pnpm --dir hypha-server exec playwright test` 13/13 grün (6 Auth + 6 Marketplace + 1 Cross-Device)
-- Test läuft in unter 60s wall-clock (sonst evtl. `timeout 120` in `upstream-sync.yml` weiter bumpen)
-- CI-Pipelines `hypha-build.yml` und `upstream-sync.yml` picken den neuen Spec automatisch via `testMatch` auf (keine YAML-Änderungen)
+- `pnpm --dir hypha-server exec playwright test` 16/16 grün (6 Auth +
+  6 Marketplace + 4 Cross-Device)
+- Test läuft in unter 60s wall-clock zusammen mit den anderen 12 Specs
+  (`upstream-sync.yml` hat 120s-Budget aus Phase 1.5)
+- CI-Pipelines `hypha-build.yml` und `upstream-sync.yml` picken den
+  neuen Spec automatisch via `testMatch` auf (keine YAML-Änderungen)
 - Patches-Bilanz: 4/20 (unverändert seit M9)
 
 ## 5. Patches-Bilanz
