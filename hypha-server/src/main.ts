@@ -1,37 +1,36 @@
 /**
  * hypha-server entry point.
  *
- * M0 (current): minimal Fastify with /health only. Just enough to verify the
- * build-and-run pipeline produces a working binary that listens on a port.
+ * M1 adds auth routes (login/session/logout/jwks) and a statics route on top
+ * of M0's /health probe.
  *
- * Future milestones will wire in:
- *   - /auth/login, /auth/session, /auth/logout, /auth/jwks (M1)
+ * Future milestones:
  *   - Reverse-proxy for /sync/* to the spawned node-adapter.js (M2)
- *   - Static serving for the Hypha-built Logseq frontend (M2)
+ *   - Volume persistence for sessions + signing keys (M3)
+ *   - Hardened deploy config + headless smoke test (M4)
  *
- * See docs/hypha/phase-1-plan.md section 4 for the full architecture.
+ * See docs/hypha/phase-1-plan.md section 4 for the architecture.
  */
 
-import Fastify from "fastify";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const app = Fastify({
-  logger: {
-    level: process.env.LOG_LEVEL ?? "info",
-  },
-});
+import { buildApp } from "./app.js";
+import { loadConfig } from "./config.js";
 
-app.get("/health", async () => ({ status: "ok" }));
+const here = fileURLToPath(new URL(".", import.meta.url));
+// dist/main.js → repo root: ../../../ from compiled location; from src/main.ts
+// (tsx) it is one level up from src/. Both paths land on the same workspace
+// root, so resolve relative to two-up from the running file.
+const repoRoot = resolve(here, "..", "..");
+const staticDir = process.env.HYPHA_STATIC_DIR ?? resolve(repoRoot, "static");
 
-// Default port 3000 for dev convenience. Production Docker image will set
-// PORT=80 in docker-compose.hypha.yml (Phase 1 / M3). Note: phase-1-plan.md
-// mentions ":80" in the architecture diagram — that refers to the container's
-// external-facing port, not the dev-loopback port.
-const port = Number(process.env.PORT ?? 3000);
-const host = process.env.HOST ?? "0.0.0.0";
+const config = await loadConfig();
+const app = await buildApp({ config, staticDir });
 
 try {
-  await app.listen({ port, host });
-  app.log.info(`hypha-server listening on ${host}:${port}`);
+  await app.listen({ port: config.port, host: config.host });
+  app.log.info(`hypha-server listening on ${config.host}:${config.port}`);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

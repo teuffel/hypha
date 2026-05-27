@@ -75,8 +75,3 @@ frontend.common.missionary/background-task-running?
 ;; defonce
 mobile.components.popup/native-sheet-listener
 mobile.bottom-tabs/add-tab-listeners!
-;; Hypha: read by Mini-Hook patches in handler/events/ui.cljs (Patch #1)
-;; and handler.cljs (Patch #2), landing in Hypha milestone M1.
-;; In M0 the patches don't exist yet, so carve cannot see the references.
-frontend.hypha.config/hypha-mode?
-frontend.hypha.init/start!
