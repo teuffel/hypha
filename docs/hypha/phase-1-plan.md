@@ -496,31 +496,56 @@ Siehe 4.6 für vollständigen Flow.
 
 ## 7. Meilensteinplan
 
-### M0 — Build-Skeleton
+### M0 — Build-Skeleton (Docker-first Dev)
 
-**Scope:** Hypha-Build-Pipeline aufstellen, Top-Level-Verzeichnisse anlegen, hypha-server Hello-World.
+**Scope:** Hypha-Build-Pipeline aufstellen, Top-Level-Verzeichnisse anlegen, hypha-server Hello-World, **vollständige Dev-Toolchain in einem Docker-Container** sodass Host nur Docker+Compose braucht.
+
+**Designprinzip:** Alle Hypha-Entwicklung läuft im Dev-Container. Damit ist die Toolchain reproduzierbar (Node, Java, Clojure, Babashka, pnpm allesamt mit CI-Versionen gepinnt) und Host-OS-Diskrepanzen (z. B. Node 20 auf Arch Linux vs. Node 24 in CI) werden eliminiert. Production-Image bleibt eine separate Datei (`Dockerfile.hypha`, M3) — Dev-Image hat zusätzliche Tools die Production nicht braucht.
 
 **Upstream-Dateien:** 0
 
 **Hypha-Dateien neu:**
 - `src/main/frontend/hypha/config.cljs` (`(goog-define HYPHA-MODE false)` + `hypha-mode?`)
-- `src/main/frontend/hypha/init.cljs` (`(defn start! [])` leer)
-- `hypha-server/package.json` (TS-Deps: fastify, fastify-http-proxy, jose)
+- `src/main/frontend/hypha/init.cljs` (`(defn start! [])` leer, wird in M1 gefüllt)
+- `hypha-server/package.json` (TS-Deps: fastify, @fastify/http-proxy, jose)
 - `hypha-server/tsconfig.json`
-- `hypha-server/src/main.ts` (Hello-World, `/health` → 200)
-- `bin/hypha-build`
+- `hypha-server/src/main.ts` (Fastify-Hello-World, `/health` → 200)
+- `hypha-server/.gitignore` (dist/, node_modules/)
+- `hypha-server/pnpm-lock.yaml` (Dependabot-Reproduzierbarkeit, per 8.5)
+- `bin/hypha-build` (Build-Pipeline-Wrapper, läuft im Container)
+- `bin/dev` (Wrapper für `docker compose run`, auto-builds Image + pnpm-install on first call)
+- `Dockerfile.dev` (Eclipse-Temurin-JDK-21-jammy-Base + Node 24 + pnpm 10.33.0 + Clojure 1.12.4.1618 + Babashka 1.12.215, alle Versionen CI-gepinnt)
+- `docker-compose.dev.yml` (Bind-Mount-Repo + Named-Volumes für `.m2`/`.gitlibs`)
+- `.github/dependabot.yml` (per Plan-Section 8.5)
+- `.carve/ignore` (zwei Hypha-Vars unter Patches-pending-Begründung)
 
-**Verifiziert / nutzt Annahme:** A8 — V4 war manuell (Chat-Test 2026-05-27). M0 reproduziert das Pattern in der CI-fähigen Build-Pipeline, sodass `--config-merge`-Propagation pro Build verifizierbar bleibt.
+**Verifiziert / nutzt Annahme:** A8 — V4 war manuell (Chat-Test 2026-05-27). M0 reproduziert das Pattern im containerisierten `bin/hypha-build`, der per Smoke-Grep verifiziert dass `HYPHA-MODE` propagiert. Damit ist A8 ab M0 in jedem Build automatisiert verifiziert.
 
-**Warum vor M1 nötig:** M1 braucht funktionierende Build-Infrastruktur. M0 ist Voraussetzung, **und** trägt die wiederkehrende A8-Verifikation.
+**Warum vor M1 nötig:** M1 braucht funktionierende Build-Infrastruktur und reproduzierbare Dev-Umgebung. M0 ist Voraussetzung **und** trägt die wiederkehrende A8-Verifikation.
+
+**Dev-Workflow nach M0:**
+- `bin/dev` — interaktive Shell im Container
+- `bin/dev bin/hypha-build` — Hypha-Build laufen lassen
+- `bin/dev bb dev:lint-and-test` — voller Lint+Test-Preflight
+- `bin/dev bb dev:test -v <ns/test-name>` — Einzeltest
+- `bin/dev pnpm --dir hypha-server dev` — hypha-server Dev-Mode mit tsx-watch
+- Erstaufruf baut das Image (~5 min) und macht ein erstes `pnpm install` mit native-Module-Compile (~2 min). Caches in Named-Volumes überleben Container-Removal.
 
 **DoD:**
-- `bin/hypha-build` produziert `static/js/main.js` mit `"frontend.hypha.config.HYPHA_MODE":true` im `CLOSURE_DEFINES`
-- `pnpm --dir hypha-server start` läuft, `curl localhost:80/health` → 200
-- `bb dev:lint-and-test` weiterhin grün
+- `bin/dev bin/hypha-build` produziert `static/js/main.js` mit `"frontend.hypha.config.HYPHA_MODE":true` im `CLOSURE_DEFINES`
+- Container-Toolchain verifiziert: Node 24.x ∧ pnpm 10.33.0 ∧ Java 21 ∧ Clojure 1.12.4.1618 ∧ Babashka 1.12.215
+- `bin/dev pnpm --dir hypha-server start` läuft, `curl localhost:3000/health` → 200 (Container exponiert Port 3000; M3-Production-Image bindet 80)
+- `bin/dev bb dev:lint-and-test` Lints alle grün: clj-kondo (0/0), carve (clean), large-vars (clean), ns-docstrings (alle dokumentiert), worker-frontend-separate (clean), lang-validate (alles ok)
+- Test-Lauf zeigt keine durch Hypha-Code verursachten Regressions (Hypha-Code referenziert nur in eigenen Top-Level-Verzeichnissen, kein bestehender Test wird durch Hypha-Pfad ausgelöst)
 - `git status` zeigt nur neue Hypha-Dateien
 
-**Dauer:** 0.5–1 Tag
+**Dauer:** 1–1.5 Tage (Docker-Setup erhöht initial leicht, spart aber alle nachgelagerten Toolchain-Diskrepanzen)
+
+**Bruchrisiko (Docker-spezifisch):**
+- **Volume-Permissions:** Named-Volumes auf bind-mounted Subpfaden werden root-owned (Docker propagiert Bind-Owner nicht). Workaround: Workspace-interne Caches (`.cpcache`, `.shadow-cljs`, `node_modules`) im Bind-Mount lassen, Named-Volumes nur für `/home/dev/{.m2,.gitlibs}`. Lokal validiert.
+- **Native-Modules:** `keytar` (Linux-keychain) braucht python3 + libsecret-1-dev zum Compile. Im Dockerfile.dev installiert.
+- **UID/GID-Mismatch:** Wenn Host-User nicht UID 1000, muss `bin/dev` HOST_UID/HOST_GID forwarden (eingebaut).
+- **Plattform-Spezifik:** Auf macOS/Windows haben Bind-Mounts höhere Latenz; Phase 1 wird primär auf Linux getestet.
 
 ### M1 — Login-Spike + V3-Verifikation
 
