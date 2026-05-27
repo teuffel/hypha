@@ -60,6 +60,7 @@ if (!existsSync(adapterPath)) {
       port: 0,
       host: "127.0.0.1",
       username: "hypha-user",
+      userUuid: "00000000-0000-0000-0000-000000000001",
       email: "user@hypha.test",
       accessCodeHash: await bcrypt.hash(ACCESS_CODE, 4),
       jwtIssuer: "https://hypha.integ/issuer",
