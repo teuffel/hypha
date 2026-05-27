@@ -74,7 +74,7 @@ Vier strukturelle Lücken im aktuellen HEAD-develop verhindern das:
 |---|---|---|
 | **U20** | Mehrere User auf demselben Graph (Sharing, ACLs) | Phase 2 | Multi-User-Identitätsmodell + Access-Control-DSL fehlt. Hypha-Phase-1 hat nur einen User |
 | **U21** | Echtzeit-Cursor / Live-Presence zwischen Browser A und B desselben Users | Phase 2 | RTC-WebSocket-Broadcast-Logik im Node-Adapter müsste Single-User-Multi-Session bewusst unterstützen. Wird gleichzeitig mit Multi-User entworfen |
-| **U22** | E2EE mit Recovery-Phrase und Key-Sync zwischen Geräten | Phase 2 | Recovery-Phrase-UI + Key-Persistierung (im Server? im HttpOnly-Cookie?) ist eigener Designraum. Phase 1.6 deaktiviert E2EE per Default — wer es will, übernimmt selbst die Key-Verteilung |
+| **U22** | _Automatisches_ E2EE-Key-Sync zwischen Geräten (Recovery-Phrase oder passwortlose KDF) | Phase 2 | V9 hat aufgedeckt: E2EE-Cross-Device mit User-gewähltem Password funktioniert in Phase 1.6 schon (nach M8+M9). Phase-2-Material ist nur die _automatische_ Variante ohne manuelle Password-Eingabe pro Device |
 | **U23** | Auto-Migration aller bestehenden lokal-only-Graphen auf den Server beim ersten Login | Phase 2 | Braucht Konflikt-Resolution (was wenn der Graph-Name bereits auf dem Server existiert?). Phase 1.6 macht es per Klick im Multi-Graph-Picker (U5) |
 | **U24** | Mobile-App-Sync (Capacitor) | Phase 2+ | Separate Build-Pipeline, eigener OPFS-Adapter-Layer |
 | **U25** | Persistente JWT-Signing-Keys über Container-Restart hinweg | Phase 2 | Phase 1 hat bewusst ephemere Keys (`operations.md:73-77`). Container-Restart heute = User loggt sich neu ein, akzeptabel |
@@ -189,8 +189,8 @@ wer dem eigenen Server vertraut, braucht keine clientseitige Verschlüsselung.
 ## 3. Verifikations-Probes (vor M8)
 
 Vor der Implementation: Annahmen-Probes nach Phase-1-Plan-Vorbild. Jede
-Probe ist ein eigener, kurzer manueller Test. Ergebnisse werden zurück in
-diesen Plan committed (separater Commit `docs(hypha): V7-V10 verified`).
+Probe ist ein eigener, kurzer manueller oder statischer Test. V7-V9
+statisch verifiziert am 2026-05-27 vor M8-Start. V10 läuft nach M9.
 
 ### V7 — `/health`-Konflikt verifizieren
 
@@ -198,55 +198,134 @@ diesen Plan committed (separater Commit `docs(hypha): V7-V10 verified`).
 ein eventuell durchgereichtes `/health` zum Node-Adapter, weil Fastify-Routes
 Priorität haben über Catch-All-Statics.
 
-**Probe:**
-```bash
-# In Hypha-Server-Container
-curl -s http://localhost:3030/health
-# Erwartung: {"status":"ok"}, nicht die node-adapter health-Antwort
+**Probe (statisch):** `hypha-server/test/proxy.test.ts:158-170` enthält
+bereits den Test:
+```typescript
+test("/auth/* — auth endpoints are NOT proxied, /sync prefix is", async () => {
+  ...
+  const res = await fetch(`${baseUrl}/health`);
+  assert.equal(res.status, 200);
+  assert.equal(upstream.calls.length, 0, "upstream must not see /health");
+});
 ```
 
-**Implikation:** Wenn V7 grün, kann `/graphs`, `/e2ee` etc. einfach
-zusätzlich proxied werden ohne Spezial-Routing.
+**Ergebnis: ✅ verifiziert.** Existierender Test ist Teil der 39/40 grünen
+Hypha-Server-Unit-Tests. `/health` als exact-route gewinnt gegen
+`@fastify/http-proxy` (Prefix-Match) und gegen `@fastify/static` (Catch-All).
+Phase-1.6-Routes `/graphs`, `/e2ee`, `/assets` folgen demselben
+Prefix-Match-Pattern wie heute `/sync` und `/asset` und werden den
+existierenden auth-Routes nicht in die Quere kommen.
+
+**Implikation:** M8 kann die drei zusätzlichen Routen via
+`fastifyHttpProxy` mit ihren jeweiligen Prefixen registrieren ohne
+Spezial-Routing.
 
 ### V8 — Asset-Path-Mismatch reproduzieren
 
 **Annahme:** Asset-Sync ist in Phase 1.5 schon broken, weil Frontend
 `/assets/` (plural) und Hypha-Server `/asset/` (singular) routet.
 
-**Probe:** In einem Hypha-Cloud-Graphen ein Bild einfügen, im DevTools-Netzwerk-Tab
-prüfen welche URL Logseq POSTet. Erwartung: `PUT /assets/<graph-id>/<uuid>.png` → 404.
+**Probe (statisch):**
 
-**Implikation:** M8 muss `/asset/` durch `/assets/` ersetzen, ODER beides
-proxien. Beides ist sauberer (rückwärtskompatibel falls irgendein Pfad
-es alte Variante doch erwartet).
+| Komponente | Pfad-Konvention | Code-Beleg |
+|---|---|---|
+| Frontend baut URL | `/assets/<graph-id>/<asset-uuid>.<type>` | `src/main/frontend/worker/sync/large_title.cljs:60-62` |
+| Node-Adapter routet | `(string/starts-with? path "/assets/")` | `deps/db-sync/src/logseq/db_sync/node/dispatch.cljs:38` und `worker/dispatch.cljs:86` |
+| Adapter-Handler erwartet | `(let [prefix "/assets/"]` | `deps/db-sync/src/logseq/db_sync/worker/handler/assets.cljs:94` |
+| Hypha-Server proxied | `prefix: "/asset"` (singular!) | `hypha-server/src/proxy.ts:36` |
 
-### V9 — RSA-Key-Setup-Verhalten ohne E2EE
+**Ergebnis: ✅ verifiziert.** Der Mismatch ist real und kommt aus
+Phase-1-M2 — `proxy.ts:36` wurde nie gegen einen echten Asset-Upload
+verifiziert. Asset-Uploads vom Browser landen auf `localhost:3030/assets/...`,
+hypha-server's Static-Handler antwortet 404, der db-sync-Adapter sieht
+nie einen Asset-Request.
+
+**Implikation:** M8 ersetzt `/asset` durch `/assets` (Plural). Beibehalten
+der singular-Variante ist nicht nötig — kein Code-Pfad konsumiert sie.
+Existierender `proxy.test.ts:141-156` Test für `/asset/*` muss zu
+`/assets/*` aktualisiert werden (existierender Test wird so von "deckt
+ein nicht-genutztes Routing ab" zu "deckt das tatsächlich genutzte
+Routing ab" umgebaut).
+
+### V9 — RSA-Key-Verhalten zwischen Browsern
 
 **Annahme:** `<get-remote-graphs:316` ruft `<ensure-user-rsa-keys-on-server!`
 unkonditioniert. Wenn der User noch keine Keys hat, werden welche generiert.
 Browser B würde dann andere Keys generieren als Browser A → Konflikt auf
 `/e2ee/user-public-key`.
 
-**Probe:** Im Stock-Logseq.com einen non-E2EE-Cloud-Graph anlegen, dann
-in einem Inkognito-Tab dieselbe Identität (per dev-Token-Injection)
-"einloggen" und prüfen, ob `<get-remote-graphs` Erfolg hat.
+**Probe (statisch):** Drei zusammenhängende Code-Stellen:
 
-**Alternative Probe (in Hypha nach M8):** Direkt prüfen, welches Verhalten
-der db-sync-Adapter bei `POST /e2ee/user-keys` mit bereits existierenden
-Keys zeigt — überschreibt er, lehnt er ab, oder lässt er den ersten
-gewinnen?
+1. Server-Side bei `GET /graphs`
+   (`deps/db-sync/src/.../worker/handler/index.cljs:93-103`):
+   ```clojure
+   :graphs/list
+   (p/let [graphs (index/<index-list db user-id)
+           user-rsa-key-pair (index/<user-rsa-key-pair db user-id)
+           user-rsa-keys-exists?
+           (and (string? (:public-key user-rsa-key-pair))
+                (string? (:encrypted-private-key user-rsa-key-pair)))]
+     (http/json-response :graphs/list
+                         {:graphs graphs
+                          :user-rsa-keys-exists? user-rsa-keys-exists?}))
+   ```
+   Server gibt `user-rsa-keys-exists?` als Antwort-Flag mit zurück.
 
-**Implikation für M9:** Falls die Adapter-Logik Keys bei wiederholtem
-POST überschreibt, bricht Cross-Device. Workaround: `<ensure-user-rsa-keys-on-server!`
-in Hypha-Mode skippen (Patch #5, falls nötig). Oder: in Hypha
-einen Server-Side-RSA-Key-Override, der Stable-pro-User bleibt.
+2. Client-Side in `<ensure-user-rsa-keys-on-server!`
+   (`src/main/frontend/handler/db_based/sync.cljs:146-148`):
+   ```clojure
+   (defn- <ensure-user-rsa-keys-on-server!
+     [{:keys [server-rsa-keys-exists?]}]
+     (if (not= false server-rsa-keys-exists?)   ; <-- GUARD
+       (p/resolved nil)                          ; no-op when keys exist
+       ...generate-and-upload...))
+   ```
+   Wenn der Server-Flag `true` ist, macht der Client gar nichts.
 
-Probe-Ergebnis entscheidet, ob M9 nur 2 Patches oder 3 Patches braucht.
+3. Client reicht Flag aus Server-Response durch
+   (`sync.cljs:316`):
+   ```clojure
+   _ (<ensure-user-rsa-keys-on-server! {:server-rsa-keys-exists?
+                                        (:user-rsa-keys-exists? resp)})
+   ```
+
+**Ergebnis: ✅ verifiziert — und besser als angenommen.** Die Annahme
+"Browser B würde überschreiben" war falsch. Der existierende Client-Code
+ist bereits cross-device-safe:
+- Browser A generiert Keys, uploaded
+- Browser B holt `/graphs`, sieht `:user-rsa-keys-exists? true`
+- Browser B ruft `<ensure-user-rsa-keys-on-server!` → no-op
+- Keine Überschreibung
+
+**Bonus-Erkenntnis (E2EE-Cross-Device-Realität):** Der
+`encrypted_private_key` ist nicht zufällig client-local verschlüsselt
+sondern mit einem **User-gewählten E2EE-Password** via PBKDF2+AES
+(`src/main/frontend/common/crypt.cljs:87-148`). Das heißt:
+- E2EE-Cross-Device ist technisch möglich — User muss in Browser B
+  dasselbe E2EE-Password eintippen, dann ist der server-gespeicherte
+  encrypted_private_key entschlüsselbar (`:rtc/decrypt-user-e2ee-private-key`
+  Event in `handler/events/rtc.cljs:26`)
+- Die User-Reise ist aber: "Cloud-Sync-Haken UND E2EE-Haken anklicken,
+  Password merken, in jedem Device eintippen". Das ist zwei Stufen UX
+  komplexer als "nur Cloud-Sync-Haken".
+
+**Implikation für Phase 1.6:**
+- Patch #5 (Hypha-skip von `<ensure-user-rsa-keys-on-server!`) ist
+  **nicht nötig**. Der existierende Guard reicht.
+- Patches-Inventar bleibt bei 4/20.
+- E2EE-Default-Off in `new-db-graph-inner` (Patch #4) bleibt richtig
+  als Default — die Mehrheit der Hypha-Personal-Cloud-User braucht
+  E2EE nicht (sie vertrauen ihrem eigenen Server).
+- **U22 wird umformuliert** (s.u.): E2EE-Cross-Device ist NICHT
+  Phase-2-blocker, sondern Phase-1.6-optional. Wer das E2EE-Password
+  manuell verwaltet, kann es heute schon (nach M8+M9) nutzen.
+  Phase-2-Material ist nur das _automatische_ Key-Sync via
+  Recovery-Phrase oder passwortlose KDF.
 
 ### V10 — End-to-End auf Localhost manuell durchspielen
 
-**Annahme (post-M8+M9):** Mit den Server-Routes und Client-Defaults zusammen
-funktioniert der User-Use-Case U1+U3 manuell vor dem automatisierten Test.
+**Status:** 🚫 Blockiert auf M8+M9-Implementation. Diese Probe ist
+post-M9 / pre-M10. Nach Code-Lieferung von M8+M9 manuell durchspielen:
 
 **Probe:**
 1. Hypha-Server starten, Firefox auf localhost:3030, Access-Code, "MeinTestgraf" erstellen (Cloud-Haken jetzt Default-On)
@@ -435,9 +514,9 @@ Alle anderen Phase-1.6-Code-Änderungen sind additiv:
 
 ### R1 — `<ensure-user-rsa-keys-on-server!`-Konflikt zwischen Devices
 
-V9 muss vor M9 klären. Worst-Case (Adapter überschreibt Keys bei zweitem POST):
-zusätzlicher Patch in `sync.cljs:316` der den Aufruf im Hypha-Mode für
-nicht-E2EE-Graphen skippt. Würde Patches-Inventar auf 5/20 bringen.
+**Aufgelöst durch V9.** Existierender Client-Guard (`sync.cljs:148`)
+plus Server-Flag in `:graphs/list`-Response macht das System bereits
+cross-device-safe. Kein Patch #5 nötig.
 
 ### R2 — User-Identitäts-Konsistenz im Single-User-Hypha-Modell
 
