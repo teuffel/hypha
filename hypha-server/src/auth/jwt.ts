@@ -28,7 +28,13 @@ export async function signHyphaJwt(config: HyphaRuntime): Promise<string> {
     name: config.username,
   })
     .setProtectedHeader({ alg: "RS256", kid: config.signingKid })
-    .setSubject("hypha-user")
+    // sub is a UUID-formatted string. Logseq's worker pipeline takes it
+    // through (uuid sub) to materialize the created-by user page, whose
+    // :block/uuid must pass the search index's UUID-format validator
+    // (deps/common/src/logseq/common/util.cljs uuid-string?). A non-UUID
+    // value here breaks graph persistence with a cryptic "Search
+    // upsert-blocks wrong data" error from the db-worker.
+    .setSubject(config.userUuid)
     .setIssuer(config.jwtIssuer)
     .setAudience(config.jwtAudience)
     .setExpirationTime(config.jwtTtl)

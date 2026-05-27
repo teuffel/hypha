@@ -23,6 +23,21 @@ const LOGIN_INPUT = `${HYPHA_LOGIN_FORM} input[type="password"]`;
 const LOGIN_SUBMIT = `${HYPHA_LOGIN_FORM} button[type="submit"]`;
 
 test.describe("Hypha headless auth smoke", () => {
+  test("page is cross-origin isolated (sqlite-wasm + OPFS prerequisite)", async ({ page }) => {
+    await page.goto("/");
+    // sqlite-wasm needs SharedArrayBuffer for OPFS writes. Browsers gate it
+    // behind cross-origin isolation, which in turn requires
+    // Cross-Origin-Opener-Policy + Cross-Origin-Embedder-Policy on the
+    // page response. Without these, Logseq's graph persistence + imports
+    // silently fail with "Cannot write DOMException" inside the worker.
+    const isolation = await page.evaluate(() => ({
+      crossOriginIsolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated,
+      sharedArrayBuffer: typeof (globalThis as { SharedArrayBuffer?: unknown }).SharedArrayBuffer,
+    }));
+    expect(isolation.crossOriginIsolated).toBe(true);
+    expect(isolation.sharedArrayBuffer).toBe("function");
+  });
+
   test("POST /auth/login returns a well-formed Hypha JWT", async ({ request }) => {
     const res = await request.post("/auth/login", { data: { code: ACCESS_CODE } });
     expect(res.status()).toBe(200);
@@ -33,7 +48,11 @@ test.describe("Hypha headless auth smoke", () => {
     expect(parts).toHaveLength(3);
 
     const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"));
-    expect(payload.sub).toBe("hypha-user");
+    // sub is the UUID-formatted Hypha user identifier. Critical that this
+    // is UUID-shaped: Logseq's worker pipeline runs (uuid sub) to create
+    // the created-by user page, whose UUID then has to survive the
+    // search-index validator. Non-UUID sub breaks graph persistence.
+    expect(payload.sub).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(payload.iss).toBe("http://localhost");
     expect(payload.aud).toBe("hypha-test");
     expect(payload["cognito:username"]).toBe("hypha-user");

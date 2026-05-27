@@ -15,6 +15,18 @@ export interface HyphaConfig {
   host: string;
   /** Stable username burned into JWTs for the single-user Phase-1 setup. */
   username: string;
+  /**
+   * UUID-formatted JWT `sub` claim. Logseq's worker pipeline calls
+   * `(uuid (:sub decoded-id-token))` to materialize a per-user "created-by"
+   * page in the graph database; that page's :block/uuid then flows into
+   * the search index, which strictly validates UUID format. A non-UUID
+   * `sub` like "hypha-user" breaks search-upsert with
+   * "Search upsert-blocks wrong data" inside the db-worker.
+   *
+   * Default is a synthetic Phase-1 single-user UUID. Override via
+   * HYPHA_USER_UUID if you ever need to migrate identities.
+   */
+  userUuid: string;
   email: string;
   /** bcryptjs hash of the access code. Verified by routes/login.ts. */
   accessCodeHash: string;
@@ -69,6 +81,7 @@ export async function loadConfig(): Promise<HyphaRuntime> {
     port: Number(envOr("PORT", "3000")),
     host: envOr("HOST", "0.0.0.0"),
     username: envOr("HYPHA_USERNAME", "hypha-user"),
+    userUuid: envOr("HYPHA_USER_UUID", "00000000-0000-0000-0000-000000000001"),
     email: envOr("HYPHA_USER_EMAIL", "user@hypha.local"),
     accessCodeHash: requireEnv("HYPHA_ACCESS_CODE_HASH"),
     jwtIssuer: requireEnv("HYPHA_JWT_ISSUER"),
