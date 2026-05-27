@@ -15,7 +15,14 @@ architecture document.
 - Your data lives in plain SQLite files on your disk, not a third-party
   cloud.
 - One-person access via an access code you set.
-- No realtime collaboration (that's Phase 2 territory).
+- **Multi-device for the same user**: type the access code in Firefox on
+  your laptop, again in Chrome on your desktop, and you see the same
+  graphs in both. New graphs default to cloud-sync; toolbar buttons let
+  you upload pre-existing local graphs at any time.
+- No realtime collaboration (that's Phase 2 territory — two browsers
+  editing live and seeing each other's cursor). What works today is
+  sequential: edit in one device, switch to another, the changes are
+  there.
 
 ## What you'll need
 
@@ -175,15 +182,22 @@ Your data is untouched. Outstanding login sessions are invalidated by
 the restart (Phase-1 uses ephemeral JWT signing keys); re-login takes
 one click of the access-code modal.
 
-## Things that don't work yet (Phase-1 scope)
+## Things that don't work yet
 
-- Multi-user. The access code grants whoever knows it the single
-  `hypha-user` identity.
-- Realtime collaboration. Phase 2.
-- Mobile apps. The Hypha frontend is a regular web app; mobile clients
-  via Capacitor are not built in M0-M4.
-- Plugin marketplace. Plugins that don't depend on the cloud should
-  still work but aren't tested.
+- **Multi-user**. The access code grants whoever knows it the single
+  `hypha-user` identity. Phase 2.
+- **Realtime collaboration**. Two devices editing the same graph live
+  and seeing each other's cursor. Phase 2.
+- **Automatic E2EE key sync**. Hypha defaults to E2EE-off because a
+  password-encrypted private key would need re-entry on every device.
+  You can still flip the E2EE checkbox per graph manually — but then
+  you take responsibility for typing the same E2EE password on each
+  device. Recovery-phrase-based automatic sync is Phase 2.
+- **Mobile apps**. The Hypha frontend is a regular web app; Capacitor
+  mobile clients are not built in M0-M10.
+- **Persistent JWT signing keys across container restarts**. Phase 1
+  uses ephemeral keys; a restart invalidates outstanding sessions but
+  the HttpOnly cookie lets re-login happen in one click. Phase 2.
 
 ## Where to ask for help
 
