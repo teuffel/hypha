@@ -106,7 +106,7 @@ Persistent-Disk-Cache für Phase 1.5 — das wäre M-Scope-Premature).
 - Plugin-Bundles sind oft mehrere MB — server-side TTL reduziert Bandwidth bei Multi-Device-Setups
 - Vorbereitung für Phase 2: dieselbe Proxy-Schicht wird dort persistent-disk-cached für Air-gapped Multi-User-Setups
 
-### 2.2 CLJS-Konfig: Marketplace-URLs umlenken
+### 2.2 CLJS-Konfig: Marketplace-URLs umlenken (via fetch-Interception)
 
 `frontend/handler/plugin.cljs` hat hardcoded URLs:
 
@@ -121,19 +121,44 @@ Plus `common/plugin.cljs:12`:
 (util/node-path.join "https://plugins.logseq.io/r2" repo version)
 ```
 
-Diese Konstanten würden im Hypha-Build idealerweise auf Hypha-Proxy-Pfade
-zeigen. **Aber:** das wäre Upstream-Patches (3+) — gegen die Phase-1-Disziplin.
+**V2-Befund (2026-05-27):** alle Plugin-Marketplace-HTTP-Calls gehen letztlich
+durch `window.fetch` — entweder direkt (`common/plugin.cljs:18`) oder via
+`util/fetch` (`util.cljc:212` ruft `(js/fetch url ...)`). Statt CLJS-Konstanten
+zu modifizieren wird `window.fetch` im Hypha-Init monkeypatched mit einem
+prefix-basierten Redirect:
 
-**Stattdessen:** Hypha-Init (`frontend.hypha.init/start!`, schon existiert in
-M1) monkeypatched die URLs zur Laufzeit, BEVOR `init-plugins!` läuft. Setter
-in `state/state` oder via globalem JS-Object.
+```clojure
+;; src/main/frontend/hypha/plugin_init.cljs (Phase-1.5)
+(defn install-fetch-redirect!
+  "Redirect Marketplace + R2-CDN fetches to Hypha-Server proxy routes.
+   Idempotent: skips if already installed (window.fetch.__hyphaWrapped)."
+  []
+  (let [orig (.-fetch js/window)]
+    (when-not (.-__hyphaWrapped orig)
+      (let [wrapped (fn [url & args]
+                      (let [url' (if (string? url)
+                                   (-> url
+                                       (string/replace
+                                        #"^https://raw\.githubusercontent\.com/logseq/marketplace/master/"
+                                        "/plugin-market/")
+                                       (string/replace
+                                        #"^https://plugins\.logseq\.io/r2/"
+                                        "/plugin-cdn/r2/"))
+                                   url)]
+                        (.apply orig js/window (cons url' args))))]
+        (set! (.-__hyphaWrapped wrapped) true)
+        (set! (.-fetch js/window) wrapped)))))
+```
 
-Alternative die kein Monkeypatch braucht: ein `:closure-defines`-Patch für
-die URLs analog `HYPHA-MODE` — null Runtime-Aufwand, plain compile-time Werte.
-Aber `central-endpoint` ist `defonce`, nicht `goog-define`. Müsste also auf
-`goog-define` umgestellt werden → 1 Mini-Hook-Patch in `plugin.cljs`.
+Wird in `frontend.hypha.init/start!` aufgerufen, BEVOR Plugin-Init läuft.
+Filter-by-Prefix → Plugin-eigene Fetches an andere Hosts bleiben unangetastet.
 
-Entscheidung dazu unter Verifikation V2 (siehe unten).
+**Konsequenz: 0 Upstream-Patches für die URL-Umlenkung.**
+
+Alternative (verworfen): `defonce` → `goog-define`-Konvertierung wäre ein
+Mini-Hook-Patch, jedoch fragiler (URL-Konstanten könnten umbenannt werden,
+mehrere Touch-Punkte). Fetch-Interception überlebt Renames durch
+prefix-basiertes Matching.
 
 ### 2.3 Erweiterung von `setup-global-apis-for-web!`
 
@@ -184,7 +209,7 @@ Proxy-Caching-Implementation gar nicht mehr relevant. Verifikation V4 unten.
 | ID | Aussage | Verifikation | Wann |
 |---|---|---|---|
 | P1 | `plugins.logseq.io/r2/<repo>/<ver>` liefert JSON-Manifest mit Plugin-Code-URLs, die ohne Auth fetchbar sind | V1 (curl-Probe gegen 5 bekannte Web-Plugins) | vorab |
-| P2 | URL-Konstanten in `plugin.cljs` lassen sich zur Laufzeit überschreiben (defonce, nicht baked-in) OHNE Upstream-Patch | V2 (CLJS-REPL-Test: rebind via set!) | vorab |
+| P2 | Plugin-Marketplace-Calls gehen alle durch `window.fetch` — Monkey-Patch davon umlenkt ohne Upstream-Patch | V2 (Code-Reading util/fetch + common/plugin.cljs) | vorab |
 | P3 | `setup-global-apis-for-web!` läuft AUSSCHLIESSLICH wenn `lsp-enabled?` true ist — und vor jedem Plugin-Init | V3 (Code-Reading + Bootstrap-Trace) | vorab |
 | P4 | Memory-LRU-Cache im Proxy ist effektiv (Hit-Rate >80% bei realer Nutzung mit 2-3 installierten Plugins, 1h TTL) | V4 (Empirisch: Container starten, top-5 Plugins installieren, Cache-Stats checken) | nach M1 |
 | P5 | Die "zu lange zum Laden"-Warnung verschwindet nach Caching-Proxy + window.apis-Shims (≥ 5 von 7 :web=true-Plugins booten unter 5s) | V5 (Browser-Smoke + Timing) | nach M2 |
@@ -192,29 +217,53 @@ Proxy-Caching-Implementation gar nicht mehr relevant. Verifikation V4 unten.
 
 ## 5. Verifikationen (vorab abzuarbeiten)
 
-### V1 — `plugins.logseq.io/r2`-Probe
+### V1 — `plugins.logseq.io/r2`-Probe — STATUS: GRÜN (2026-05-27)
 
 ```bash
-for repo in logseq/logseq-plugin-tags rebornix/logseq-plugin-tabs; do
-  curl -sI "https://plugins.logseq.io/r2/$repo" | head -5
-  curl -s "https://plugins.logseq.io/r2/$repo" | jq '. | {name, version, urls}'
-done
+$ curl -sI https://plugins.logseq.io/r2/debanjandhar12/logseq-anki-sync
+HTTP 200, TIME 1.5s
+keys: [author, dependencies, description, devDependencies,
+       license, logseq, main, name, repository, scripts]
+main: "dist/index.html"           ← iframe entry path
+logseq.id, logseq.icon            ← Plugin-Manifest-Block
 ```
 
-Erwartete Antwort: HTTP 200 + JSON mit `package.json`-artigem Inhalt + Asset-URLs.
+Befund: R2-Endpoint ist ein GitHub-API-Wrapper (502 mit "GitHub API request
+failed (404)" bei nicht-existierendem Repo). Bestätigt Cache-Bedarf (60/hr
+unauth Rate-Limit auf GitHub-API) und Service-Drift-Risiko (2 von 3 Probes
+timed out). Hypha-Cache schützt vor beiden.
 
-### V2 — URL-Konstanten überschreibbar?
+### V2 — Window-Fetch-Interception statt URL-Override — STATUS: GRÜN (2026-05-27)
 
-Im REPL gegen einen laufenden Hypha-Build:
+**Befund beim Code-Reading von `util/fetch` (util.cljc:212):**
 
 ```clojure
-;; Vor init-plugins! ausführbar?
-(set! frontend.handler.plugin/central-endpoint "http://localhost:3030/plugin-market/")
+#?(:cljs
+   (defn fetch
+     ([url opts on-ok on-failed]
+      (-> (js/fetch url (bean/->js opts))   ;; ruft window.fetch direkt
+          (.then ...)))))
 ```
 
-CLJS-Compiler behandelt `defonce`-Vars als read-only über `set!`? Falls JA → kein
-Patch nötig (Hypha-Init überschreibt nach Bootstrap, vor `init-plugins!`). Falls
-NEIN → 1 Mini-Hook-Patch (`defonce` → `goog-define`).
+UND `common/plugin.cljs:18`:
+```clojure
+^js res (js/window.fetch url)
+```
+
+→ **alle Marketplace-Routen gehen letztlich durch `window.fetch`**.
+Hypha kann das im Boot monkeypatchen mit prefix-basiertem Redirect (siehe
+Architektur §2.2). Kein `defonce`-Override, kein Upstream-Patch.
+
+**Vergleich Plan-Original vs. Plan-Update:**
+
+| Eigenschaft | defonce→goog-define | fetch-interception |
+|---|---|---|
+| Patches gegen Upstream | +1 Mini-Hook | **0** |
+| Drift-Resilienz | bricht bei URL-Rename | überlebt durch Prefix-Filter |
+| Touch-Punkte | 2 (plugin.cljs:55, common/plugin.cljs:12) | 1 (hypha.plugin-init) |
+| Debugging-Klarheit | direkt | +1 Stack-Frame pro Fetch |
+
+→ Fetch-Interception gewählt. Phase-1.5 Patches-Budget: **0**.
 
 ### V3 — Bootstrap-Ordering von `setup-global-apis-for-web!`
 
@@ -262,12 +311,12 @@ Beide Latenzen <2s erwartet. Wenn höher: Hinweis für Phase-2-Disk-Cache.
 | Plugin-CDN-Proxy | `hypha-server/src/routes/plugin-cdn.ts` | TypeScript | 0 |
 | Memory-LRU-Cache | `hypha-server/src/plugin-cache.ts` | TypeScript | 0 |
 | Hypha-Plugin-Init | `src/main/frontend/hypha/plugin_init.cljs` | ClojureScript | 0 (additive ns) |
-| URL-Override (falls Patch nötig) | `src/main/frontend/handler/plugin.cljs:55–58` | ClojureScript | **Patch #3** (eventuell) |
+| Fetch-Interception (URL-Redirect) | `src/main/frontend/hypha/plugin_init.cljs` | ClojureScript | 0 (V2-confirmed) |
 | Build-Flag-Erweiterung | `bin/hypha-build` | Bash | 0 (additive --config-merge) |
 | Headless-Plugin-Smoke | `hypha-server/test/playwright/plugin-marketplace.spec.ts` | TypeScript | 0 |
 
-**Maximal 1 zusätzlicher Patch** (Patch #3) gegen Upstream — und nur falls V2
-zeigt dass die URL-Konstanten zur Laufzeit nicht überschreibbar sind.
+**Patches-Budget Phase-1.5: 0.** (V2 hat die fetch-interception-Lösung bestätigt
+und damit den potenziell-eskalierenden Patch #3 obsolet gemacht.)
 
 ## 7. Meilensteine
 
@@ -294,7 +343,7 @@ zeigt dass die URL-Konstanten zur Laufzeit nicht überschreibbar sind.
 
 ### M6 — CLJS-Stubs + Plugin-Init (≈ 2 Tage)
 
-**Scope:** Plugin-Bootstrap im Hypha-Mode mit URL-Override + `window.apis`-Stubs.
+**Scope:** Plugin-Bootstrap im Hypha-Mode mit fetch-Interception + `window.apis`-Stubs.
 
 **Hypha-Dateien neu:**
 - `src/main/frontend/hypha/plugin_init.cljs` (Hypha-Plugin-Bootstrap-Code)
@@ -302,10 +351,10 @@ zeigt dass die URL-Konstanten zur Laufzeit nicht überschreibbar sind.
 **Hypha-Dateien erweitert:**
 - `src/main/frontend/hypha/init.cljs` (ruft `plugin_init/setup!` falls `lsp-enabled?`)
 
-**Upstream-Berührung:** 0 (V2 positiv) ODER **+1 Mini-Hook (Patch #3)** falls V2 negativ.
+**Upstream-Berührung:** 0 (V2-GRÜN bestätigt fetch-interception ohne Patch).
 
 **DoD:**
-- Browser-Console: `frontend.handler.plugin.plugins_url === "http://localhost:3030/plugin-market/plugins.json"` (URL umgelenkt)
+- Browser-Network-Tab: `GET https://raw.githubusercontent.com/.../plugins.json` wird umgeleitet zu `GET /plugin-market/plugins.json` (Interceptor aktiv)
 - `js/window.apis.openExternal("https://example.com")` öffnet neuen Tab
 - Settings → Plugins → Marketplace lädt + zeigt Plugin-Karten in <2s
 - Mindestens 1 Plugin installiert lassen sich + dessen Slash-Command/UI ist aktiv
@@ -329,24 +378,27 @@ zeigt dass die URL-Konstanten zur Laufzeit nicht überschreibbar sind.
 
 ```
 Phase 1 (M0-M4 + Polish):    2 Mini-Hook-Patches  (#1 + #2)
-Phase 1.5 (M5-M7):           0 oder +1 (Patch #3, defonce→goog-define falls V2 negativ)
+Phase 1.5 (M5-M7):           0  (V2-bestätigt: fetch-interception ersetzt defonce-override)
 ─────────────────────────────────────
-Phase-1.5-Total:             2 oder 3 von 20 (Smell-Schwelle = 20)
+Phase-1.5-Total:             2 von 20 (10% der Smell-Schwelle, unverändert gegenüber Phase 1)
 ```
 
-Aktualisierte HYPHA_PATCHES.md bekäme dann Patch #3 mit Anchor-Check-Eintrag in `.github/scripts/hypha-patch-anchors.sh`.
+HYPHA_PATCHES.md bleibt unverändert. `.github/scripts/hypha-patch-anchors.sh`
+braucht keinen neuen Eintrag.
 
 ## 9. CI-Erweiterung
 
 - `.github/workflows/hypha-build.yml` ergänzt: `pnpm --dir hypha-server exec playwright test test/playwright/plugin-marketplace.spec.ts`
 - `.github/workflows/upstream-sync.yml` ergänzt: gleicher Playwright-Test im Sync-Smoke-Gate (Drift-Detektion für Upstream-Marketplace-Format-Änderungen)
 
-Falls Patch #3 nötig: `.github/scripts/hypha-patch-anchors.sh` bekommt:
-```bash
-check "patch-3: central-endpoint goog-define" \
-      "rg -c 'goog-define central-endpoint' src/main/frontend/handler/plugin.cljs" \
-      "1"
-```
+Da Phase 1.5 keinen neuen Patch einführt, braucht `hypha-patch-anchors.sh`
+keinen zusätzlichen Check. Die zwei bestehenden Checks (Patch #1 + #2) bleiben
+authoritativ.
+
+**Drift-Schutz für fetch-interception:** der Playwright-Test in M7 prüft
+implizit dass der Interceptor noch greift (Network-Tab zeigt Hypha-Proxy-URLs
+statt Upstream). Falls Upstream irgendwann von `window.fetch` zu z.B.
+`window.XMLHttpRequest` wechselt, fällt der Test sofort aus.
 
 ## 10. Operationale Aspekte (Hypha-Deployment)
 
@@ -359,14 +411,14 @@ check "patch-3: central-endpoint goog-define" \
 | Aspekt | Stand |
 |---|---|
 | Architekturbasis | Web-Plugin-System in Logseq schon vollständig, Hypha proxied + shimmt nur |
-| Scope-Wahl | S — Caching-Proxy + window.apis-Stubs |
-| Patches-Budget | 2 (Phase 1) + 0 oder 1 (Phase 1.5) = 2 oder 3 von 20 |
+| Scope-Wahl | S — Caching-Proxy + window.apis-Stubs + fetch-Interception |
+| Patches-Budget | 2 (Phase 1) + 0 (Phase 1.5) = **2 von 20** (unverändert) |
 | Empirische Daten | 550 Marketplace-Plugins, 276 web-kompatibel; beide Endpoints CORS-OK |
 | Annahmenkatalog | P1-P6 spezifiziert |
-| Verifikationen | V1-V6 vor jedem Meilenstein verbindlich |
-| Meilensteine | 3 (M5 Proxy + M6 Stubs + M7 CI-Smoke), Σ ≈ 1 Woche |
-| Risiko-Stelle | V2 — URL-Override via Runtime vs. defonce-Patch |
+| Verifikationen | V1 grün, V2 grün (vorab); V3-V6 milestone-gated |
+| Meilensteine | 3 (M5 Proxy + M6 Init + M7 CI-Smoke), Σ ≈ 1 Woche |
+| Risiko-Stellen | V2 hat fetch-interception als 0-Patch-Lösung etabliert; verbleibendes Risiko: M5-Cache-Hit-Rate (V4) |
 | Test-Surface | 19 hypha-server + neue plugin-cache + plugin-proxy + 1 Playwright |
 | CI-Erweiterung | hypha-build.yml + upstream-sync.yml |
 
-**Nächster Schritt:** V1 + V2 verifizieren (≈ 1h Arbeit), dann M5 starten.
+**Nächster Schritt:** M5 starten (Marketplace-Proxy + Cache in hypha-server).
