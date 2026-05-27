@@ -43,7 +43,19 @@ const config = await loadConfig();
 const syncUpstreamUrl = `http://127.0.0.1:${config.dbSyncInternalPort}`;
 const jwksUrl = `http://127.0.0.1:${config.port}/auth/jwks`;
 
-const app = await buildApp({ config, staticDir, syncUpstreamUrl });
+// Phase 1.5 plugin marketplace + R2 CDN proxy upstreams. Both endpoints are
+// CORS-enabled and the browser could call them directly; we proxy to cache
+// the responses (V1 probe showed 2/3 cold R2 fetches timing out, and the
+// GitHub-API-wrapped R2 endpoint is rate-limited 60/hr unauthenticated).
+const pluginMarketUpstream = "https://raw.githubusercontent.com/logseq/marketplace/master";
+const pluginCdnUpstream = "https://plugins.logseq.io/r2";
+
+const app = await buildApp({
+  config,
+  staticDir,
+  syncUpstreamUrl,
+  pluginUpstream: { marketBase: pluginMarketUpstream, cdnBase: pluginCdnUpstream },
+});
 
 const runner = new DbSyncRunner({
   adapterPath,
