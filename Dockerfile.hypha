@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1.7
+#
+# Hypha production image.
+#
+# Multi-stage build:
+#   1. builder  — full CLJS + TS toolchain; runs `bin/hypha-build --release`.
+#   2. runtime  — slim node:24 image with only the built artifacts + node_modules
+#                 needed at runtime (no JDK, no Clojure, no Babashka, no
+#                 compile-time deps).
+#
+# Resulting image runs the same hypha-server that lives at hypha-server/dist/
+# and spawns the same deps/db-sync node-adapter as a child, with all stateful
+# data going to /data (mountable via docker-compose.hypha.yml).
+#
+# Build:    docker compose -f docker-compose.hypha.yml build
+# Run:      docker compose -f docker-compose.hypha.yml up
+# Shell:    docker compose -f docker-compose.hypha.yml run --rm hypha sh
+
+# Global ARGs hoisted above the first FROM so both stages can reference them
+# (stage-2 FROM uses NODE_MAJOR; per-stage ARG declarations below "re-import"
+# the value into each stage's build-arg scope).
+ARG NODE_MAJOR=24
+ARG CLOJURE_VERSION=1.12.4.1618
+ARG BABASHKA_VERSION=1.12.215
+ARG PNPM_VERSION=10.33.0
+
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 1: builder
+# ────────────────────────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk-jammy AS builder
+
+ARG NODE_MAJOR
+ARG CLOJURE_VERSION
+ARG BABASHKA_VERSION
+ARG PNPM_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+
+# Same toolchain as Dockerfile.dev so a Hypha-built bundle behaves identically
+# whether produced by `bin/dev bin/hypha-build --release` (dev container) or
+# `docker compose -f docker-compose.hypha.yml build` (production image).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gnupg xz-utils \
+        build-essential python3 \
+        libsecret-1-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g pnpm@${PNPM_VERSION}
+
+RUN curl -fsSL "https://download.clojure.org/install/linux-install-${CLOJURE_VERSION}.sh" \
+      -o /tmp/clojure-install.sh \
+ && chmod +x /tmp/clojure-install.sh \
+ && /tmp/clojure-install.sh \
+ && rm /tmp/clojure-install.sh
+
+RUN curl -fsSL https://raw.githubusercontent.com/babashka/babashka/master/install \
+      -o /tmp/bb-install.sh \
+ && bash /tmp/bb-install.sh --version ${BABASHKA_VERSION} \
+ && rm /tmp/bb-install.sh
+
+WORKDIR /build
+
+# Copy only what bin/hypha-build needs. Doing this in one COPY layer (vs many
+# small ones) keeps build-context overhead predictable. `.dockerignore` keeps
+# build outputs + git history out.
+COPY . .
+
+# Run the full release pipeline. This produces:
+#   /build/static/                              browser-loadable bundle
+#   /build/hypha-server/dist/                   compiled TS server
+#   /build/hypha-server/node_modules/           runtime deps (fastify, jose, ...)
+#   /build/deps/db-sync/worker/dist/            node-adapter bundle
+#   /build/deps/db-sync/node_modules/           runtime deps incl. better-sqlite3
+RUN bin/hypha-build --release
+
+# Prune dev-only packages from hypha-server before copying to runtime stage.
+# (better-sqlite3 in deps/db-sync has no devDependencies to prune.)
+RUN pnpm --dir hypha-server prune --prod
+
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 2: runtime
+# ────────────────────────────────────────────────────────────────────────────
+FROM node:${NODE_MAJOR}-bookworm-slim AS runtime
+
+ARG NODE_MAJOR
+
+# better-sqlite3's prebuilt binary downloaded during the builder stage is
+# Linux x64 with no version-specific glibc symbols. node:24-bookworm-slim
+# ships glibc 2.36 which is forward-compatible with the jammy 2.35 the
+# prebuild targets.
+
+ENV NODE_ENV=production \
+    HYPHA_DATA_DIR=/data \
+    PORT=3000 \
+    HOST=0.0.0.0
+
+WORKDIR /opt/hypha
+
+# Hypha-server runtime + compiled artifacts
+COPY --from=builder /build/hypha-server/package.json   ./hypha-server/package.json
+COPY --from=builder /build/hypha-server/dist            ./hypha-server/dist
+COPY --from=builder /build/hypha-server/node_modules    ./hypha-server/node_modules
+
+# db-sync node-adapter bundle + runtime deps (incl. better-sqlite3 native bin)
+COPY --from=builder /build/deps/db-sync/package.json    ./deps/db-sync/package.json
+COPY --from=builder /build/deps/db-sync/worker/dist     ./deps/db-sync/worker/dist
+COPY --from=builder /build/deps/db-sync/node_modules    ./deps/db-sync/node_modules
+
+# Browser bundle: gulp + cljs:release + webpack output combined into static/.
+COPY --from=builder /build/static                       ./static
+
+# Data directory — bind-mounted in compose so contents survive container life.
+RUN mkdir -p /data && chown -R node:node /data /opt/hypha
+
+EXPOSE 3000
+VOLUME ["/data"]
+
+USER node
+
+# Resolve relative repo root from hypha-server/dist/main.js to /opt/hypha.
+# main.ts uses `process.env.HYPHA_DB_SYNC_ADAPTER_PATH ?? resolve(repoRoot, ...)`,
+# repoRoot derives from the file's location, so no override is needed when
+# the layout above is preserved.
+
+CMD ["node", "hypha-server/dist/main.js"]

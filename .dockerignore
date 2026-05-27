@@ -1,0 +1,48 @@
+# Keep Docker build contexts small + reproducible.
+#
+# Used by Dockerfile.hypha (production image) and Dockerfile.dev. Both
+# rebuild dependencies + bundles from scratch inside the image, so nothing
+# below is needed at build time.
+
+# Git history (1+ GB on a fresh clone)
+.git
+.github
+.gitignore
+
+# Build outputs — recreated by `bin/hypha-build` inside the container
+node_modules
+**/node_modules
+static
+hypha-server/dist
+deps/db-sync/worker/dist
+deps/db-sync/worker/dist-test
+dist
+target
+out
+deps/**/target
+deps/**/.cpcache
+
+# Tool caches
+.cpcache
+.shadow-cljs
+.clj-kondo/.cache
+.pnpm-store
+
+# Local data + test artifacts
+data
+tmp
+*.log
+.DS_Store
+.idea
+.vscode
+
+# Local env overrides — never bake into an image
+.env
+.env.local
+.env.*.local
+
+# Dev-only files
+docker-compose.dev.yml
+Dockerfile.dev
+.agents
+.claude
