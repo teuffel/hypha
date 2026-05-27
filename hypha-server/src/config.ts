@@ -32,6 +32,10 @@ export interface HyphaConfig {
   signingKid: string;
   /** Path under which static asset directories are served. */
   staticDirs: { url: string; dir: string }[];
+  /** Internal port the spawned node-adapter listens on (proxy upstream). */
+  dbSyncInternalPort: number;
+  /** Directory where node-adapter persists SQLite + assets. */
+  dataDir: string;
 }
 
 export interface HyphaRuntime extends HyphaConfig {
@@ -74,6 +78,8 @@ export async function loadConfig(): Promise<HyphaRuntime> {
     cookieSecure: envOr("HYPHA_COOKIE_SECURE", "false") === "true",
     signingKid: envOr("HYPHA_SIGNING_KID", "hypha-key-1"),
     staticDirs: [],
+    dbSyncInternalPort: Number(envOr("HYPHA_DB_SYNC_PORT", "8787")),
+    dataDir: requireEnv("HYPHA_DATA_DIR"),
   };
 
   const { privateKey, publicKey } = await generateKeyPair("RS256", {

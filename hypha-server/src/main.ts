@@ -1,12 +1,21 @@
 /**
  * hypha-server entry point.
  *
- * M1 adds auth routes (login/session/logout/jwks) and a statics route on top
- * of M0's /health probe.
+ * M2 adds the db-sync child process + reverse proxy on top of M1's auth +
+ * statics surface.
+ *
+ * Startup ordering:
+ *   1. Load config (env-var parsing, ephemeral key generation).
+ *   2. Build app with auth/statics/proxy routes registered.
+ *   3. Spawn node-adapter; wait for it to print the readiness line.
+ *   4. Start listening on the hypha-server port.
+ *
+ * Doing (3) before (4) means the moment hypha-server accepts a client
+ * request the upstream proxy target is already live; a /sync/* request
+ * does not race the child boot.
  *
  * Future milestones:
- *   - Reverse-proxy for /sync/* to the spawned node-adapter.js (M2)
- *   - Volume persistence for sessions + signing keys (M3)
+ *   - Volume-backed persistence for sessions + signing keys (M3)
  *   - Hardened deploy config + headless smoke test (M4)
  *
  * See docs/hypha/phase-1-plan.md section 4 for the architecture.
@@ -17,6 +26,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { DbSyncRunner } from "./db-sync-runner.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 // dist/main.js → repo root: ../../../ from compiled location; from src/main.ts
@@ -24,14 +34,48 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 // root, so resolve relative to two-up from the running file.
 const repoRoot = resolve(here, "..", "..");
 const staticDir = process.env.HYPHA_STATIC_DIR ?? resolve(repoRoot, "static");
+const adapterPath =
+  process.env.HYPHA_DB_SYNC_ADAPTER_PATH ??
+  resolve(repoRoot, "deps/db-sync/worker/dist/node-adapter.js");
 
 const config = await loadConfig();
-const app = await buildApp({ config, staticDir });
+
+const syncUpstreamUrl = `http://127.0.0.1:${config.dbSyncInternalPort}`;
+const jwksUrl = `http://127.0.0.1:${config.port}/auth/jwks`;
+
+const app = await buildApp({ config, staticDir, syncUpstreamUrl });
+
+const runner = new DbSyncRunner({
+  adapterPath,
+  port: config.dbSyncInternalPort,
+  dataDir: config.dataDir,
+  jwtIssuer: config.jwtIssuer,
+  jwtAudience: config.jwtAudience,
+  jwksUrl,
+  logger: app.log,
+});
+
+// Graceful shutdown: stop accepting new connections first, then kill the
+// child. Both POSIX signals trigger the same handler.
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.once(sig, async () => {
+    app.log.info(`received ${sig}; shutting down`);
+    try {
+      await app.close();
+    } catch (err) {
+      app.log.error({ err }, "fastify close failed");
+    }
+    await runner.stop();
+    process.exit(0);
+  });
+}
 
 try {
+  await runner.start();
   await app.listen({ port: config.port, host: config.host });
   app.log.info(`hypha-server listening on ${config.host}:${config.port}`);
 } catch (err) {
-  app.log.error(err);
+  app.log.error({ err }, "hypha-server bootstrap failed");
+  await runner.stop();
   process.exit(1);
 }

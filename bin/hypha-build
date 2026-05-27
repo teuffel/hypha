@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 #
-# Hypha build pipeline (M0).
+# Hypha build pipeline.
 #
-# Builds the two Hypha artifacts:
-#   1. ClojureScript frontend, with HYPHA-MODE=true propagated via --config-merge
-#   2. hypha-server (TypeScript)
+# Builds the three Hypha artifacts:
+#   1. ClojureScript frontend, with HYPHA-MODE=true via --config-merge.
+#   2. db-sync node-adapter bundle (deps/db-sync/worker/dist/node-adapter.js).
+#   3. hypha-server (TypeScript) → hypha-server/dist/main.js.
 #
 # Smoke-verifies that the HYPHA-MODE Closure define actually reached the
 # compiled CLOSURE_DEFINES map (replay of the V4 verification, now automated).
 #
 # Output:
-#   static/js/main.js              -- Hypha frontend (with HYPHA_MODE=true)
-#   hypha-server/dist/main.js      -- Hypha server runtime
+#   static/js/main.js                              -- Hypha frontend
+#   deps/db-sync/worker/dist/node-adapter.js       -- db-sync server bundle
+#   hypha-server/dist/main.js                      -- hypha-server runtime
 #
-# Future milestones will extend this:
-#   M2: also build deps/db-sync/worker/dist/node-adapter.js
-#   M3: switch CLJS step to release mode for the Docker image
+# Future milestones:
+#   M3: switch CLJS step to release mode for the Docker image; also pull in
+#       `gulp:build` + `webpack-app-build` so the bundle the browser actually
+#       loads (CSS, vendor JS, index.html) is produced.
 #
 # Usage: bin/hypha-build
 
@@ -24,15 +27,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# --- Step 1: ClojureScript build with Hypha-Mode closure-define ------------
+# --- Step 1: ClojureScript frontend ----------------------------------------
 
-echo ">> [1/3] Building Hypha frontend (ClojureScript, compile mode)..."
+echo ">> [1/4] Building Hypha frontend (ClojureScript, compile mode)..."
 clojure -M:cljs compile app db-worker \
   --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true}}'
 
 # --- Step 2: A8-Smoke (HYPHA-MODE propagation) -----------------------------
 
-echo ">> [2/3] Verifying HYPHA-MODE propagation (A8 smoke-check)..."
+echo ">> [2/4] Verifying HYPHA-MODE propagation (A8 smoke-check)..."
 if [[ ! -f static/js/main.js ]]; then
   echo "FAIL: static/js/main.js not produced by CLJS build" >&2
   exit 1
@@ -48,9 +51,26 @@ if ! grep -q '"frontend.hypha.config.HYPHA_MODE":true' static/js/main.js; then
 fi
 echo "   OK"
 
-# --- Step 3: hypha-server build (TypeScript) -------------------------------
+# --- Step 3: db-sync node-adapter bundle -----------------------------------
 
-echo ">> [3/3] Building hypha-server (TypeScript)..."
+echo ">> [3/4] Building db-sync node-adapter (deps/db-sync)..."
+if [[ ! -d deps/db-sync/node_modules ]]; then
+  echo "   No node_modules in deps/db-sync, running first install..."
+  pnpm --dir deps/db-sync install
+else
+  pnpm --dir deps/db-sync install --frozen-lockfile
+fi
+pnpm --dir deps/db-sync run build:node-adapter
+
+if [[ ! -f deps/db-sync/worker/dist/node-adapter.js ]]; then
+  echo "FAIL: deps/db-sync/worker/dist/node-adapter.js not produced" >&2
+  exit 1
+fi
+echo "   OK"
+
+# --- Step 4: hypha-server build (TypeScript) -------------------------------
+
+echo ">> [4/4] Building hypha-server (TypeScript)..."
 if [[ ! -f hypha-server/pnpm-lock.yaml ]]; then
   echo "   No lockfile yet, running first install (no --frozen-lockfile)..."
   pnpm --dir hypha-server install
@@ -61,5 +81,6 @@ pnpm --dir hypha-server build
 
 echo
 echo ">> Hypha build complete."
-echo "   Frontend: static/js/main.js"
-echo "   Server:   hypha-server/dist/main.js"
+echo "   Frontend:    static/js/main.js"
+echo "   db-sync:     deps/db-sync/worker/dist/node-adapter.js"
+echo "   Server:      hypha-server/dist/main.js"

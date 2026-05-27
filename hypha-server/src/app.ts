@@ -20,6 +20,7 @@ import { loginRoute } from "./routes/login.js";
 import { sessionRoute } from "./routes/session.js";
 import { logoutRoute } from "./routes/logout.js";
 import { jwksRoute } from "./routes/jwks.js";
+import { proxyRoute } from "./proxy.js";
 import { staticsRoute } from "./statics.js";
 
 export interface BuildAppOptions {
@@ -29,6 +30,12 @@ export interface BuildAppOptions {
    * useful for tests that only exercise the auth API surface.
    */
   staticDir?: string;
+  /**
+   * Optional db-sync upstream URL. When unset the /sync and /asset proxy
+   * routes are skipped — tests that exercise only the auth surface leave
+   * this out.
+   */
+  syncUpstreamUrl?: string;
   logLevel?: string;
 }
 
@@ -47,6 +54,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(sessionRoute, { config: opts.config, sessions });
   await app.register(logoutRoute, { sessions });
   await app.register(jwksRoute, { config: opts.config });
+
+  if (opts.syncUpstreamUrl) {
+    await app.register(proxyRoute, { upstreamUrl: opts.syncUpstreamUrl });
+  }
 
   if (opts.staticDir) {
     await app.register(staticsRoute, { staticDir: opts.staticDir });
