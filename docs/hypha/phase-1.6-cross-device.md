@@ -1,0 +1,498 @@
+# Phase 1.6 — Cross-Device Personal Cloud
+
+**Status:** Plan (vor Implementation)
+**Vorgänger:** Phase 1.5 (Plugin-Marketplace) — abgeschlossen
+**Nachfolger:** Phase 2 (Multi-User + Realtime-Collab)
+
+## 0. Warum Phase 1.6
+
+Phase 1 hat als Versprechen "Single-User-Personal-Cloud" — selbst-gehostet,
+Daten leben im eigenen Container, ein Access-Code = Zugriff. Phase 1.5 hat
+den Plugin-Marketplace nachgereicht.
+
+Bei beidem ist ein zentrales Versprechen ungelöst geblieben: **Ein-User-Identität,
+mehrere Geräte/Browser, dieselben Graphen sichtbar.** Das ist die buchstäbliche
+Definition von "Personal Cloud" — sonst wäre es nur "lokales Logseq mit
+Login-Wall davor".
+
+Der Use-Case der diese Phase aufgedeckt hat:
+> "Ich öffne localhost:3030 in Firefox, lege einen Testgraphen an, mache
+> Änderungen. Dann öffne ich localhost:3030 in Chrome, authentifiziere
+> mich, erwarte den Testgraphen — er ist aber nicht da."
+
+Vier strukturelle Lücken im aktuellen HEAD-develop verhindern das:
+
+1. **Reverse-Proxy unvollständig:** `hypha-server/src/proxy.ts:26-39` proxied nur
+   `/sync/*` und `/asset/*` an den db-sync-Node-Adapter. Aber der Node-Adapter
+   (`deps/db-sync/worker/dist/node-adapter.js:2470`) erwartet die Graph-Verwaltung
+   unter `/graphs`, `/graphs/*`, `/e2ee` direkt am Root, und Asset-Uploads unter
+   `/assets/` (mit s). Der Path-Mismatch macht selbst den "Cloud-Sync-Haken beim
+   Anlegen"-Pfad heute kaputt (`POST /graphs` → 404 vom statics-Handler).
+
+2. **Hypha-Init triggert keine Remote-Graph-Liste:** Stock-Logseq dispatcht
+   `[:user/fetch-info-and-graphs]` aus `login-callback`. Hypha
+   (`src/main/frontend/hypha/init.cljs:57-65`) ruft nur `set-hypha-id-token!`
+   auf, sonst nichts. Browser B holt nach Login keine Liste.
+
+3. **`logged-in?` semantisch inkompatibel mit Hypha-Auth-Modell:**
+   `src/main/frontend/handler/user.cljs:90-93` prüft ausschließlich
+   `state/get-auth-refresh-token`. Hypha hat keinen Refresh-Token (das
+   HttpOnly-Session-Cookie ist das langlebige Token, das JWT lebt nur in-memory).
+   Daraus folgt: `logged-in?` ist in Hypha **immer false**, und alle UI-Stellen,
+   die mit `logged-in?` gegated sind (Toolbar-Cloud-Upload-Icon,
+   "Use sync (beta)"-Menüpunkt in der All-Graphs-Page), sind unsichtbar.
+
+4. **UX-Defaults verkehrt herum:** `src/main/frontend/components/repo.cljs:608-609`:
+   ```clojure
+   [cloud? set-cloud?] (hooks/use-state false)       ; Default OFF
+   [graph-e2ee? set-graph-e2ee?] (hooks/use-state true) ; Default ON
+   ```
+   Für Logseq.com (öffentlicher Service, fremde Cloud) ist das defensiv.
+   Für Hypha (eigener Server, eigene Maschine, Personal Cloud als
+   Architektur-Hauptzweck) ist es exakt verkehrt herum: Cloud sollte
+   default-on (sonst Personal-Cloud-Promise gebrochen), E2EE muss default-off
+   (sonst kann Browser B den Private-Key nicht herzaubern und scheitert am
+   Download).
+
+## 1. Scope
+
+### 1.1 Phase-1.6-Use-Cases (Gesamtebene)
+
+| Use Case | Beschreibung | Erfüllt in |
+|---|---|---|
+| **U1** | User erstellt in Browser A einen neuen Graphen — landet automatisch auf dem Server | M9 (Default-Cloud-On) + M8 (`/graphs`-Proxy) |
+| **U2** | User editiert einen Block in Browser A — Änderung wird live zum Server gepusht | M8 (`/sync/*` schon da, plus `/assets/`-Fix) |
+| **U3** | User öffnet Browser B, gibt denselben Access-Code ein — sieht in der Graph-Liste seine Remote-Graphen ohne weitere Klicks | M9 (Auto-Fetch nach Login) |
+| **U4** | User klickt einen Remote-Graphen in Browser B — Snapshot wird heruntergeladen, lokale OPFS bestückt, Sync läuft | M8 (Routes) + M9 (UI-Pfad existiert schon, braucht funktionierende Routes) |
+| **U5** | User hat in Phase 1.5 noch einen lokal-only-Graphen — kann ihn jetzt nachträglich hochladen | M9 (`logged-in?`-Fix macht Toolbar-Cloud-Icon sichtbar) |
+| **U6** | Asset-Uploads (Bilder, PDFs) funktionieren cross-device | M8 (`/assets/`-Bug-Fix) |
+| **U7** | Automatisierter Test verifiziert U1-U4 deterministisch in CI | M10 |
+
+### 1.2 Out-of-Scope (Phase 2)
+
+| Use Case | Phase | Warum nicht 1.6 |
+|---|---|---|
+| **U20** | Mehrere User auf demselben Graph (Sharing, ACLs) | Phase 2 | Multi-User-Identitätsmodell + Access-Control-DSL fehlt. Hypha-Phase-1 hat nur einen User |
+| **U21** | Echtzeit-Cursor / Live-Presence zwischen Browser A und B desselben Users | Phase 2 | RTC-WebSocket-Broadcast-Logik im Node-Adapter müsste Single-User-Multi-Session bewusst unterstützen. Wird gleichzeitig mit Multi-User entworfen |
+| **U22** | E2EE mit Recovery-Phrase und Key-Sync zwischen Geräten | Phase 2 | Recovery-Phrase-UI + Key-Persistierung (im Server? im HttpOnly-Cookie?) ist eigener Designraum. Phase 1.6 deaktiviert E2EE per Default — wer es will, übernimmt selbst die Key-Verteilung |
+| **U23** | Auto-Migration aller bestehenden lokal-only-Graphen auf den Server beim ersten Login | Phase 2 | Braucht Konflikt-Resolution (was wenn der Graph-Name bereits auf dem Server existiert?). Phase 1.6 macht es per Klick im Multi-Graph-Picker (U5) |
+| **U24** | Mobile-App-Sync (Capacitor) | Phase 2+ | Separate Build-Pipeline, eigener OPFS-Adapter-Layer |
+| **U25** | Persistente JWT-Signing-Keys über Container-Restart hinweg | Phase 2 | Phase 1 hat bewusst ephemere Keys (`operations.md:73-77`). Container-Restart heute = User loggt sich neu ein, akzeptabel |
+
+### 1.3 Architektur-Constraints
+
+- **0 zusätzliche Upstream-Patches wenn möglich.** Patches-Inventar steht bei
+  2/20. Phase 1.6 bringt 2 neue Patches dazu (siehe §5). Ziel-Endstand: 4/20.
+- **Server-Routing-Änderungen sind additive.** Kein bestehender Endpoint
+  ändert Semantik. `/health`, `/auth/*`, `/sync/*`, `/plugin-*` bleiben
+  unverändert.
+- **Default-Verhalten dreht sich um, aber Override bleibt.** Cloud-Default-On
+  und E2EE-Default-Off sind UX-Defaults für `new-db-graph-inner`, nicht
+  Hard-Gates. Der User kann beide Checkboxen weiterhin frei umschalten.
+- **Keine Schema-Migrationen.** Phase 1.6 fasst weder Logseq's DB-Schema noch
+  db-sync's D1-Schema an.
+
+## 2. Architekturbasis
+
+### 2.1 Was schon vorhanden ist
+
+| Komponente | Wo | Status |
+|---|---|---|
+| OPFS-Storage pro Graph | `frontend/worker/platform/browser.cljs:74-77` | Funktioniert |
+| RTC-WebSocket-Sync | `frontend/worker/sync.cljs` + `/sync/*` Proxy | Funktioniert für bereits-uploaded-Graphen |
+| `<rtc-upload-graph!` | `frontend/handler/db_based/sync.cljs:407` | Funktioniert, aber UI-Trigger versteckt durch `logged-in?` |
+| `<rtc-create-graph-and-start-sync!` | `sync.cljs:422` | Funktioniert vom Code her, scheitert in Hypha am fehlenden `/graphs`-Proxy |
+| `<get-remote-graphs` | `sync.cljs:306` | Funktioniert vom Code her, scheitert am fehlenden `/graphs`-Proxy |
+| `<rtc-download-graph!` | `sync.cljs:274` | Funktioniert für gelistete Remote-Graphen |
+| Multi-Graph-Picker mit Remote-Graphen | `components/repo.cljs:427` | UI rendert `:rtc/graphs`-State, wenn er gefüllt ist |
+| db-sync-Node-Adapter mit `/graphs`-Routes | `deps/db-sync/worker/dist/node-adapter.js:2470` | Hört auf `127.0.0.1:8787`, routet `/graphs`, `/graphs/*`, `/e2ee`, `/assets/*`, `/sync/*` |
+
+### 2.2 Was strukturell fehlt
+
+```
+Browser → hypha-server (Port 3030) → node-adapter (loopback 8787)
+            │
+            ├── /auth/*           ✓ (Hypha-eigen)
+            ├── /plugin-*/*       ✓ (Hypha-eigen)
+            ├── /health           ✓ (Hypha-eigen)
+            ├── /sync/*  ────────→ proxied (HTTP + WS)
+            ├── /asset/*  ───────→ proxied (Singular, BUG: Frontend sendet /assets/, plural)
+            ├── /graphs           ✗ FEHLT
+            ├── /graphs/*         ✗ FEHLT
+            ├── /e2ee/*           ✗ FEHLT
+            ├── /admin/*          ✗ FEHLT (single-user evtl. nicht zwingend)
+            └── /  ──────────────→ statics (fängt alles Unbekannte ab → 404 für /graphs etc.)
+```
+
+Frontend-Erwartung an die Server-Routes (aus `sync.cljs` plus `assets.cljs`):
+
+| Methode | Pfad | Code-Aufrufer | Phase-1.6-Status |
+|---|---|---|---|
+| GET | `/graphs` | `<get-remote-graphs:313` | wird im M8 freigeschaltet |
+| POST | `/graphs` | `<rtc-create-graph!` über Worker | wird im M8 freigeschaltet |
+| DELETE | `/graphs/<id>` | `<rtc-delete-graph!:266` | wird im M8 freigeschaltet |
+| GET | `/graphs/<id>/access` | RTC-Background-Flows | wird im M8 freigeschaltet |
+| GET/POST | `/graphs/<id>/members` | `<rtc-invite-email`, `<rtc-get-users-info` | wird im M8 freigeschaltet (Single-User: trivial-leer, aber routerseitig vorhanden) |
+| GET/POST | `/e2ee/user-keys` | RSA-Key-Setup | wird im M8 freigeschaltet (für non-E2EE-Graphen unkritisch, aber Frontend ruft trotzdem an) |
+| GET | `/e2ee/user-public-key` | E2EE-Setup | M8 |
+| PUT/GET/DELETE | `/assets/<graph-id>/<uuid>` | `worker/sync/assets.cljs:62` | **M8: existierender Path-Mismatch /asset → /assets behoben** |
+| GET/POST | `/sync/...` | RTC-Loop | unverändert (schon vorhanden) |
+
+### 2.3 Auth-Modell-Inkompatibilität (Lücke 3 im Detail)
+
+Stock-Logseq nimmt nach Cognito-Login das Refresh-Token aus dem
+OAuth-Flow und schreibt es in `localStorage`. Beim Boot lädt
+`restore-tokens-from-localstorage` es zurück, daher ist
+`(state/get-auth-refresh-token)` truthy → `logged-in?` ist `true`.
+
+Hypha (`src/main/frontend/hypha/init.cljs:33-43`) setzt
+ausschließlich `:auth/id-token`. Das HttpOnly-Session-Cookie übernimmt
+die Refresh-Funktion (rotiert das JWT bei jedem `GET /auth/session`),
+ist aber für JavaScript unsichtbar — was Sicherheits-Sinn ergibt, aber
+`logged-in?` blind macht.
+
+Fix-Optionen:
+
+| Option | LoC-Delta | Patch-Kosten | Bemerkung |
+|---|---|---|---|
+| A — `logged-in?` Hypha-aware: prüfe `(or refresh-token (and hypha-mode? id-token (not expired?)))` | ~5 | Patch #3 (~5 LoC) | Sauberste Variante. Semantik bleibt eindeutig |
+| B — Sentinel: Hypha setzt `:auth/refresh-token` auf den String `"hypha-session"` | ~2 | Patch #3 (~2 LoC) | Hacky. Wirkt überall richtig, aber unklar für Code-Reader |
+| C — `logged-in?` an State-Existenz von `:auth/id-token` koppeln (Upstream-weit) | ~3 | Patch #3 + Stock-Logseq-Verhalten-Risiko | Berührt Cognito-Mode, kann subtile Regressionen geben |
+
+**Entscheidung im Plan: Option A.** Klarste Semantik, minimaler Blast-Radius
+durch explizites `hypha-mode?`-Gate. Plus: explizite Expired-Check, was bei
+einer plötzlich abgelaufenen JWT-Session korrektes "ausgeloggt" widerspiegelt.
+
+### 2.4 E2EE-Default-Reverse (Lücke 4 im Detail)
+
+`new-db-graph-inner` setzt `graph-e2ee?` per Default auf `true`. Bei E2EE:
+1. Browser A generiert beim ersten Cloud-Graph ein RSA-Schlüsselpaar.
+2. Public-Key wird auf den Server hochgeladen.
+3. Private-Key bleibt lokal in IndexedDB.
+4. Graph-Daten werden mit per-Graph AES-Schlüsseln verschlüsselt, die
+   wiederum mit dem RSA-Public-Key des Users (auf dem Server) verschlüsselt
+   abgelegt werden.
+
+Browser B startet ohne Private-Key. Auch beim erfolgreichen Login + Listing
+ist der Download des Graph-Snapshots nicht entschlüsselbar — der AES-Key
+wäre für den User-Public-Key encrypted, aber kein zugänglicher
+Private-Key in Browser B.
+
+**Lösungsweg E2EE-Key-Sync:** Recovery-Phrase, Backup-Codes, Pairing-Flow.
+Eigenes Designkapitel, gehört in Phase 2 (U22).
+
+**Lösungsweg Phase 1.6:** E2EE-Default in Hypha-Mode auf `false` setzen
+(Patch #4). User kann es weiterhin manuell aktivieren, übernimmt damit
+aber selbst die Key-Verteilung. Konsistent mit der "Self-Hosting-Personal-Cloud"-Story:
+wer dem eigenen Server vertraut, braucht keine clientseitige Verschlüsselung.
+
+## 3. Verifikations-Probes (vor M8)
+
+Vor der Implementation: Annahmen-Probes nach Phase-1-Plan-Vorbild. Jede
+Probe ist ein eigener, kurzer manueller Test. Ergebnisse werden zurück in
+diesen Plan committed (separater Commit `docs(hypha): V7-V10 verified`).
+
+### V7 — `/health`-Konflikt verifizieren
+
+**Annahme:** Hypha-Server's `/health`-Route (`app.ts:91-97`) gewinnt gegen
+ein eventuell durchgereichtes `/health` zum Node-Adapter, weil Fastify-Routes
+Priorität haben über Catch-All-Statics.
+
+**Probe:**
+```bash
+# In Hypha-Server-Container
+curl -s http://localhost:3030/health
+# Erwartung: {"status":"ok"}, nicht die node-adapter health-Antwort
+```
+
+**Implikation:** Wenn V7 grün, kann `/graphs`, `/e2ee` etc. einfach
+zusätzlich proxied werden ohne Spezial-Routing.
+
+### V8 — Asset-Path-Mismatch reproduzieren
+
+**Annahme:** Asset-Sync ist in Phase 1.5 schon broken, weil Frontend
+`/assets/` (plural) und Hypha-Server `/asset/` (singular) routet.
+
+**Probe:** In einem Hypha-Cloud-Graphen ein Bild einfügen, im DevTools-Netzwerk-Tab
+prüfen welche URL Logseq POSTet. Erwartung: `PUT /assets/<graph-id>/<uuid>.png` → 404.
+
+**Implikation:** M8 muss `/asset/` durch `/assets/` ersetzen, ODER beides
+proxien. Beides ist sauberer (rückwärtskompatibel falls irgendein Pfad
+es alte Variante doch erwartet).
+
+### V9 — RSA-Key-Setup-Verhalten ohne E2EE
+
+**Annahme:** `<get-remote-graphs:316` ruft `<ensure-user-rsa-keys-on-server!`
+unkonditioniert. Wenn der User noch keine Keys hat, werden welche generiert.
+Browser B würde dann andere Keys generieren als Browser A → Konflikt auf
+`/e2ee/user-public-key`.
+
+**Probe:** Im Stock-Logseq.com einen non-E2EE-Cloud-Graph anlegen, dann
+in einem Inkognito-Tab dieselbe Identität (per dev-Token-Injection)
+"einloggen" und prüfen, ob `<get-remote-graphs` Erfolg hat.
+
+**Alternative Probe (in Hypha nach M8):** Direkt prüfen, welches Verhalten
+der db-sync-Adapter bei `POST /e2ee/user-keys` mit bereits existierenden
+Keys zeigt — überschreibt er, lehnt er ab, oder lässt er den ersten
+gewinnen?
+
+**Implikation für M9:** Falls die Adapter-Logik Keys bei wiederholtem
+POST überschreibt, bricht Cross-Device. Workaround: `<ensure-user-rsa-keys-on-server!`
+in Hypha-Mode skippen (Patch #5, falls nötig). Oder: in Hypha
+einen Server-Side-RSA-Key-Override, der Stable-pro-User bleibt.
+
+Probe-Ergebnis entscheidet, ob M9 nur 2 Patches oder 3 Patches braucht.
+
+### V10 — End-to-End auf Localhost manuell durchspielen
+
+**Annahme (post-M8+M9):** Mit den Server-Routes und Client-Defaults zusammen
+funktioniert der User-Use-Case U1+U3 manuell vor dem automatisierten Test.
+
+**Probe:**
+1. Hypha-Server starten, Firefox auf localhost:3030, Access-Code, "MeinTestgraf" erstellen (Cloud-Haken jetzt Default-On)
+2. Im Graph zwei Blöcke editieren
+3. Chrome auf localhost:3030, derselbe Access-Code
+4. Beobachten: "MeinTestgraf" erscheint in der Graph-Picker-Liste; Klick lädt Snapshot
+
+**Erwartung:** Schritt 4 funktioniert. Wenn nicht — Sticky-Punkt
+identifizieren, ggf. weiteren Patch ergänzen vor M10-Test-Code.
+
+## 4. Meilensteine
+
+### M8 — Server-side `/graphs`, `/e2ee`, `/assets` Proxy
+
+**Datei:** `hypha-server/src/proxy.ts` (additive Erweiterung um zwei Block-Aufrufe)
+
+```typescript
+// Zusätzlich zum bisherigen /sync und /asset:
+await app.register(fastifyHttpProxy, {
+  upstream: deps.upstreamUrl, prefix: "/graphs", rewritePrefix: "/graphs",
+});
+await app.register(fastifyHttpProxy, {
+  upstream: deps.upstreamUrl, prefix: "/e2ee", rewritePrefix: "/e2ee",
+});
+await app.register(fastifyHttpProxy, {
+  upstream: deps.upstreamUrl, prefix: "/assets", rewritePrefix: "/assets",
+});
+```
+
+Plus: `/asset` (singular) kann entfernt werden, falls V8 bestätigt dass
+nichts mehr es benutzt — alternativ behalten als Toter-Pfad-Reserve.
+
+#### M8 — Use Cases erfüllt
+
+- **U1** (teilweise, Server-Anteil): `POST /graphs` ist erreichbar, neuer Graph wird auf dem Server registriert
+- **U2** (teilweise, Asset-Anteil): `PUT/GET /assets/<graph-id>/<uuid>` funktioniert. Block-Tx-Sync läuft bereits über `/sync/*` (unverändert)
+- **U4** (Server-Anteil): `GET /graphs`, `GET /graphs/<id>/access` antworten valide JSON statt 404
+- **U6**: Asset-Uploads vom Browser landen tatsächlich im `/data/<graph-uuid>/assets/`-Verzeichnis
+
+#### M8 — Use Cases bewusst nicht erfüllt
+
+- **U3** (gehört zu M9): Browser B sieht die Liste der Remote-Graphen nach Login automatisch — braucht Client-Side-Auto-Fetch in `hypha-init`
+- **U5** (gehört zu M9): Toolbar-Cloud-Icon für nachträglichen Upload ist nicht sichtbar — gated auf `logged-in?`-Fix
+- **U23** (gehört zu Phase 2): Auto-Migration bestehender lokaler Graphen
+- **U20-U22** (Phase 2): Multi-User, Realtime, E2EE-Key-Sync
+
+#### M8 — DoD
+
+- `pnpm --dir hypha-server test` grün (3 neue Unit-Tests: `proxy.test.ts` deckt `/graphs`, `/e2ee`, `/assets` Routen + Status-Pass-through ab)
+- `pnpm --dir hypha-server build` strict-clean
+- Manueller curl-Test gegen laufenden Container: `curl -H "Authorization: Bearer <jwt>" http://localhost:3030/graphs` liefert JSON-Liste (leer beim ersten Mal)
+- `/health` unverändert (V7)
+- Patches-Bilanz: weiterhin 2/20
+
+### M9 — Hypha-Client: Auto-Fetch + `logged-in?` + UX-Defaults
+
+**Drei Änderungen:**
+
+#### M9.1 Hypha-eigen: Auto-Fetch nach Login
+
+**Datei:** `src/main/frontend/hypha/init.cljs` (~10 LoC additive)
+
+Nach erfolgreichem `set-hypha-id-token!` einen Async-Trigger setzen, der
+`<get-remote-graphs` aufruft (umgeht das gebrochene
+`:user/fetch-info-and-graphs`-Event, das `<user-info` gegen
+`api.logseq.com` werfen würde):
+
+```clojure
+(defn- <fetch-remote-graphs-after-login! []
+  ;; direct call into RTC handler, no upstream event-bus detour
+  (-> (rtc-handler/<get-remote-graphs)
+      (p/catch (fn [e] (log/error :hypha/initial-graph-fetch-failed e)))))
+```
+
+Aufruf direkt nach `set-hypha-id-token!` in beiden Pfaden:
+- `start!` nach 200er-Session-Restore (Zeile 60-62)
+- `hypha-login/modal-inner` nach erfolgreichem Code-Login
+
+#### M9.2 Upstream-Patch #3: `logged-in?` Hypha-aware
+
+**Datei:** `src/main/frontend/handler/user.cljs:90-93` (Upstream-Patch)
+
+```clojure
+(defn logged-in? []
+  (if hypha-config/hypha-mode?
+    (when-let [token (state/get-auth-id-token)]
+      (and (string? token)
+           (not (-> token parse-jwt expired?))))
+    (let [token (state/get-auth-refresh-token)]
+      (when (string? token) (not (string/blank? token))))))
+```
+
+Patch wird via `.github/scripts/hypha-patch-anchors.sh` aufgenommen
+(Patch #3, ~6 LoC inkl. require von `frontend.hypha.config`).
+
+#### M9.3 Upstream-Patch #4: Hypha-Defaults in `new-db-graph-inner`
+
+**Datei:** `src/main/frontend/components/repo.cljs:608-609`
+
+```clojure
+[cloud? set-cloud?]
+  (hooks/use-state (boolean hypha-config/hypha-mode?))      ; Default Cloud-On
+[graph-e2ee? set-graph-e2ee?]
+  (hooks/use-state (not hypha-config/hypha-mode?))          ; Default E2EE-Off
+```
+
+Patch #4, ~4 LoC inkl. require von `frontend.hypha.config`.
+
+#### M9 — Use Cases erfüllt
+
+- **U1** (komplett mit M8): Neuer Graph hat Cloud-Default-On, Erstellungs-Flow ruft `<rtc-create-graph-and-start-sync!`, Graph landet auf dem Server
+- **U3**: Browser B holt nach Login automatisch die Remote-Graph-Liste, sichtbar im Multi-Graph-Picker (`components/repo.cljs:427`)
+- **U4** (komplett mit M8): Klick auf Remote-Graph triggert Download via `[:rtc/download-remote-graph ...]`
+- **U5**: Toolbar-Cloud-Icon und "Use sync (beta)"-Menüpunkt sind nun in Hypha sichtbar (`logged-in?` ist `true`)
+
+#### M9 — Use Cases bewusst nicht erfüllt
+
+- **U7** (gehört zu M10): Automatisierte Verifikation — manueller Probe-Run (V10) reicht für M9-DoD
+- **U22** (Phase 2): E2EE-Default ist off, aber wer es manuell anschaltet, hat _kein_ funktionierendes Cross-Device. M9 macht E2EE-aus zur Hypha-Default-Voraussetzung; E2EE-Sync ist Phase-2-Material
+- **U23** (Phase 2): Bestehende lokale Graphen werden _nicht_ automatisch hochgeladen. M9 macht die UI sichtbar (über U5), der User klickt selbst. Auto-Migration mit Konflikt-Resolution = Phase 2
+
+#### M9 — DoD
+
+- V10 manuell durchgespielt: Firefox erstellt Graph (Cloud-On default), Chrome listet ihn nach Login, Download funktioniert
+- `bb dev:lint-and-test` grün
+- `clojure -M:cljs compile app --config-merge '{...HYPHA-MODE true}}'` grün, 0 Warnings
+- `bb lint:worker-and-frontend-separate` grün
+- Patches-Bilanz: 4/20
+
+### M10 — End-to-End Cross-Browser Smoke (Playwright)
+
+**Datei:** `hypha-server/test/playwright/cross-device.spec.ts` (NEU, ~120 LoC Test)
+
+Test-Topologie wie M7 (Phase 1.5): hermetisch, ein hypha-server, ein
+db-sync-Node-Adapter, _zwei_ Playwright-`BrowserContext`s parallel.
+
+Test-Schritte:
+1. Setup: hypha-server hochfahren (`globalSetup` aus M7 wiederverwenden)
+2. Context A öffnet `http://localhost:<port>/`, gibt Access-Code ein → authentifiziert
+3. Context A erstellt einen neuen Graph "cross-device-test" (Default-Cloud sollte aktiv sein, Test prüft das explizit)
+4. Context A wartet auf `:rtc/loading-graphs?=false` und sichtbaren Graph
+5. Context A editiert einen Block (sichtbar im Editor)
+6. Context A wartet auf erfolgreichen Tx-Sync (`/sync`-WS-Frame-Count oder Indicator-State)
+7. Context B öffnet dieselbe URL, gibt denselben Access-Code ein
+8. Context B wartet auf `:rtc/graphs`-State (Auto-Fetch nach M9.1)
+9. Context B klickt den Graph in der Liste → Download
+10. Context B verifiziert: Graph-Name sichtbar im Picker, editierter Block-Inhalt enthalten
+
+#### M10 — Use Cases erfüllt
+
+- **U7**: Deterministischer CI-Test verifiziert U1, U2, U3, U4 end-to-end
+  - Bricht, wenn `/graphs`-Proxy zukünftig regressiert
+  - Bricht, wenn Hypha-Default-Cloud-Off versehentlich rückgängig gemacht wird
+  - Bricht, wenn `logged-in?` zukünftig wieder strikter wird
+
+#### M10 — Use Cases bewusst nicht erfüllt
+
+- **U21** (Phase 2): Test prüft _nicht_ Live-Sync (A und B parallel) — Context B kommt nach A's Sync-Commit. Realtime-Bidi-Test ist Phase-2-Material
+- **U6** (verifiziert anderswo): Asset-Sync-Test bleibt orthogonal — wird optional als separater Test in M10b ergänzt, sonst von M8-Unit-Tests abgedeckt
+
+#### M10 — DoD
+
+- `pnpm --dir hypha-server exec playwright test` 13/13 grün (6 Auth + 6 Marketplace + 1 Cross-Device)
+- Test läuft in unter 60s wall-clock (sonst evtl. `timeout 120` in `upstream-sync.yml` weiter bumpen)
+- CI-Pipelines `hypha-build.yml` und `upstream-sync.yml` picken den neuen Spec automatisch via `testMatch` auf (keine YAML-Änderungen)
+- Patches-Bilanz: 4/20 (unverändert seit M9)
+
+## 5. Patches-Bilanz
+
+| # | Datei | Zweck | Phase | LoC |
+|---|---|---|---|---|
+| 1 | `frontend/handler.cljs` | Hypha-Init-Hook nach `restore-tokens-from-localstorage` | Phase 1 | ~3 |
+| 2 | `frontend/handler/events/ui.cljs` | `:user/login`-Routing → Hypha-Modal | Phase 1 | ~3 |
+| 3 | `frontend/handler/user.cljs` | `logged-in?` Hypha-aware | Phase 1.6 M9 | ~6 |
+| 4 | `frontend/components/repo.cljs` | Hypha-Defaults in `new-db-graph-inner` | Phase 1.6 M9 | ~4 |
+
+End-Inventar nach Phase 1.6: **4/20** (20% Smell-Schwelle).
+
+Alle anderen Phase-1.6-Code-Änderungen sind additiv:
+- `hypha-server/src/proxy.ts`: 3 neue `register`-Aufrufe (Hypha-eigen, kein Logseq-Patch)
+- `src/main/frontend/hypha/init.cljs`: +10 LoC Auto-Fetch (Hypha-eigen)
+- `hypha-server/test/playwright/cross-device.spec.ts`: NEU (Hypha-eigen)
+- M8 Unit-Tests in `hypha-server/test/`: NEU (Hypha-eigen)
+
+## 6. Risiken und offene Fragen
+
+### R1 — `<ensure-user-rsa-keys-on-server!`-Konflikt zwischen Devices
+
+V9 muss vor M9 klären. Worst-Case (Adapter überschreibt Keys bei zweitem POST):
+zusätzlicher Patch in `sync.cljs:316` der den Aufruf im Hypha-Mode für
+nicht-E2EE-Graphen skippt. Würde Patches-Inventar auf 5/20 bringen.
+
+### R2 — User-Identitäts-Konsistenz im Single-User-Hypha-Modell
+
+Beide Browser bekommen JWTs mit demselben `sub` (Hypha-User-UUID),
+weil `hypha-server/src/auth/jwt.ts:23-43` aus der Session-User-Identität
+mintet. Der Access-Code projiziert auf eine feste User-Identität.
+**Sollte funktionieren**, aber V10 manuell verifizieren.
+
+### R3 — Asset-Upload-Path-Mismatch Phase 1 vorhanden?
+
+V8 prüft. Falls Phase 1 (oder Phase 1.5) jemals Assets erfolgreich
+hochgeladen hat, ist die Annahme `/asset/` ist tot evtl. falsch. Im
+Zweifel beide Pfade routen, Plan-Entscheidung später anpassen.
+
+### R4 — Multi-Browser-Tabs als derselbe User vs. zwei Browser
+
+Stock-Logseq.com behandelt mehrere Sessions desselben Users über
+RTC-Presence-IDs. Hypha-Phase-1.6 hat _nicht_ Realtime-Sync getestet —
+nur "B kommt nachträglich rein, sieht den Stand". Falls A und B
+gleichzeitig editieren während B noch downloaded, gibt es eventuell
+Tx-Konflikte. Dokumentieren als "Phase 1.6 macht Multi-Device
+sequenziell-konsistent, nicht parallel-konsistent". Multi-Tab desselben
+Users in einem Browser ist heute schon kein Use-Case, der definiert
+ist — sequenzielle Konsistenz reicht.
+
+### R5 — Was passiert wenn der hypha-user in Browser B Schritt 1 anders erlebt?
+
+Ablauf-Edge-Case: User öffnet Chrome zum ERSTEN MAL bevor er
+irgendwas in Firefox erstellt hat. Erwartung: leere Graph-Liste,
+Onboarding-Demo-Graph wird angelegt. Dann später Firefox erstellt einen
+Cloud-Graph. Nach F5 in Chrome: erscheint die Cloud-Graph in der
+Liste neben dem Demo-Graph? Sollte ja, weil Auto-Fetch nach Page-Load
++ Auth läuft. V10 kann diesen Pfad mit abdecken.
+
+## 7. Self-Hosting-Docs-Update (M10 oder separater Polish-Commit)
+
+`docs/hypha/self-hosting.md:178-187` enthält stale "Things that don't
+work yet"-Behauptungen:
+- "Multi-user" — bleibt stale, korrekt Phase 2
+- "Realtime collaboration" — bleibt stale, korrekt Phase 2
+- "Mobile apps" — bleibt stale, korrekt Phase 2+
+- "Plugin marketplace … aren't tested" — ist nach Phase 1.5 stale, korrigieren
+
+Phase 1.6 bringt zusätzlich: **"Cross-Device works"** als positive Aussage in
+self-hosting.md. Plus expliziter Hinweis: "E2EE is off by default for
+self-hosted; key-sync between devices is Phase 2."
+
+## 8. Phase-1.6-Sign-off Checklist
+
+| # | Kriterium | Wo verifiziert |
+|---|---|---|
+| 1 | V7-V10 grün und in docs/hypha/phase-1.6-cross-device.md committed | nachgereichter `docs(hypha)`-Commit |
+| 2 | M8 Server-Routes erreichbar | `hypha-server` Unit-Tests + curl-Probe |
+| 3 | M9 Patches landen, Hypha-Build clean | clj-kondo + `clojure -M:cljs compile` |
+| 4 | M10 Playwright-Spec grün lokal und in CI | `pnpm --dir hypha-server test:headless-auth` |
+| 5 | Patches-Inventar dokumentiert | `.github/scripts/hypha-patch-anchors.sh` + dieser Plan §5 |
+| 6 | User-Story aus §0 manuell verifiziert | Manuell auf localhost:3030 Firefox+Chrome |
+| 7 | `docs/hypha/self-hosting.md` aktualisiert | §7 |
