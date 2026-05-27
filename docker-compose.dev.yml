@@ -40,6 +40,21 @@ services:
       # Forward shadow-cljs's default nrepl port for editor connections
       # (REPL workflows in M1+; harmless at this stage).
       LOGSEQ_SHADOW_HTTPS: "false"
+      # ── hypha-server runtime defaults (dev only) ────────────────────────
+      # Lets `bin/dev pnpm --dir hypha-server start` boot the full stack
+      # without needing each developer to set HYPHA_* env vars by hand.
+      # DO NOT reuse these values in any production deployment.
+      #
+      # Access code: "dev" (bcrypt-10 hash committed below). Regenerate:
+      #   bin/dev bash -c 'node -e "const b=require(\"bcryptjs\"); \
+      #     console.log(b.hashSync(process.argv[1], 10))" YOUR_CODE'
+      HYPHA_ACCESS_CODE_HASH: "$$2b$$10$$QsHRSpOlRo8R7Be1GspghOlxi5beCNAN2b2en9F7mezJZ253gNui2"
+      HYPHA_JWT_ISSUER: "http://localhost:3000"
+      HYPHA_JWT_AUDIENCE: "hypha-dev"
+      # Container-local: data is fresh per container start (no host pollution
+      # via the bind-mount). M3 introduces a proper named-volume mount for
+      # the production image.
+      HYPHA_DATA_DIR: "/tmp/hypha-dev-data"
     ports:
       # Hypha-server dev port (matches default in hypha-server/src/main.ts)
       - "3000:3000"
