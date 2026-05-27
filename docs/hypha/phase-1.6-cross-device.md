@@ -322,19 +322,63 @@ sondern mit einem **User-gewählten E2EE-Password** via PBKDF2+AES
   Phase-2-Material ist nur das _automatische_ Key-Sync via
   Recovery-Phrase oder passwortlose KDF.
 
-### V10 — End-to-End auf Localhost manuell durchspielen
+### V10 — End-to-End auf Localhost durchgespielt
 
-**Status:** 🚫 Blockiert auf M8+M9-Implementation. Diese Probe ist
-post-M9 / pre-M10. Nach Code-Lieferung von M8+M9 manuell durchspielen:
+**Status:** ✅ Verifiziert via Docker-Container (`docker compose -f docker-compose.hypha.yml up`)
+auf localhost:3030 + Playwright headless + curl HTTP-Probe.
 
-**Probe:**
-1. Hypha-Server starten, Firefox auf localhost:3030, Access-Code, "MeinTestgraf" erstellen (Cloud-Haken jetzt Default-On)
-2. Im Graph zwei Blöcke editieren
-3. Chrome auf localhost:3030, derselbe Access-Code
-4. Beobachten: "MeinTestgraf" erscheint in der Graph-Picker-Liste; Klick lädt Snapshot
+**Befund #1 — neuer Bug entdeckt, gefixt:**
 
-**Erwartung:** Schritt 4 funktioniert. Wenn nicht — Sticky-Punkt
-identifizieren, ggf. weiteren Patch ergänzen vor M10-Test-Code.
+Erstes V10-Probe-Run zeigte folgenden Worker-Error nach Login:
+```
+[frontend.handler.db-based.sync] {:db-sync/ensure-user-rsa-keys-failed
+  {:error #error {:message "worker auth refresh requires refresh token",
+                  :data {:code :missing-refresh-token}},
+   :reason :server-rsa-keys-missing}}
+```
+
+Root cause: M9.1's `<fetch-remote-graphs-after-login!` ruft
+`<get-remote-graphs`, das sync.cljs:316 `<ensure-user-rsa-keys-on-server!`
+über die Frontend→Worker-Grenze invoked. Stock-Logseq's
+`:rtc/sync-app-state`-Event (`handler/events/rtc.cljs:88`) gated den
+Worker-Auth-State-Push auf `:git/current-repo` — aber M9.1 läuft VOR
+jedem Graph-Load. Folge: Worker hat kein `:auth/id-token`, fällt in den
+Cognito-Refresh-Pfad in `worker/sync/auth.cljs:51`, wirft fail wegen
+fehlendem refresh-token.
+
+**Fix (M9.4):** Hypha-eigen, additiv in `frontend.hypha.init`:
+- `<wait-for-db-worker-ready!` mit Watch-Pattern auf `state/*db-worker`
+- `<push-auth-to-db-worker!` synct `:auth/id-token` + `:auth/access-token`
+  via `:thread-api/sync-app-state` zum Worker, sobald dieser ready ist
+- `<fetch-remote-graphs-after-login!` führt diesen Push als ersten Schritt
+  durch, dann erst `<get-remote-graphs`
+
+0 zusätzliche Upstream-Patches. Patches-Inventar bleibt 4/20.
+
+**Befund #2 — V10 grün:**
+
+V10-HTTP-Probe (`/tmp/opencode/v10-http.sh`):
+1. User-A loggt sich ein → JWT mit `sub=00000000-0000-0000-0000-000000000001`
+2. User-A POSTet RSA-Stub-Keys an `/e2ee/user-keys` → 200
+3. User-A POSTet `/graphs` → bekommt `graph-id` zurück
+4. User-A GET `/graphs` → Liste enthält neuen Graph
+5. User-B loggt sich ein (frische Session, gleicher Access-Code) → JWT mit
+   identischem `sub` (Cross-Device-Identity verifiziert)
+6. User-B GET `/graphs` → sieht User-A's Graph in der Liste
+7. User-B GET `/graphs/<id>/access` → 200 (Access-Check grün)
+
+V10-Browser-Probe (Playwright headless chromium):
+- M9.1 Auto-Fetch `GET /graphs → 200` nach jedem Login (frischer + Cookie-Restore)
+- M9.4 keine `:missing-refresh-token`-Errors in der Browser-Console mehr
+- `GET /e2ee/user-keys → 200` fließt korrekt durch den M8-Proxy
+- Cross-Device-Cookie-Isolation: zweite BrowserContext zeigt erneut
+  Login-Modal trotz erfolgreicher Auth in der ersten
+
+**Implikation für M10:**
+
+M10's cross-device.spec.ts wird um einen vierten Test erweitert (T5):
+"M9.4 — no 'worker auth refresh requires refresh token' after login".
+Drift-Gate gegen zukünftige Removal des `<push-auth-to-db-worker!`-Aufrufs.
 
 ## 4. Meilensteine
 
@@ -490,7 +534,7 @@ brechen könnten. Funktionale Cross-Device-Verifikation ist V10
 (manueller Lokal-Smoke nach M9) und Phase-2-M11 (echter Adapter im
 CI-Image inkl. better-sqlite3-binary).
 
-**Tests (4 Stück):**
+**Tests (5 Stück):**
 
 1. **T1 — M9.1 Auto-Fetch Drift-Gate:** Nach Login (fresh access-code)
    feuert `GET /graphs` automatisch. Network-Tap auf `page.on("request", ...)`.
@@ -512,6 +556,13 @@ CI-Image inkl. better-sqlite3-binary).
    Session-Cookies. Context A's `/auth/login` macht Context B nicht
    authentifiziert. Bestätigt die Cross-Device-Semantik (jedes Gerät
    muss eigene Auth-Geste machen), und schützt vor Cookie-Domain-Mistakes.
+
+5. **T5 — M9.4 Worker-Auth-State-Pre-Push Drift-Gate** (added post-V10):
+   Nach Login darf KEINE Console-Error mit `:missing-refresh-token` oder
+   `worker auth refresh requires refresh token` auftauchen. Bricht, wenn
+   jemand das `<push-auth-to-db-worker!` aus
+   `<fetch-remote-graphs-after-login!` in `hypha/init.cljs` entfernt
+   oder hinter dem `<get-remote-graphs`-Call platziert.
 
 #### M10 — Use Cases erfüllt
 
