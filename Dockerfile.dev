@@ -39,7 +39,13 @@ ARG USER_GID=1000
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+    JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8" \
+    # Force IPv4-first DNS resolution for Node 18+. Without this, "localhost"
+    # resolves to ::1 (IPv6) for http.listen but undici's fetch ends up using
+    # 127.0.0.1 (IPv4), causing ECONNREFUSED in Logseq's logseq.cli auth tests
+    # (and any future code that mixes Node's http.listen + fetch on localhost).
+    # Empirically reproduced + fixed inside this container 2026-05-27.
+    NODE_OPTIONS="--dns-result-order=ipv4first"
 
 # --- base packages (JDK 21 already in the base image) ----------------------
 #
