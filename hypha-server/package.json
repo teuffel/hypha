@@ -12,6 +12,8 @@
     "start": "node dist/main.js",
     "dev": "tsx watch src/main.ts",
     "test": "node --import tsx --test test/*.test.ts",
+    "test:headless-auth": "playwright test",
+    "test:install-browsers": "playwright install chromium",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -23,6 +25,7 @@
     "jose": "^5.9.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3"
