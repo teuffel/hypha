@@ -121,6 +121,40 @@ test.describe("Hypha cross-device personal-cloud drift gates", () => {
     expect(subB).toBe(subA);
   });
 
+  test("M9.4 — no 'worker auth refresh requires refresh token' after login", async ({ page }) => {
+    // Phase-1.6 V10 found: M9.1's <get-remote-graphs invokes
+    // <ensure-user-rsa-keys-on-server!, which crosses the frontend→worker
+    // boundary. Stock Logseq's :rtc/sync-app-state event gates the
+    // auth-state push on :git/current-repo, but M9.1 fires BEFORE any
+    // graph is loaded → worker has no :auth/id-token → falls into the
+    // Cognito refresh path → throws because Hypha has no refresh-token.
+    //
+    // M9.4 fix (hypha/init.cljs): <push-auth-to-db-worker! runs BEFORE
+    // <get-remote-graphs, so the worker always has the JWT when needed.
+    // This test is the drift gate — any future change that removes the
+    // pre-push will surface the error in the console.
+    const consoleErrors = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+    page.on("pageerror", (err) => consoleErrors.push(err.message));
+
+    await page.goto("/");
+    await loginViaModal(page);
+    // Auto-fetch is async; let it complete (rsa-key path runs INSIDE
+    // <get-remote-graphs at sync.cljs:316).
+    await page.waitForTimeout(6000);
+
+    const refreshTokenFailures = consoleErrors.filter((m) =>
+      m.includes("missing-refresh-token") ||
+      m.includes("worker auth refresh requires refresh token"),
+    );
+    expect(
+      refreshTokenFailures,
+      `regression: refresh-token errors leaked from worker:\n${refreshTokenFailures.join("\n")}`,
+    ).toHaveLength(0);
+  });
+
   test("Cookie isolation — Context A login leaves Context B unauthenticated", async ({ browser }) => {
     const ctxA = await browser.newContext();
     const pageA = await ctxA.newPage();
