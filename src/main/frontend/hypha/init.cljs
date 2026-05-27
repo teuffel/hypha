@@ -16,11 +16,26 @@
   3. On 401 it dispatches `[:user/login]`, which Patch #1 in
      `handler/events/ui.cljs` routes to the Hypha access-code login modal.
 
-  See `docs/hypha/phase-1-plan.md` section 4.6 for the full auth flow."
+  Phase-1.6 (M9.1) addition: after a successful JWT set, fire a
+  non-blocking <get-remote-graphs to populate :rtc/graphs. Stock-Logseq
+  does this via the [:user/fetch-info-and-graphs] event dispatched from
+  user-handler/login-callback; Hypha bypasses that event because (a)
+  Patches #1+#2 are intentionally minimal and never publish it, and (b)
+  the upstream handler's first step is <user-info against the hardcoded
+  api.logseq.com/file-sync/user_info endpoint, which doesn't exist on
+  hypha-server and would bail the whole pipeline before ever reaching
+  <get-remote-graphs. Direct call from set-hypha-id-token! is the clean
+  path: every successful Hypha auth triggers the listing, nothing else
+  is needed.
+
+  See `docs/hypha/phase-1-plan.md` section 4.6 for the auth flow and
+  `docs/hypha/phase-1.6-cross-device.md` §4 M9 for the cross-device
+  trigger rationale."
   (:require [cljs-http.client :as http]
             [cljs.core.async :refer [<! go]]
             [frontend.config :as config]
             [frontend.flows :as flows]
+            [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
             ;; Required for its side-effecting defonce: the plugin-init ns
             ;; patches `window.fetch` and installs the `window.apis` shim at
@@ -28,7 +43,25 @@
             ;; runs and so before frontend.handler.plugin/setup! gets a chance
             ;; to install its own bare EventEmitter3.
             [frontend.hypha.plugin-init]
-            [frontend.state :as state]))
+            [frontend.state :as state]
+            [lambdaisland.glogi :as log]
+            [promesa.core :as p]))
+
+(defn- <fetch-remote-graphs-after-login!
+  "Phase-1.6 M9.1 — non-blocking auto-fetch of the user's remote graphs.
+
+  Fires after every successful Hypha auth (cookie-session restore or
+  fresh access-code login). Failures log but do not surface to the user
+  — the multi-graph picker's manual refresh button remains as a fallback.
+
+  Safe to call before the db-worker is ready: <ensure-user-rsa-keys-on-server!
+  inside <get-remote-graphs guards on @state/*db-worker and degrades to
+  log/warn + skip when the worker hasn't booted yet (sync.cljs:150-163)."
+  []
+  (-> (rtc-handler/<get-remote-graphs)
+      (p/catch (fn [e]
+                 (log/error :hypha/initial-graph-fetch-failed
+                            {:error e})))))
 
 (defn set-hypha-id-token!
   "Phase-1 token setter: in-memory only.
@@ -36,11 +69,16 @@
   Unlike `frontend.handler.user/set-tokens!` we do not persist anything to
   localStorage. The HttpOnly session cookie is the only persistent auth
   material; the JWT lives in memory exclusively and is re-minted on every
-  app boot via `/auth/session`."
+  app boot via `/auth/session`.
+
+  Phase-1.6: fires <fetch-remote-graphs-after-login! as a side-effect so
+  Browser B's freshly-authenticated session sees its remote graphs in the
+  picker without further clicks."
   [id-token]
   (state/set-auth-id-token id-token)
   (some->> (user-handler/parse-jwt id-token)
-           (reset! flows/*current-login-user)))
+           (reset! flows/*current-login-user))
+  (<fetch-remote-graphs-after-login!))
 
 (defn- <fetch-session
   "GET /auth/session — returns the cljs-http response map."

@@ -39,6 +39,16 @@ check "patch-2: restore-tokens-from-localstorage call exists in handler.cljs" \
       "rg -c 'user-handler/restore-tokens-from-localstorage' src/main/frontend/handler.cljs" \
       "1"
 
+# === Patch #3 ===
+check "patch-3: logged-in? defn exists in handler/user.cljs" \
+      "rg -c 'defn logged-in\?' src/main/frontend/handler/user.cljs" \
+      "1"
+
+# === Patch #4 ===
+check "patch-4: new-db-graph-inner component exists in components/repo.cljs" \
+      "rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
