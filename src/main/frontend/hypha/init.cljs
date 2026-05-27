@@ -47,6 +47,49 @@
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
 
+(defn- <wait-for-db-worker-ready!
+  "Resolve once @state/*db-worker is truthy. Mirrors the pattern in
+  `frontend.handler.db-based.sync/<wait-for-db-worker-ready!` (private)
+  but kept in this Hypha namespace to avoid an upstream patch."
+  []
+  (if @state/*db-worker
+    (p/resolved true)
+    (let [ready (p/deferred)
+          watch-key (keyword "frontend.hypha.init"
+                             (str "wait-db-worker-" (random-uuid)))]
+      (add-watch state/*db-worker watch-key
+                 (fn [_ _ _ worker]
+                   (when worker
+                     (remove-watch state/*db-worker watch-key)
+                     (p/resolve! ready true))))
+      ;; Race: worker may have become ready between the initial check and
+      ;; add-watch above. Re-check and resolve eagerly if so.
+      (when @state/*db-worker
+        (remove-watch state/*db-worker watch-key)
+        (p/resolve! ready true))
+      ready)))
+
+(defn- <push-auth-to-db-worker!
+  "Push :auth/id-token + :auth/access-token into the db-worker state.
+
+  Stock Logseq's :rtc/sync-app-state event (`handler/events/rtc.cljs:88`)
+  gates this push on :git/current-repo being non-nil — which only happens
+  AFTER a graph has been loaded. Hypha's M9.1 auto-fetch fires
+  IMMEDIATELY after login, before any graph exists. Without an explicit
+  push here, the worker has no :auth/id-token; <ensure-user-rsa-keys-on-server!
+  → worker → <resolve-user-uuid → <resolve-ws-token sees an empty token,
+  falls into the refresh path, and throws 'worker auth refresh requires
+  refresh token' (which Hypha never has).
+
+  See docs/hypha/phase-1.6-cross-device.md V10-finding for the full trace."
+  []
+  (-> (<wait-for-db-worker-ready!)
+      (p/then (fn [_]
+                (state/<invoke-db-worker
+                 :thread-api/sync-app-state
+                 (select-keys @state/state
+                              [:auth/id-token :auth/access-token]))))))
+
 (defn- <fetch-remote-graphs-after-login!
   "Phase-1.6 M9.1 — non-blocking auto-fetch of the user's remote graphs.
 
@@ -54,11 +97,15 @@
   fresh access-code login). Failures log but do not surface to the user
   — the multi-graph picker's manual refresh button remains as a fallback.
 
-  Safe to call before the db-worker is ready: <ensure-user-rsa-keys-on-server!
-  inside <get-remote-graphs guards on @state/*db-worker and degrades to
-  log/warn + skip when the worker hasn't booted yet (sync.cljs:150-163)."
+  Pushes auth state to the db-worker FIRST (Phase-1.6 V10 fix) so that
+  worker-side code reached by <get-remote-graphs (notably crypt/
+  <resolve-user-uuid) sees a valid :auth/id-token. Without that push,
+  the worker fails with 'worker auth refresh requires refresh token'
+  because Hypha's auth model has no refresh-token."
   []
-  (-> (rtc-handler/<get-remote-graphs)
+  (-> (p/do
+        (<push-auth-to-db-worker!)
+        (rtc-handler/<get-remote-graphs))
       (p/catch (fn [e]
                  (log/error :hypha/initial-graph-fetch-failed
                             {:error e})))))
