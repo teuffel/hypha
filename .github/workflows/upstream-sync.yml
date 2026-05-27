@@ -128,17 +128,19 @@ jobs:
         if: steps.smoke.outputs.result == 'pass'
         run: bin/hypha-build --release
 
-      - name: Headless-Auth-Smoke-Test (Runtime-Verifikation)
+      - name: Headless-Smoke-Test (Runtime-Verifikation)
         if: steps.smoke.outputs.result == 'pass'
         id: auth_smoke
         run: |
-          # Spec lives in hypha-server/test/playwright/headless-auth.spec.ts.
+          # Specs live in hypha-server/test/playwright/*.spec.ts.
           # Catches semantic upstream drift that the literal grep cannot:
           # render-time exceptions, dispatch table changes, modal harness
-          # regressions, etc.
+          # regressions, AND (M7) Logseq moving plugin-marketplace fetches
+          # away from window.fetch — which would silently leak outbound
+          # GitHub/Cloudflare traffic past Hypha's interceptor.
           pnpm --dir hypha-server install --frozen-lockfile
           pnpm --dir hypha-server exec playwright install --with-deps chromium
-          if timeout 60 pnpm --dir hypha-server test:headless-auth; then
+          if timeout 120 pnpm --dir hypha-server test:headless-auth; then
             echo "result=pass" >> $GITHUB_OUTPUT
           else
             echo "result=fail" >> $GITHUB_OUTPUT
