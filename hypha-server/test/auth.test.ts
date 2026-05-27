@@ -29,6 +29,7 @@ async function makeRuntime(): Promise<HyphaRuntime> {
     port: 0,
     host: "127.0.0.1",
     username: "hypha-user",
+    userUuid: "00000000-0000-0000-0000-000000000001",
     email: "user@hypha.test",
     accessCodeHash: hash,
     jwtIssuer: ISSUER,
@@ -38,6 +39,8 @@ async function makeRuntime(): Promise<HyphaRuntime> {
     cookieSecure: false,
     signingKid: "hypha-test-key",
     staticDirs: [],
+    dbSyncInternalPort: 0,
+    dataDir: "/tmp/hypha-test-data",
     signingPrivateKey: privateKey,
     signingPublicJwk: publicJwk,
   };
@@ -88,7 +91,11 @@ test("POST /auth/login — correct code returns 200 + cookie + JWT", async () =>
     });
     assert.equal(protectedHeader.alg, "RS256");
     assert.equal(protectedHeader.kid, "hypha-test-key");
-    assert.equal(payload.sub, "hypha-user");
+    assert.equal(payload.sub, "00000000-0000-0000-0000-000000000001");
+    // sub MUST be a UUID-shaped string so Logseq's worker pipeline can
+    // safely `(uuid sub)` it without breaking the search-upsert UUID
+    // validator. See deps/common/src/logseq/common/util.cljs uuid-string?.
+    assert.match(payload.sub as string, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // V1-(c) defensive double claim
     assert.equal(payload["cognito:username"], "hypha-user");
     assert.equal(payload["preferred_username"], "hypha-user");

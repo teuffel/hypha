@@ -44,6 +44,20 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     logger: opts.logLevel === "silent" ? false : { level: opts.logLevel ?? "info" },
   });
 
+  // Cross-origin isolation — required for Logseq's sqlite-wasm in the
+  // browser. Without these headers, SharedArrayBuffer is undefined and
+  // OPFS writes fail with "Cannot write DOMException", which breaks
+  // graph persistence + imports.
+  //
+  // COEP=credentialless instead of require-corp keeps cross-origin
+  // resources loadable without their servers needing to advertise CORP —
+  // matters for Logseq's external icon CDNs, image proxies, etc. The
+  // page itself is still cross-origin isolated; SharedArrayBuffer works.
+  app.addHook("onSend", async (_request, reply) => {
+    reply.header("Cross-Origin-Opener-Policy", "same-origin");
+    reply.header("Cross-Origin-Embedder-Policy", "credentialless");
+  });
+
   await app.register(fastifyCookie);
 
   const sessions = new SessionStore(opts.config.sessionTtlSeconds);
