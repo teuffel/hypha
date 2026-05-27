@@ -35,6 +35,8 @@
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.config :as hypha-config]
+            [frontend.hypha.login :as hypha-login]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.instrumentation.sentry :as sentry-event]
             [frontend.state :as state]
@@ -347,8 +349,14 @@
   (login/sign-out!))
 
 (defmethod events/handle :user/login [[_]]
-  (if (mobile-util/native-platform?)
+  (cond
+    hypha-config/hypha-mode?
+    (hypha-login/open-login-modal!)
+
+    (mobile-util/native-platform?)
     (route-handler/redirect! {:to :user-login})
+
+    :else
     (login/open-login-modal!)))
 
 (defmethod events/handle :asset/dialog-edit-external-url [[_ asset-block pdf-current]]
