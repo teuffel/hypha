@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# Hypha dev container entry point.
+#
+# All Hypha development should happen inside the dev container, which holds
+# the full toolchain pinned to CI versions. The host only needs Docker +
+# Compose.
+#
+# Usage:
+#   bin/dev                          interactive bash shell in the container
+#   bin/dev bin/hypha-build          run the Hypha build inside the container
+#   bin/dev bb dev:lint-and-test     run the full lint+test preflight inside
+#   bin/dev bb dev:test -v <ns/t>    run a single unit test inside
+#   bin/dev <any command>            forwarded as-is
+#
+# The host UID/GID are detected and forwarded so files created inside the
+# container belong to the host user (no root-owned files in the repo).
+#
+# The first invocation builds the image (~5 min). Subsequent runs are
+# instant. Cache volumes (.m2, .gitlibs, .shadow-cljs, node_modules) persist
+# across container removals so rebuilds are fast.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
+
+COMPOSE=(docker compose -f docker-compose.dev.yml)
+
+# Build image if missing. Detected by image label, not by image name alone,
+# so a stale cache doesn't get treated as fresh.
+if ! docker image inspect hypha-dev:local --format '{{ index .Config.Labels "org.hypha.toolchain.node" }}' \
+       >/dev/null 2>&1; then
+  echo ">> First-time setup: building Hypha dev container..."
+  echo "   (Takes ~5 minutes. Subsequent runs are instant.)"
+  "${COMPOSE[@]}" build dev
+fi
+
+# Ensure root pnpm dependencies are installed (incl. native modules like
+# keytar). Test suite and runtime require them. Detection via pnpm's
+# .modules.yaml which only exists after a successful install.
+if [[ ! -f node_modules/.modules.yaml ]]; then
+  echo ">> First-time setup: installing root pnpm dependencies inside container..."
+  echo "   (Builds native modules; takes ~2 minutes.)"
+  "${COMPOSE[@]}" run --rm dev pnpm install --frozen-lockfile
+fi
+
+if [[ $# -eq 0 ]]; then
+  exec "${COMPOSE[@]}" run --rm dev bash
+else
+  exec "${COMPOSE[@]}" run --rm dev "$@"
+fi
