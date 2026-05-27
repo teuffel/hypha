@@ -121,6 +121,11 @@ COPY --from=builder /build/deps/db-sync/node_modules    ./deps/db-sync/node_modu
 # Browser bundle: gulp + cljs:release + webpack output combined into static/.
 COPY --from=builder /build/static                       ./static
 
+# Pre-flight entrypoint: turn the cryptic SQLITE_CANTOPEN error that fires
+# when /data is root-owned (Docker bind-mount on a non-existent host path)
+# into a single actionable line of "run mkdir ./data first".
+COPY --from=builder /build/hypha-server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 # Data directory — bind-mounted in compose so contents survive container life.
 RUN mkdir -p /data && chown -R node:node /data /opt/hypha
 
@@ -134,4 +139,5 @@ USER node
 # repoRoot derives from the file's location, so no override is needed when
 # the layout above is preserved.
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "hypha-server/dist/main.js"]
