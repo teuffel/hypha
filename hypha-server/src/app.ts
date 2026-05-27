@@ -22,6 +22,12 @@ import { logoutRoute } from "./routes/logout.js";
 import { jwksRoute } from "./routes/jwks.js";
 import { proxyRoute } from "./proxy.js";
 import { staticsRoute } from "./statics.js";
+import { PluginCache } from "./plugin-cache.js";
+import { pluginMarketRoute } from "./routes/plugin-market.js";
+import { pluginCdnRoute } from "./routes/plugin-cdn.js";
+
+/** Default capacity for the plugin-marketplace+CDN cache (Phase 1.5). */
+const DEFAULT_PLUGIN_CACHE_MAX_ENTRIES = 256;
 
 export interface BuildAppOptions {
   config: HyphaRuntime;
@@ -36,6 +42,19 @@ export interface BuildAppOptions {
    * this out.
    */
   syncUpstreamUrl?: string;
+  /**
+   * Optional plugin marketplace + R2 CDN upstream bases. When unset the
+   * /plugin-market/* and /plugin-cdn/* routes are skipped — tests that
+   * don't exercise the plugin surface leave this out.
+   */
+  pluginUpstream?: {
+    /** e.g. "https://raw.githubusercontent.com/logseq/marketplace/master". */
+    marketBase: string;
+    /** e.g. "https://plugins.logseq.io/r2". */
+    cdnBase: string;
+    /** Override default cache capacity (entries). */
+    cacheMaxEntries?: number;
+  };
   logLevel?: string;
 }
 
@@ -62,7 +81,20 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   const sessions = new SessionStore(opts.config.sessionTtlSeconds);
 
-  app.get("/health", async () => ({ status: "ok" }));
+  const pluginCache = opts.pluginUpstream
+    ? new PluginCache(opts.pluginUpstream.cacheMaxEntries ?? DEFAULT_PLUGIN_CACHE_MAX_ENTRIES)
+    : null;
+
+  // /health is plain-text "ok" by default. ?detail=cache surfaces the
+  // plugin-cache stats so V4 (cache-hit-rate ≥ 80% after a few F5s) can be
+  // verified by a curl probe from the deployed container.
+  app.get("/health", async (request) => {
+    const detail = (request.query as { detail?: string } | undefined)?.detail;
+    if (detail === "cache" && pluginCache) {
+      return { status: "ok", cache: pluginCache.getStats() };
+    }
+    return { status: "ok" };
+  });
 
   await app.register(loginRoute, { config: opts.config, sessions });
   await app.register(sessionRoute, { config: opts.config, sessions });
@@ -71,6 +103,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   if (opts.syncUpstreamUrl) {
     await app.register(proxyRoute, { upstreamUrl: opts.syncUpstreamUrl });
+  }
+
+  if (opts.pluginUpstream && pluginCache) {
+    await app.register(pluginMarketRoute, {
+      cache: pluginCache,
+      upstreamBase: opts.pluginUpstream.marketBase,
+    });
+    await app.register(pluginCdnRoute, {
+      cache: pluginCache,
+      upstreamBase: opts.pluginUpstream.cdnBase,
+    });
   }
 
   if (opts.staticDir) {
