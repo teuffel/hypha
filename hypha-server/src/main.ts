@@ -73,7 +73,12 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
 try {
   await runner.start();
   await app.listen({ port: config.port, host: config.host });
-  app.log.info(`hypha-server listening on ${config.host}:${config.port}`);
+  // Read the actual bound address: when PORT=0 was supplied, the OS picked
+  // a free port; logging config.port would print 0 (useless for callers).
+  const addr = app.server.address();
+  const boundHost = typeof addr === "string" ? addr : (addr?.address ?? config.host);
+  const boundPort = typeof addr === "string" ? "" : `:${addr?.port ?? config.port}`;
+  app.log.info(`hypha-server listening on ${boundHost}${boundPort}`);
 } catch (err) {
   app.log.error({ err }, "hypha-server bootstrap failed");
   await runner.stop();
