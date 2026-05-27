@@ -47,8 +47,15 @@ const jwksUrl = `http://127.0.0.1:${config.port}/auth/jwks`;
 // CORS-enabled and the browser could call them directly; we proxy to cache
 // the responses (V1 probe showed 2/3 cold R2 fetches timing out, and the
 // GitHub-API-wrapped R2 endpoint is rate-limited 60/hr unauthenticated).
-const pluginMarketUpstream = "https://raw.githubusercontent.com/logseq/marketplace/master";
-const pluginCdnUpstream = "https://plugins.logseq.io/r2";
+//
+// Env overrides exist so the headless Playwright suite can point both
+// upstreams at a local fixture server and stay hermetic in CI.
+const pluginMarketUpstream =
+  process.env.HYPHA_PLUGIN_MARKET_UPSTREAM ??
+  "https://raw.githubusercontent.com/logseq/marketplace/master";
+const pluginCdnUpstream =
+  process.env.HYPHA_PLUGIN_CDN_UPSTREAM ??
+  "https://plugins.logseq.io/r2";
 
 const app = await buildApp({
   config,
