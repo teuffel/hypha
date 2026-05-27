@@ -79,10 +79,107 @@ async function startMockSyncUpstream(): Promise<{ port: number; close: () => Pro
   };
 }
 
+/**
+ * Fixture server that stands in for raw.githubusercontent.com/logseq/marketplace
+ * AND plugins.logseq.io/r2 during the Playwright suite. Hermetic — no network.
+ *
+ *   /market/plugins.json        — 3-package index (web + electron + theme mix)
+ *   /market/stats.json          — matching download stats
+ *   /market/packages/<id>/<f>   — echoes canned content (e.g. icon.png)
+ *   /cdn/<repo>/<version>       — R2 plugin manifest
+ *   /cdn/<repo>/<version>/<f>   — binary plugin asset
+ *
+ * The fixture is bound in this launcher process; libuv keeps the listener
+ * alive for the duration of the test run, the same way startMockSyncUpstream
+ * does it.
+ */
+async function startMockMarketplaceUpstream(): Promise<{
+  port: number;
+  close: () => Promise<void>;
+}> {
+  const fixturePlugins = {
+    packages: [
+      {
+        id: "test-plugin-hypha-marketplace",
+        title: "Hypha Test Plugin",
+        web: true,
+        effect: false,
+      },
+      {
+        id: "test-plugin-electron-only",
+        title: "Electron-only Test Plugin",
+        web: false,
+        effect: true,
+      },
+      {
+        id: "test-plugin-no-effect",
+        title: "Theme Test Plugin",
+        theme: true,
+        effect: false,
+      },
+    ],
+  };
+  const fixtureStats = {
+    "test-plugin-hypha-marketplace": {
+      releases: [["v1.0.0", "asset.js", 42]],
+    },
+  };
+  const fixtureR2Manifest = {
+    id: "test-plugin-hypha-marketplace",
+    name: "test-plugin-hypha-marketplace",
+    main: "dist/index.html",
+    version: "1.0.0",
+  };
+
+  const server = http.createServer((req, res) => {
+    const url = req.url ?? "";
+    const respond = (status: number, contentType: string, body: string | Buffer): void => {
+      res.writeHead(status, { "content-type": contentType });
+      res.end(body);
+    };
+
+    if (url === "/market/plugins.json") {
+      respond(200, "application/json", JSON.stringify(fixturePlugins));
+      return;
+    }
+    if (url === "/market/stats.json") {
+      respond(200, "application/json", JSON.stringify(fixtureStats));
+      return;
+    }
+    if (url.startsWith("/market/packages/")) {
+      // Canned PNG header bytes so the proxy's binary round-trip is exercised.
+      respond(200, "image/png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      return;
+    }
+    if (url.startsWith("/cdn/") && !url.slice(5).includes("/dist/")) {
+      respond(200, "application/json", JSON.stringify(fixtureR2Manifest));
+      return;
+    }
+    if (url.startsWith("/cdn/")) {
+      respond(200, "application/javascript", "console.log('fixture plugin');");
+      return;
+    }
+    respond(404, "text/plain", "not found");
+  });
+  await new Promise<void>((resolveListen) =>
+    server.listen(0, "127.0.0.1", () => resolveListen()),
+  );
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    close: () =>
+      new Promise<void>((resolveClose) => {
+        server.close(() => resolveClose());
+      }),
+  };
+}
+
 function startHyphaServer(opts: {
   mockUpstreamPort: number;
+  marketplaceFixturePort: number;
   accessCodeHash: string;
 }): { child: ChildProcess; ready: Promise<string> } {
+  const fixtureBase = `http://127.0.0.1:${opts.marketplaceFixturePort}`;
   const env = {
     ...process.env,
     PORT: "0",
@@ -95,6 +192,11 @@ function startHyphaServer(opts: {
     HYPHA_DB_SYNC_ADAPTER_PATH: adapterMockPath,
     HYPHA_DATA_DIR: "/tmp/hypha-headless-data",
     HYPHA_STATIC_DIR: staticDir,
+    // Point the plugin-marketplace + R2 proxy routes at the in-process
+    // fixture so the test suite stays hermetic (no outbound GitHub /
+    // Cloudflare traffic; no flakiness from upstream rate limits).
+    HYPHA_PLUGIN_MARKET_UPSTREAM: `${fixtureBase}/market`,
+    HYPHA_PLUGIN_CDN_UPSTREAM: `${fixtureBase}/cdn`,
   };
   // Use the compiled dist/ so the test exercises the same artifact as the
   // Docker image. Pre-condition: tsc has been run (Dockerfile.hypha + CI
@@ -134,10 +236,16 @@ export default async function globalSetup(): Promise<void> {
   const mock = await startMockSyncUpstream();
   // eslint-disable-next-line no-console
   console.log(`[headless-auth setup] mock /sync upstream on :${mock.port}`);
+  const marketplaceFixture = await startMockMarketplaceUpstream();
+  // eslint-disable-next-line no-console
+  console.log(
+    `[headless-auth setup] marketplace fixture on :${marketplaceFixture.port}`,
+  );
   const accessCodeHash = await bcrypt.hash(ACCESS_CODE, 4);
 
   const { child, ready } = startHyphaServer({
     mockUpstreamPort: mock.port,
+    marketplaceFixturePort: marketplaceFixture.port,
     accessCodeHash,
   });
 
@@ -151,6 +259,7 @@ export default async function globalSetup(): Promise<void> {
     console.error("[headless-auth setup] hypha-server failed to start", err);
     child.kill("SIGTERM");
     await mock.close();
+    await marketplaceFixture.close();
     throw err;
   }
 
