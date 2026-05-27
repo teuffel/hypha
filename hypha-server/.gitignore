@@ -1,0 +1,19 @@
+# hypha-server local ignores
+#
+# Lives here (not in repo-root .gitignore) so that root-level Logseq files
+# stay untouched — see docs/hypha/phase-1-plan.md section on patch-budget
+# discipline.
+
+# TypeScript build output
+dist/
+
+# Node modules (also covered by root .gitignore, listed here for clarity
+# when reading this subtree in isolation)
+node_modules/
+
+# Sentry source-map upload artifacts (relevant later)
+.sentryclirc
+
+# Local env overrides
+.env
+.env.local
