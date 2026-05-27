@@ -1,0 +1,27 @@
+{
+  "name": "@hypha/server",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "description": "Hypha self-hostable server: reverse-proxy + auth + statics for a Hypha-built Logseq frontend",
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "test": "node --test test/",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0",
+    "@fastify/http-proxy": "^11.0.0",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,54 @@
+# Hypha development environment.
+#
+# All Hypha development happens through this compose file; the host needs
+# only Docker + Compose. Entry point is bin/dev (interactive shell) or
+# bin/dev <command> (one-shot command).
+#
+# Caches (pnpm modules, Maven/.m2, gitlibs, .shadow-cljs, .cpcache) live in
+# named docker volumes so they survive container removal and don't pollute
+# the host repo with root-owned files. The repo itself is bind-mounted at
+# /workspace so live editing on the host works as expected.
+#
+# This file is DEV only. Production images live in docker-compose.hypha.yml
+# and Dockerfile.hypha (M3).
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        USER_UID: "${HOST_UID:-1000}"
+        USER_GID: "${HOST_GID:-1000}"
+    image: hypha-dev:local
+    init: true
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /workspace
+    volumes:
+      # Repo bind-mount — host UID/GID match the dev user in the image so
+      # files created inside the container are owned by the host user.
+      - .:/workspace
+      # Named volumes for HOME caches only. Workspace-internal caches like
+      # .cpcache, .shadow-cljs, and node_modules live inside the bind mount
+      # — they're gitignored on the host and persist naturally between runs.
+      # (Named volumes on top of bind-mounted subpaths get root-owned by
+      # Docker, which the dev user can't write to. Avoid that trap.)
+      - hypha-m2:/home/dev/.m2
+      - hypha-gitlibs:/home/dev/.gitlibs
+    environment:
+      HOME: /home/dev
+      # Forward shadow-cljs's default nrepl port for editor connections
+      # (REPL workflows in M1+; harmless at this stage).
+      LOGSEQ_SHADOW_HTTPS: "false"
+    ports:
+      # Hypha-server dev port (matches default in hypha-server/src/main.ts)
+      - "3000:3000"
+      # shadow-cljs HTTP server (Logseq dev frontend)
+      - "3001:3001"
+      # shadow-cljs nREPL
+      - "8701:8701"
+    command: bash
+
+volumes:
+  hypha-m2:
+  hypha-gitlibs:

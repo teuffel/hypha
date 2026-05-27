@@ -1,0 +1,112 @@
+# syntax=docker/dockerfile:1.6
+#
+# Hypha development container.
+#
+# A single image containing the full Logseq + Hypha build/test/lint toolchain.
+# All Hypha development should happen inside this container so that the host
+# OS does not need Java, Clojure, Babashka, pnpm, or specific Node versions.
+#
+# Versions are pinned to match Logseq CI (.github/workflows/build.yml) so that
+# a clean container build reproduces what CI does:
+#
+#   - Node 24.x         (CI NODE_VERSION='24')
+#   - Java 21           (CI JAVA_VERSION='21')
+#   - Clojure CLI       1.12.4.1618 (CI CLOJURE_VERSION)
+#   - Babashka          1.12.215     (CI BABASHKA_VERSION)
+#   - pnpm              10.33.0      (root package.json packageManager)
+#
+# This is the DEV image. Production images live in Dockerfile.hypha (M3,
+# different concern). They are intentionally separate so dev tooling does
+# not bloat the runtime image.
+#
+# Build:    docker compose -f docker-compose.dev.yml build dev
+# Shell:    bin/dev
+# Run cmd:  bin/dev bin/hypha-build
+#           bin/dev bb dev:lint-and-test
+
+# Base: Eclipse Temurin JDK 21 on Ubuntu 22.04 (jammy). This is the upstream
+# canonical OpenJDK 21 distribution; saves us from Debian Bookworm's missing
+# openjdk-21 packages and matches CI's Java 21 expectation exactly.
+FROM eclipse-temurin:21-jdk-jammy AS hypha-dev
+
+ARG NODE_MAJOR=24
+ARG CLOJURE_VERSION=1.12.4.1618
+ARG BABASHKA_VERSION=1.12.215
+ARG PNPM_VERSION=10.33.0
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+
+# --- base packages (JDK 21 already in the base image) ----------------------
+#
+# python3 + build-essential: required to compile node-gyp-based native modules
+#                            (keytar, better-sqlite3, ...) during pnpm install.
+# libsecret-1-dev:           keytar build-time header dependency on Linux.
+#                            Pulls in libsecret-1-0 as runtime transitive.
+# ripgrep / git / curl:      dev-shell convenience and CI parity.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gnupg xz-utils ripgrep \
+        build-essential rlwrap procps \
+        python3 \
+        libsecret-1-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- Node + pnpm (NodeSource for stable LTS line) --------------------------
+RUN mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g pnpm@${PNPM_VERSION}
+
+# --- Clojure CLI -----------------------------------------------------------
+RUN curl -fsSL "https://download.clojure.org/install/linux-install-${CLOJURE_VERSION}.sh" \
+      -o /tmp/clojure-install.sh \
+ && chmod +x /tmp/clojure-install.sh \
+ && /tmp/clojure-install.sh \
+ && rm /tmp/clojure-install.sh
+
+# --- Babashka --------------------------------------------------------------
+RUN curl -fsSL https://raw.githubusercontent.com/babashka/babashka/master/install \
+      -o /tmp/bb-install.sh \
+ && bash /tmp/bb-install.sh --version ${BABASHKA_VERSION} \
+ && rm /tmp/bb-install.sh
+
+# --- dev user (UID/GID overridable via build-arg) --------------------------
+#
+# Default UID/GID 1000 matches typical single-user Linux hosts. For other
+# host UIDs, rebuild with --build-arg USER_UID=$(id -u) USER_GID=$(id -g),
+# or use docker-compose `user:` directive to override at runtime (already
+# wired in docker-compose.dev.yml via $HOST_UID/$HOST_GID).
+RUN if ! getent group ${USER_GID} >/dev/null 2>&1; then groupadd --gid ${USER_GID} dev; fi \
+ && useradd --uid ${USER_UID} --gid ${USER_GID} --shell /bin/bash --create-home dev \
+ && mkdir -p /workspace \
+ # Pre-create cache directories with dev ownership so that empty named
+ # volumes mounted at these paths inherit the right permissions on first
+ # run (Docker propagates the image's directory content/permissions into
+ # an empty volume, but if the directory doesn't exist, the volume is
+ # created root-owned).
+ && mkdir -p /home/dev/.m2 /home/dev/.gitlibs /home/dev/.cache \
+ && chown -R dev:${USER_GID} /workspace /home/dev
+
+WORKDIR /workspace
+USER dev
+
+ENV HOME=/home/dev
+
+# Smoke labels for sanity-checking the built image
+LABEL org.hypha.toolchain.node="${NODE_MAJOR}.x" \
+      org.hypha.toolchain.clojure="${CLOJURE_VERSION}" \
+      org.hypha.toolchain.babashka="${BABASHKA_VERSION}" \
+      org.hypha.toolchain.pnpm="${PNPM_VERSION}"
+
+# Default: interactive shell. Compose / bin/dev overrides this per call.
+CMD ["bash"]
