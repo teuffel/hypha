@@ -10,6 +10,7 @@
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.config :as hypha-config]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.ui :as ui]
@@ -605,8 +606,16 @@
 (rum/defc new-db-graph-inner
   [rtc-group?]
   (let [[creating-db? set-creating-db?] (hooks/use-state false)
-        [cloud? set-cloud?] (hooks/use-state false)
-        [graph-e2ee? set-graph-e2ee?] (hooks/use-state true)
+        ;; Hypha-defaults: cloud ON (personal-cloud is the whole point of
+        ;; self-hosting; default-off broke cross-device in Phase 1.5),
+        ;; e2ee OFF (encrypted_private_key needs the same user password
+        ;; on every device, so default-on plus default-cloud silently
+        ;; breaks cross-device until the user types the password in
+        ;; Browser B; default-off is the sensible single-user-trusts-own-server
+        ;; setting). User can flip either checkbox manually.
+        ;; See HYPHA_PATCHES.md #4 + docs/hypha/phase-1.6-cross-device.md §M9.3.
+        [cloud? set-cloud?] (hooks/use-state (boolean hypha-config/hypha-mode?))
+        [graph-e2ee? set-graph-e2ee?] (hooks/use-state (not hypha-config/hypha-mode?))
         [e2ee-rsa-key-ensured? set-e2ee-rsa-key-ensured?] (hooks/use-state nil)
         input-ref (hooks/create-ref)
         new-db-f (fn new-db-f
