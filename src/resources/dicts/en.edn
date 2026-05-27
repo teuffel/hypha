@@ -867,6 +867,10 @@
  :help.shortcuts/title "Keyboard shortcuts"
  :help.shortcuts/triggers "Triggers"
 
+ :hypha.login/access-code-placeholder "Access code"
+ :hypha.login/invalid-code "Invalid access code"
+ :hypha.login/network-error "Could not reach the server. Please try again."
+
  :icon/emojis-count "Emojis ({1})"
  :icon/icons-count "Icons ({1})"
  :icon/matched-count "Matched ({1})"

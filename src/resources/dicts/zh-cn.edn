@@ -863,6 +863,10 @@
  :help.shortcuts/title "完整快捷键"
  :help.shortcuts/triggers "触发"
 
+ :hypha.login/access-code-placeholder "访问码"
+ :hypha.login/invalid-code "访问码无效"
+ :hypha.login/network-error "无法连接到服务器，请重试。"
+
  :icon/emojis-count "表情符号（{1}）"
  :icon/icons-count "图标（{1}）"
  :icon/matched-count "匹配结果（{1}）"
