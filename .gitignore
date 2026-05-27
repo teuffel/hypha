@@ -99,6 +99,9 @@ clj-e2e/.clj-kondo/imports
 .env.*.local
 # Bind-mount target for docker-compose.hypha.yml
 /data/
-# hypha-server compiled output
+# hypha-server compiled output + Playwright artifacts
 /hypha-server/dist/
 /hypha-server/node_modules/
+/hypha-server/test-results/
+/hypha-server/playwright-report/
+/hypha-server/test/playwright/.state/

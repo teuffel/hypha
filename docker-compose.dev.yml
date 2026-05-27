@@ -35,6 +35,10 @@ services:
       # Docker, which the dev user can't write to. Avoid that trap.)
       - hypha-m2:/home/dev/.m2
       - hypha-gitlibs:/home/dev/.gitlibs
+      # Holds Playwright's ms-playwright/ browser binaries (~300 MB Chromium).
+      # Without this, every `bin/dev` invocation lands in a fresh container
+      # and would re-download the browser. Added in M4.
+      - hypha-cache:/home/dev/.cache
     environment:
       HOME: /home/dev
       # Forward shadow-cljs's default nrepl port for editor connections
@@ -67,3 +71,4 @@ services:
 volumes:
   hypha-m2:
   hypha-gitlibs:
+  hypha-cache:
