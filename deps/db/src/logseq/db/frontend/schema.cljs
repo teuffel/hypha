@@ -105,7 +105,18 @@
    :file/content {}
    :file/created-at {}
    :file/last-modified-at {}
-   :file/size {}})
+   :file/size {}
+
+   ;; Built-in property whose Datascript-side index is read via `:avet`
+   ;; lookups in frontend.worker.sync.large-title (find-large-title-object-eid
+   ;; and rehydrate-large-titles-from-db!). Without :db/index true the
+   ;; `(d/datoms db :avet :logseq.property.sync/large-title-object)` call
+   ;; throws "should be marked as :db/index true", hanging the cloud
+   ;; snapshot import in the cross-device download flow.
+   ;; See Phase-1.6 §V10 Befund-#3 in docs/hypha/phase-1.6-cross-device.md.
+   ;; Companion change: malli_schema.cljs page-or-block-attrs declares the
+   ;; same attribute so the db-sync adapter's startup symmetry check passes.
+   :logseq.property.sync/large-title-object {:db/index true}})
 
 ;; If only block/title changes
 (def retract-attributes
