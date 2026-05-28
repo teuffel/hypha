@@ -291,7 +291,13 @@
    [:block/tx-id {:optional true} :int]
    [:block/collapsed? {:optional true} :boolean]
    [:block/warning {:optional true} [:keyword]]
-   [:logseq.property/created-by-ref {:optional true} :int]])
+   [:logseq.property/created-by-ref {:optional true} :int]
+   ;; Sync subsystem: opaque map {:asset-uuid string, :asset-type string}
+   ;; that points at a large block title stored in remote object storage.
+   ;; Declared here so the db-sync node-adapter's startup symmetry check
+   ;; (datascript schema ↔ malli schema) accepts the :db/index true
+   ;; declaration in frontend/schema.cljs. See Phase-1.6 §M11.
+   [:logseq.property.sync/large-title-object {:optional true} :map]])
 
 (def page-attrs
   "Common attributes for pages"
