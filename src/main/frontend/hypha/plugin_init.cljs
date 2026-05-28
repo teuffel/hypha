@@ -175,10 +175,17 @@
 
 (defn- rewrite-plugin-asset-url
   "Rewrite a web-plugin iframe entry URL from the upstream R2 bucket to the
-  same-origin Hypha proxy. Non-R2 URLs pass through unchanged."
+  same-origin Hypha proxy. Non-R2 URLs pass through unchanged.
+
+  The result is an ABSOLUTE URL (with `window.location.origin` prepended)
+  because `LSPlugin.caller.ts:260` feeds the value straight into
+  `new URL(pl.options.entry!)`, and the URL constructor throws
+  `URL constructor: <path> is not a valid URL` on bare-relative paths."
   [url]
   (if (and (string? url) (string/starts-with? url plugin-assets-prefix))
-    (str "/plugin-cdn/assets/" (subs url (count plugin-assets-prefix)))
+    (str (.. js/window -location -origin)
+         "/plugin-cdn/assets/"
+         (subs url (count plugin-assets-prefix)))
     url))
 
 (defn install-plugin-asset-rewrite!
