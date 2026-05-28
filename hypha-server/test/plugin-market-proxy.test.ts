@@ -62,7 +62,13 @@ async function makeRuntime(): Promise<HyphaRuntime> {
 
 interface FakeResponse {
   status?: number;
-  contentType?: string;
+  /**
+   * When omitted, defaults to "application/json" (the common-case test
+   * shape). Explicit `null` means "send NO Content-Type header at all" —
+   * mirrors the real Cloudflare R2 public bucket behavior used to verify
+   * the server-side MIME sniffer in plugin-cache.ts.
+   */
+  contentType?: string | null;
   /** Either a UTF-8 string body or a raw Buffer. */
   body: string | Buffer;
 }
@@ -88,9 +94,15 @@ async function startFakeUpstream(): Promise<FakeUpstream> {
       res.end("not found");
       return;
     }
-    res.writeHead(planned.status ?? 200, {
-      "content-type": planned.contentType ?? "application/json",
-    });
+    // Three cases:
+    //   undefined  → default "application/json" (common test shape)
+    //   null       → omit Content-Type entirely (mirror real R2 behavior)
+    //   string     → exact contentType verbatim
+    const headers: Record<string, string> =
+      planned.contentType === null
+        ? {}
+        : { "content-type": planned.contentType ?? "application/json" };
+    res.writeHead(planned.status ?? 200, headers);
     res.end(planned.body);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -329,6 +341,53 @@ test("/plugin-cdn/assets/* — injects cross-origin-resource-policy on MISS, HIT
     assert.equal(fourOhFour.headers["cross-origin-resource-policy"], "cross-origin",
       "BYPASS response must carry CORP — defense in depth, in case the browser surfaces the error page");
     assert.equal(fourOhFour.headers["x-hypha-cache"], "BYPASS");
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
+  }
+});
+
+test("/plugin-cdn/assets/* — sniffs Content-Type from extension when upstream omits it", async () => {
+  // The real R2 bucket (pub-…r2.dev) responds 200 OK but WITHOUT a
+  // Content-Type header. The proxy must fill in text/html for *.html so
+  // the browser actually renders the iframe (rather than treating it as
+  // a binary download), otherwise plugin code never runs and the
+  // 8s handshake timeout fires anyway. Mirrors that real upstream by
+  // sending NO contentType on the fake response.
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const htmlBytes = Buffer.from("<!doctype html><html><body>plugin</body></html>", "utf8");
+  assets.responses.set("/foo/bar/v1.0.0/dist/index.html", {
+    // contentType: null → fake-upstream returns the body without a
+    // Content-Type header, identical to the real R2 behavior.
+    contentType: null,
+    body: htmlBytes,
+  });
+  const jsBytes = Buffer.from("export default 1;", "utf8");
+  assets.responses.set("/foo/bar/v1.0.0/dist/index.js", {
+    contentType: null,
+    body: jsBytes,
+  });
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    const html = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/foo/bar/v1.0.0/dist/index.html",
+    });
+    assert.equal(html.statusCode, 200);
+    assert.equal(html.headers["content-type"], "text/html; charset=utf-8",
+      ".html → text/html (browser renders the iframe instead of downloading)");
+
+    const js = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/foo/bar/v1.0.0/dist/index.js",
+    });
+    assert.equal(js.statusCode, 200);
+    assert.equal(js.headers["content-type"], "application/javascript; charset=utf-8",
+      ".js → application/javascript (browser executes it as a script)");
   } finally {
     await app.close();
     await market.close();

@@ -131,6 +131,62 @@ function applyExtraHeaders(
 }
 
 /**
+ * Minimal MIME-type sniffer for upstreams that respond without a
+ * Content-Type header (the Cloudflare R2 public bucket where Logseq
+ * hosts plugin iframe assets does this for every file). Sniffing from
+ * the URL's path extension is the same heuristic browsers apply by
+ * default, but we have to do it server-side because we re-emit the
+ * response under our own origin.
+ *
+ * Without this, the iframe load defaults to application/octet-stream,
+ * which browsers treat as a download rather than rendering as HTML —
+ * the iframe stays blank, plugin code never runs, and the handshake
+ * timeout fires anyway.
+ */
+function sniffContentTypeFromUrl(url: string): string | undefined {
+  // Strip query + fragment, take basename extension.
+  const pathnameOnly = url.split("?")[0].split("#")[0];
+  const dot = pathnameOnly.lastIndexOf(".");
+  if (dot < 0) return undefined;
+  const ext = pathnameOnly.slice(dot + 1).toLowerCase();
+  switch (ext) {
+    case "html":
+    case "htm":
+      return "text/html; charset=utf-8";
+    case "js":
+    case "mjs":
+      return "application/javascript; charset=utf-8";
+    case "css":
+      return "text/css; charset=utf-8";
+    case "json":
+      return "application/json; charset=utf-8";
+    case "svg":
+      return "image/svg+xml";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "ico":
+      return "image/x-icon";
+    case "woff":
+      return "font/woff";
+    case "woff2":
+      return "font/woff2";
+    case "ttf":
+      return "font/ttf";
+    case "map":
+      return "application/json; charset=utf-8";
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Serve a cached upstream response, refreshing on miss.
  *
  *   - Cache HIT  →  200 + cached body + `X-Hypha-Cache: HIT`
@@ -159,7 +215,15 @@ export async function serveCached(opts: ServeCachedOptions): Promise<FastifyRepl
     return opts.reply.code(502).send({ error: "upstream_unreachable" });
   }
 
-  const contentType = upstreamRes.headers.get("content-type") ?? "application/octet-stream";
+  // Order of precedence:
+  //   1. Upstream Content-Type if present.
+  //   2. Extension-sniffed type from the upstream URL.
+  //   3. application/octet-stream (truly unknown — let the client interpret).
+  const upstreamContentType = upstreamRes.headers.get("content-type");
+  const contentType =
+    upstreamContentType ??
+    sniffContentTypeFromUrl(opts.upstreamUrl) ??
+    "application/octet-stream";
   const body = Buffer.from(await upstreamRes.arrayBuffer());
 
   if (!upstreamRes.ok) {
