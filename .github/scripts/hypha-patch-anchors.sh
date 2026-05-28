@@ -49,6 +49,11 @@ check "patch-4: new-db-graph-inner component exists in components/repo.cljs" \
       "rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
       "1"
 
+# === Patch #5 ===
+check "patch-5: snapshot-stream-url defn exists in deps/db-sync handler/sync.cljs" \
+      "rg -c 'defn- snapshot-stream-url' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code

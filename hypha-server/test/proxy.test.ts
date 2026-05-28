@@ -219,6 +219,108 @@ test("/e2ee/* — request is forwarded (RSA key management)", async () => {
   }
 });
 
+test("X-Forwarded-Host + X-Forwarded-Proto are injected on every proxied path", async () => {
+  // Phase 1.6 V10-click bug: db-sync's snapshot-stream-url uses
+  // request.url.origin to embed a follow-up URL in its JSON response.
+  // Behind hypha-server's reverse proxy, that origin equals the
+  // container-internal loopback (127.0.0.1:8787), unreachable from the
+  // browser. Fix: hypha-server injects X-Forwarded-Host + X-Forwarded-Proto
+  // so the downstream service can reconstruct the public origin.
+  // This test is the drift gate: removing the injection regresses every
+  // browser fetch of /sync/.../snapshot/download.
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  // baseUrl is the hypha-server's listening host (e.g. "http://127.0.0.1:54321").
+  // The browser-visible Host header equals baseUrl's host, NOT the upstream's.
+  // After rewrite, upstream must see x-forwarded-host==browser-host.
+  const expectedHost = new URL(baseUrl).host;
+  try {
+    for (const path of ["/sync/x", "/graphs", "/e2ee/user-keys", "/assets/x"]) {
+      const res = await fetch(`${baseUrl}${path}`, {
+        headers: { Authorization: "Bearer test-jwt" },
+      });
+      assert.equal(res.status, 200);
+    }
+    assert.equal(upstream.calls.length, 4);
+    for (const call of upstream.calls) {
+      // The drift gate: x-forwarded-host MUST be the browser-visible
+      // hypha-server host, not the upstream's loopback host. If our
+      // rewriteRequestHeaders hook regresses (or fastify-http-proxy
+      // changes signature), this fails.
+      assert.equal(
+        call.headers["x-forwarded-host"],
+        expectedHost,
+        `x-forwarded-host wrong on ${call.url}; want ${expectedHost}`,
+      );
+      assert.equal(
+        call.headers["x-forwarded-proto"],
+        "http",
+        `x-forwarded-proto wrong on ${call.url}`,
+      );
+    }
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("X-Forwarded-Host overrides the Host header that fastify-http-proxy already rewrote to upstream", async () => {
+  // Phase-1.6 V10-final-click-bug regression test: by the time
+  // @fastify/reply-from calls rewriteRequestHeaders, the Host header in
+  // the `base` map has already been rewritten to the upstream's host.
+  // Our hook must read host from the ORIGINAL FastifyRequest.headers,
+  // not from `base`. If a future refactor reads from `base` again, this
+  // test breaks immediately — that was the failure mode that caused
+  // db-sync's snapshot-stream-url to embed the internal loopback host
+  // in JSON responses, breaking cross-device graph downloads.
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  const expectedHost = new URL(baseUrl).host;
+  const upstreamHost = new URL(upstream.url).host;
+  // Sanity: the two hosts are distinct (different ports), so a stale
+  // host read would produce a detectable error.
+  assert.notEqual(expectedHost, upstreamHost);
+  try {
+    await fetch(`${baseUrl}/sync/snapshot/download`, {
+      headers: { Authorization: "Bearer t" },
+    });
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(
+      upstream.calls[0]!.headers["x-forwarded-host"],
+      expectedHost,
+      `x-forwarded-host must be the browser-facing host (${expectedHost}), not the upstream host (${upstreamHost})`,
+    );
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("X-Forwarded-Host pre-set by an outer proxy is preserved (not overridden)", async () => {
+  // When an operator fronts hypha-server with Caddy/nginx/Traefik on
+  // TLS, THAT outer proxy should set x-forwarded-host=public-domain and
+  // x-forwarded-proto=https. We must respect those, not overwrite with
+  // the value of the (loopback) Host header from inside the operator's
+  // network.
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    await fetch(`${baseUrl}/sync/x`, {
+      headers: {
+        Authorization: "Bearer t",
+        "x-forwarded-host": "hypha.example.com",
+        "x-forwarded-proto": "https",
+      },
+    });
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0]!.headers["x-forwarded-host"], "hypha.example.com");
+    assert.equal(upstream.calls[0]!.headers["x-forwarded-proto"], "https");
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
 test("/health — local route, NOT proxied (precedence over upstream)", async () => {
   const upstream = await startFakeUpstream();
   const { app, baseUrl } = await startHyphaWith(upstream.url);
