@@ -110,6 +110,24 @@ export interface ServeCachedOptions {
   upstreamUrl: string;
   ttlSeconds: number;
   reply: FastifyReply;
+  /**
+   * Extra response headers applied to every reply (HIT, MISS, BYPASS).
+   * Used by the plugin-asset route to inject
+   * `cross-origin-resource-policy: cross-origin` so iframe loads pass
+   * Hypha's required COEP=credentialless gate. See
+   * docs/hypha/phase-1.6.2-plugin-iframe-corp.md.
+   */
+  extraHeaders?: Record<string, string>;
+}
+
+function applyExtraHeaders(
+  reply: FastifyReply,
+  extraHeaders: Record<string, string> | undefined,
+): void {
+  if (!extraHeaders) return;
+  for (const [name, value] of Object.entries(extraHeaders)) {
+    reply.header(name, value);
+  }
 }
 
 /**
@@ -128,6 +146,7 @@ export interface ServeCachedOptions {
 export async function serveCached(opts: ServeCachedOptions): Promise<FastifyReply> {
   const hit = opts.cache.get(opts.cacheKey);
   if (hit) {
+    applyExtraHeaders(opts.reply, opts.extraHeaders);
     opts.reply.header("X-Hypha-Cache", "HIT");
     opts.reply.header("Content-Type", hit.contentType);
     return opts.reply.code(200).send(hit.body);
@@ -144,6 +163,7 @@ export async function serveCached(opts: ServeCachedOptions): Promise<FastifyRepl
   const body = Buffer.from(await upstreamRes.arrayBuffer());
 
   if (!upstreamRes.ok) {
+    applyExtraHeaders(opts.reply, opts.extraHeaders);
     opts.reply.header("X-Hypha-Cache", "BYPASS");
     opts.reply.header("Content-Type", contentType);
     return opts.reply.code(upstreamRes.status).send(body);
@@ -155,6 +175,7 @@ export async function serveCached(opts: ServeCachedOptions): Promise<FastifyRepl
     expiresAt: Date.now() + opts.ttlSeconds * 1000,
   });
 
+  applyExtraHeaders(opts.reply, opts.extraHeaders);
   opts.reply.header("X-Hypha-Cache", "MISS");
   opts.reply.header("Content-Type", contentType);
   return opts.reply.code(200).send(body);

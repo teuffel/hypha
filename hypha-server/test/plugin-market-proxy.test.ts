@@ -103,7 +103,12 @@ async function startFakeUpstream(): Promise<FakeUpstream> {
   };
 }
 
-async function buildPluginApp(market: FakeUpstream, cdn: FakeUpstream, cacheMaxEntries = 64) {
+async function buildPluginApp(
+  market: FakeUpstream,
+  cdn: FakeUpstream,
+  cacheMaxEntries = 64,
+  assets?: FakeUpstream,
+) {
   const config = await makeRuntime();
   const app = await buildApp({
     config,
@@ -111,6 +116,11 @@ async function buildPluginApp(market: FakeUpstream, cdn: FakeUpstream, cacheMaxE
     pluginUpstream: {
       marketBase: market.url,
       cdnBase: cdn.url,
+      // Phase 1.6.2 added assetsBase. Tests that don't exercise the
+      // /plugin-cdn/assets/* route may pass nothing — we point at the
+      // cdn fake just to keep the type contract honest (the route only
+      // fires if the test makes the matching request).
+      assetsBase: assets?.url ?? cdn.url,
       cacheMaxEntries,
     },
   });
@@ -270,6 +280,81 @@ test("/plugin-cdn/r2/* — rejects path traversal with 400 invalid_path", async 
     await app.close();
     await market.close();
     await cdn.close();
+  }
+});
+
+// Phase 1.6.2: /plugin-cdn/assets/* must inject cross-origin-resource-policy
+// so plugin iframes pass Hypha's COEP=credentialless gate.
+
+test("/plugin-cdn/assets/* — injects cross-origin-resource-policy on MISS, HIT, and BYPASS", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const htmlBytes = Buffer.from("<!doctype html><html><body>plugin</body></html>", "utf8");
+  assets.responses.set("/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html", {
+    contentType: "text/html",
+    body: htmlBytes,
+  });
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    // MISS — first request fetches upstream and sets the header.
+    const miss = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html",
+    });
+    assert.equal(miss.statusCode, 200);
+    assert.equal(miss.headers["cross-origin-resource-policy"], "cross-origin",
+      "MISS response must carry CORP=cross-origin so COEP credentialless passes");
+    assert.equal(miss.headers["x-hypha-cache"], "MISS");
+    assert.deepEqual(miss.rawPayload, htmlBytes);
+
+    // HIT — second request hits cache and must STILL set the header (cache
+    // re-emit, not just on-the-wire-fetch).
+    const hit = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html",
+    });
+    assert.equal(hit.headers["cross-origin-resource-policy"], "cross-origin",
+      "HIT response must also carry CORP — the gate is on every reply, not just upstream-touched ones");
+    assert.equal(hit.headers["x-hypha-cache"], "HIT");
+    assert.equal(assets.calls.length, 1, "second hit must come from cache, not upstream");
+
+    // BYPASS — upstream 404 path must still set CORP so error pages don't
+    // bypass the policy.
+    const fourOhFour = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/unknown/repo/v9.9.9/dist/missing.html",
+    });
+    assert.equal(fourOhFour.statusCode, 404);
+    assert.equal(fourOhFour.headers["cross-origin-resource-policy"], "cross-origin",
+      "BYPASS response must carry CORP — defense in depth, in case the browser surfaces the error page");
+    assert.equal(fourOhFour.headers["x-hypha-cache"], "BYPASS");
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
+  }
+});
+
+test("/plugin-cdn/assets/* — rejects path traversal with 400 invalid_path", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    const res = await app.inject({
+      method: "GET",
+      url: "/plugin-cdn/assets/..%2Fsecret",
+    });
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.json(), { error: "invalid_path" });
+    assert.equal(assets.calls.length, 0, "no upstream fetch on traversal reject");
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
   }
 });
 

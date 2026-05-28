@@ -3,7 +3,7 @@
   `frontend.handler/start!` is invoked) so that the Logseq plugin subsystem
   picks up Hypha's shims and proxy redirects on its first marketplace fetch.
 
-  Two side effects:
+  Three side effects:
 
   1. `install-fetch-redirect!` monkey-patches `js/window.fetch` with a
      prefix-based URL rewriter:
@@ -25,7 +25,16 @@
      (the EventEmitter3 surface is preserved here so `addListener`/`emit`
      still work for plugin IPC).
 
-  See `docs/hypha/phase-1.5-plugin-marketplace.md` sections 2.2 + 2.3."
+  3. `install-plugin-asset-rewrite!` (Phase 1.6.2) wraps
+     `window.LSPlugin.PluginLocal.prototype._resolveResourceFullUrl` so
+     web-plugin iframe entry URLs go through the same-origin
+     `/plugin-cdn/assets/*` proxy instead of the cross-origin R2 bucket
+     directly. Under hypha-server's required COEP=credentialless, the
+     R2 bucket's missing CORP/CORS headers block every plugin iframe load,
+     causing recurring `handshake Timeout` errors every 8 s.
+
+  See `docs/hypha/phase-1.5-plugin-marketplace.md` §§ 2.2 + 2.3 for steps
+  1+2, and `docs/hypha/phase-1.6.2-plugin-iframe-corp.md` for step 3."
   (:require [clojure.string :as string]
             [frontend.hypha.config :as hypha-config]))
 
@@ -159,13 +168,58 @@
       (set! (.-apis js/window) apis))))
 
 ;; ---------------------------------------------------------------------------
+;; (3) Plugin-iframe entry URL rewrite (Phase 1.6.2)
+
+(def ^:private plugin-assets-prefix
+  "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev/")
+
+(defn- rewrite-plugin-asset-url
+  "Rewrite a web-plugin iframe entry URL from the upstream R2 bucket to the
+  same-origin Hypha proxy. Non-R2 URLs pass through unchanged."
+  [url]
+  (if (and (string? url) (string/starts-with? url plugin-assets-prefix))
+    (str "/plugin-cdn/assets/" (subs url (count plugin-assets-prefix)))
+    url))
+
+(defn install-plugin-asset-rewrite!
+  "Wrap `window.LSPlugin.PluginLocal.prototype._resolveResourceFullUrl` so
+  web-plugin iframe URLs flow through `/plugin-cdn/assets/*` (which injects
+  `cross-origin-resource-policy: cross-origin`) instead of going directly
+  to `pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev` (which sends neither
+  CORP nor CORS headers and so gets blocked by COEP=credentialless).
+
+  Idempotent via the `__hyphaWrapped` flag on the wrapper.
+
+  Ordering: `lsplugin.core.js` is loaded with `defer` before `main.js`
+  in `resources/index.html`, so `window.LSPlugin.PluginLocal` is populated
+  by the time this cljs namespace's `_on-load` fires. If the global is
+  somehow missing (publishing build, stripped bundle, future upstream
+  rename) we log a single warning and skip — the original blocking
+  behavior at least remains observable rather than silently no-opping."
+  []
+  (let [^js proto (some-> js/window .-LSPlugin .-PluginLocal .-prototype)]
+    (if proto
+      (let [^js orig (.-_resolveResourceFullUrl proto)]
+        (when (and orig (not (.-__hyphaWrapped orig)))
+          (let [wrapped (fn [file-path local-root]
+                          (this-as this
+                            (rewrite-plugin-asset-url
+                             (.call orig this file-path local-root))))]
+            (set! (.-__hyphaWrapped wrapped) true)
+            (set! (.-_resolveResourceFullUrl proto) wrapped))))
+      (js/console.warn
+       (str "[hypha] window.LSPlugin.PluginLocal not available at "
+            "plugin-init time; plugin-asset rewrite skipped")))))
+
+;; ---------------------------------------------------------------------------
 ;; Entry point + namespace-load-time wiring
 
 (defn setup!
-  "Idempotent: install both shims. Safe to call from a REPL during dev."
+  "Idempotent: install all three shims. Safe to call from a REPL during dev."
   []
   (install-fetch-redirect!)
-  (install-window-apis!))
+  (install-window-apis!)
+  (install-plugin-asset-rewrite!))
 
 (defonce ^:private ^{:doc "Fires on namespace load. The `frontend.hypha.init`
   ns requires this ns, and `frontend.handler` in turn requires hypha.init,
