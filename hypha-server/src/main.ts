@@ -56,12 +56,19 @@ const pluginMarketUpstream =
 const pluginCdnUpstream =
   process.env.HYPHA_PLUGIN_CDN_UPSTREAM ??
   "https://plugins.logseq.io/r2";
+const pluginAssetsUpstream =
+  process.env.HYPHA_PLUGIN_ASSETS_UPSTREAM ??
+  "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev";
 
 const app = await buildApp({
   config,
   staticDir,
   syncUpstreamUrl,
-  pluginUpstream: { marketBase: pluginMarketUpstream, cdnBase: pluginCdnUpstream },
+  pluginUpstream: {
+    marketBase: pluginMarketUpstream,
+    cdnBase: pluginCdnUpstream,
+    assetsBase: pluginAssetsUpstream,
+  },
 });
 
 const runner = new DbSyncRunner({

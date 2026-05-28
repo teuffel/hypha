@@ -52,6 +52,13 @@ export interface BuildAppOptions {
     marketBase: string;
     /** e.g. "https://plugins.logseq.io/r2". */
     cdnBase: string;
+    /**
+     * e.g. "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev". Public
+     * R2 bucket where plugin iframe assets live. Phase 1.6.2 proxies
+     * these so COEP=credentialless passes; see
+     * docs/hypha/phase-1.6.2-plugin-iframe-corp.md.
+     */
+    assetsBase: string;
     /** Override default cache capacity (entries). */
     cacheMaxEntries?: number;
   };
@@ -113,6 +120,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     await app.register(pluginCdnRoute, {
       cache: pluginCache,
       upstreamBase: opts.pluginUpstream.cdnBase,
+      assetsUpstreamBase: opts.pluginUpstream.assetsBase,
     });
   }
 
