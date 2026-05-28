@@ -415,6 +415,23 @@
                   _ (state/set-state! :rtc/uploading? false)
                   _ (<rtc-start! repo)]
             true)
+          ;; HYPHA-PATCH-007: surface upload failures as a user notification.
+          ;; Without this catch, every rejected promise in the chain (worker
+          ;; reports `:db-sync/missing-datascript-conn`, server returns 4xx,
+          ;; HTTP-base config missing, …) propagates as an "Uncaught (in
+          ;; promise)" line that only DevTools-aware users notice. The
+          ;; upload spinner clears via p/finally, so the UI looks identical
+          ;; to success. Phase 1.6 V10 turned this up as the cause of
+          ;; "Cloud icon clicked, spinner blinked, nothing synced" reports.
+          (p/catch (fn [e]
+                     (log/error :db-sync/upload-graph-failed
+                                {:repo repo :error e})
+                     (notification/show!
+                      (t :graph/upload-failed
+                         (or (some-> e ex-message)
+                             (str e)))
+                      :error)
+                     (p/rejected e)))
           (p/finally
             (fn []
               (state/set-state! :rtc/uploading? false)))))))
