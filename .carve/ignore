@@ -75,3 +75,8 @@ frontend.common.missionary/background-task-running?
 ;; defonce
 mobile.components.popup/native-sheet-listener
 mobile.bottom-tabs/add-tab-listeners!
+;; Hypha namespace-load-time side-effect defonces (see Phase 1.5 M6
+;; and Phase 1.6 plan): require'd from frontend.handler via the
+;; init.cljs chain, the side effect fires before frontend.handler/start!
+;; runs. Carve doesn't recognize side-effect-only defonces.
+frontend.hypha.plugin-init/_on-load

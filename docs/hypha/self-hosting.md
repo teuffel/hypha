@@ -199,6 +199,20 @@ one click of the access-code modal.
   uses ephemeral keys; a restart invalidates outstanding sessions but
   the HttpOnly cookie lets re-login happen in one click. Phase 2.
 
+## Architecture pointers
+
+If you're curious about specific subsystems:
+
+- [`phase-1-plan.md`](phase-1-plan.md): single-user personal-cloud
+  architecture (auth model, db-sync child process, OPFS storage).
+- [`phase-1.5-plugin-marketplace.md`](phase-1.5-plugin-marketplace.md):
+  the plugin-marketplace caching proxy (M5-M7).
+- [`phase-1.6-cross-device.md`](phase-1.6-cross-device.md): the
+  cross-device Browser-A → Browser-B flow (M8-M11).
+- [`asset-lazy-loading.md`](asset-lazy-loading.md): how image/PDF
+  attachments load on-demand per block render (VA1-VA4) — read this
+  before assuming asset behaviour.
+
 ## Where to ask for help
 
 - Repository issues: <https://github.com/teuffel/hypha/issues>

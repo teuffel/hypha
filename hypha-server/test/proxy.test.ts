@@ -162,6 +162,59 @@ test("/assets/* — request is forwarded with query string preserved", async () 
   }
 });
 
+test("/assets/* — PUT (upload) reaches upstream with body intact (VA4 drift gate)", async () => {
+  // VA4 finding (docs/hypha/asset-lazy-loading.md §4.2): the proxy must
+  // forward not just GET but PUT, otherwise Browser A → Browser B asset
+  // sync silently breaks (Cross-Browser-Lücke 4 für Assets). A future
+  // method-whitelist regression in proxy.ts would break this test.
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    const payload = "fake-png-bytes\x89PNG\r\n";
+    const res = await fetch(`${baseUrl}/assets/graph-abc/asset-uuid.png`, {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer test-jwt",
+        "content-type": "image/png",
+        "x-amz-meta-checksum": "deadbeefcafebabe",
+        "x-amz-meta-type": "png",
+      },
+      body: payload,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    const call = upstream.calls[0]!;
+    assert.equal(call.method, "PUT");
+    assert.equal(call.body, payload);
+    assert.equal(call.headers["x-amz-meta-checksum"], "deadbeefcafebabe");
+    assert.equal(call.headers["x-amz-meta-type"], "png");
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
+test("/assets/* — DELETE reaches upstream (cleanup path)", async () => {
+  // Server-driven :remove-asset op (worker/sync/assets.cljs:239-251)
+  // triggers DELETE /assets/<graph>/<uuid>.<ext>. If proxy.ts ever
+  // grew a method whitelist that omitted DELETE, cleanup would
+  // silently fail and orphan bucket objects would accumulate forever.
+  const upstream = await startFakeUpstream();
+  const { app, baseUrl } = await startHyphaWith(upstream.url);
+  try {
+    const res = await fetch(`${baseUrl}/assets/graph-abc/uuid.png`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer test-jwt" },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0]!.method, "DELETE");
+  } finally {
+    await app.close();
+    await upstream.close();
+  }
+});
+
 test("/graphs — GET is forwarded (the list-remote-graphs endpoint)", async () => {
   const upstream = await startFakeUpstream();
   const { app, baseUrl } = await startHyphaWith(upstream.url);

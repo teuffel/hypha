@@ -1,8 +1,11 @@
 # Phase 1.6 — Cross-Device Personal Cloud
 
-**Status:** Plan (vor Implementation)
+**Status:** Abgeschlossen 2026-05-28 (manueller V10 grün, alle Patches gepusht)
 **Vorgänger:** Phase 1.5 (Plugin-Marketplace) — abgeschlossen
 **Nachfolger:** Phase 2 (Multi-User + Realtime-Collab)
+**Reference:** Architektur-Verifikation Asset-Lazy-Loading in
+[`asset-lazy-loading.md`](./asset-lazy-loading.md) (post-Sign-off
+dokumentiert; VA1–VA4-Probes für Phase-2-Optionen U30/U31).
 
 ## 0. Warum Phase 1.6
 
@@ -814,12 +817,23 @@ self-hosted; key-sync between devices is Phase 2."
 
 ## 8. Phase-1.6-Sign-off Checklist
 
-| # | Kriterium | Wo verifiziert |
-|---|---|---|
-| 1 | V7-V10 grün und in docs/hypha/phase-1.6-cross-device.md committed | nachgereichter `docs(hypha)`-Commit |
-| 2 | M8 Server-Routes erreichbar | `hypha-server` Unit-Tests + curl-Probe |
-| 3 | M9 Patches landen, Hypha-Build clean | clj-kondo + `clojure -M:cljs compile` |
-| 4 | M10 Playwright-Spec grün lokal und in CI | `pnpm --dir hypha-server test:headless-auth` |
-| 5 | Patches-Inventar dokumentiert | `.github/scripts/hypha-patch-anchors.sh` + dieser Plan §5 |
-| 6 | User-Story aus §0 manuell verifiziert | Manuell auf localhost:3030 Firefox+Chrome |
-| 7 | `docs/hypha/self-hosting.md` aktualisiert | §7 |
+| # | Kriterium | Wo verifiziert | Status |
+|---|---|---|---|
+| 1 | V7-V10 grün und in dieser Datei committed | `eda6f56003` (V7-V9), V10 manuell post-M11 | ✅ |
+| 2 | M8 Server-Routes erreichbar | `hypha-server/test/proxy.test.ts` 8/8 + curl-Probe | ✅ |
+| 3 | M9 Patches landen, Hypha-Build clean | `bash .github/scripts/hypha-patch-anchors.sh` 7/7 PASS, clj-kondo + `bin/hypha-build --release` | ✅ |
+| 4 | M9.4 Auth-State-Pre-Push behebt rsa-key-failed | T5 in `cross-device.spec.ts` (Drift-Gate) | ✅ |
+| 5 | M9.5 Reverse-Proxy-Origin-Leak behoben | 3 neue Tests in `proxy.test.ts` (X-Forwarded-Host) + curl gegen Container zeigt `localhost:3030/...` URL | ✅ |
+| 6 | M10 Playwright-Spec grün lokal und in CI | `pnpm --dir hypha-server test:headless-auth` 17/17 in 48s | ✅ |
+| 7 | M11 Schema-Konsistenz für `large-title-object` | V11 (container startup ohne Symmetrie-Crash) + V12 (Browser B repo-switch nach Click) | ✅ |
+| 8 | Patches-Inventar dokumentiert | `.github/scripts/hypha-patch-anchors.sh` 7/7 PASS + `HYPHA_PATCHES.md` §1-6 + dieser Plan §5 | ✅ |
+| 9 | User-Story aus §0 manuell verifiziert | Firefox erstellt Cloud-Graph + Block, Chrome sieht ihn nach Login + Click (2026-05-28) | ✅ |
+| 10 | `docs/hypha/self-hosting.md` aktualisiert | "Multi-device works"-Eintrag im "What you'll get"-Block, "Things that don't work yet" auf Multi-User/Realtime/E2EE-Key-Sync/Mobile/Ephemere-JWT eingegrenzt | ✅ |
+| 11 | Asset-Lazy-Loading-Architektur dokumentiert | [`asset-lazy-loading.md`](./asset-lazy-loading.md) (VA1-VA4 + Phase-2-Use-Cases U30/U31), Commit `ca533fca78` | ✅ |
+
+**Patches-Inventar nach Phase 1.6:** 6/20 (30% Smell-Schwelle).
+
+Die ursprüngliche §4-Roadmap M8/M9/M10 wuchs während V10 organisch um drei
+Folge-Fixes (M9.4, M9.5, M11), jeder davon ein klarer post-hoc-Bug-Fund
+mit eigenständigem Patch. Phase 1.6 hat damit den User-Story-Bogen
+(Firefox erstellt → Chrome sieht Block-Inhalt) byte-für-byte geschlossen.
