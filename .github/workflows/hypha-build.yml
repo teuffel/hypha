@@ -55,6 +55,14 @@ jobs:
           cli: ${{ env.CLOJURE_VERSION }}
           bb: ${{ env.BABASHKA_VERSION }}
 
+      - name: Lint (carve)
+        # Fast prophylactic check: catches orphan defs that future
+        # upstream-sync merges or refactors might leave behind. Runs
+        # before the build so lint failures surface in seconds instead
+        # of minutes. See .carve/ignore for explicit allow-list entries
+        # (Hypha namespace-load-time side-effect defonces et al.).
+        run: bb lint:carve
+
       - name: Hypha release build
         # Runs bin/hypha-build --release which is the canonical pipeline used
         # by Dockerfile.hypha. Catches A8 propagation + gulp + cljs:release +
