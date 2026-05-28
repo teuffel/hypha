@@ -79,6 +79,14 @@ check "patch-8: graph-e2ee? defaults to false in hypha mode" \
       "rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/crypt.cljs" \
       "1"
 
+# === Patch #9 ===
+# local-uploadable-graph? gains a defensive guard against stale repos-state
+# so the toolbar doesn't render two cloud icons. Anchor on the patch-ID
+# comment in components/repo.cljs.
+check "patch-9: local-uploadable-graph? defends against stale :remote? flag" \
+      "rg -c 'HYPHA-PATCH-009' src/main/frontend/components/repo.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
