@@ -484,6 +484,120 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #8 — Hypha-aware default for unset `graph-e2ee?` in the worker
+
+- **ID**: HYPHA-PATCH-008
+- **Introduced**: Phase 1.6.2 (companion to V10 import-then-upload diagnosis), 2026-05-28
+- **File**: `src/main/frontend/worker/sync/crypt.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL (~line 210)
+  (defn graph-e2ee?
+    [repo]
+    (when-let [conn (worker-state/get-datascript-conn repo)]
+      (ldb/get-graph-rtc-e2ee? @conn)))
+
+  ;; HYPHA
+  (defn graph-e2ee?
+    [repo]
+    (when-let [conn (worker-state/get-datascript-conn repo)]
+      (let [explicit (ldb/get-graph-rtc-e2ee? @conn)]
+        (if (some? explicit)
+          explicit
+          (not (seq (:http-base @worker-state/*db-sync-config)))))))
+  ```
+- **Line count**: +12 (3 lines of logic plus a 9-line explanatory comment).
+- **Rationale**: Stock Logseq's `graph-e2ee?` returns `nil` for graphs
+  with no explicit `:logseq.kv/graph-rtc-e2ee?` setting. Every consumer
+  in `worker/sync/{upload,assets,apply_txs,handle_message}.cljs` treats
+  `nil` as truthy via `normalize-graph-e2ee?` or boolean coercion, so
+  the effective default is **e2ee=true**.
+
+  Phase 1.6 M9.3 (Patch #4) reversed the default for **new graph
+  creation** UI (`new-db-graph-inner`), but did NOT propagate the same
+  reversal to:
+
+  - **Imported file-graphs**: `frontend.components.imports/import-file-graph`
+    creates a DB entity without setting `:logseq.kv/graph-rtc-e2ee?`,
+    so the field stays nil, and `graph-e2ee?` returns nil → caller
+    interprets as true → upload-path triggers `<preflight-upload-e2ee!`
+    → which calls `<load-user-rsa-key-material` → which calls
+    `<decrypt-private-key` → which calls `ldb/read-transit-str` on the
+    raw key blob → fails with "JSON.parse: unexpected character at line 1
+    column 1" when the server's stored key isn't transit-encoded.
+
+  - **Older graphs created before M9.3**: same nil default, same failure.
+
+  This patch makes `graph-e2ee?` hypha-aware: when the worker's
+  `db-sync-config` has a custom `:http-base` (= self-hosted Hypha, set
+  by `persist_db/browser.cljs` from `frontend.config/set-custom-sync-server-url!`),
+  unset state defaults to **false** (no e2ee). When `:http-base` is
+  empty (= stock Logseq pointing at Logseq.com), unset state keeps the
+  safer default **true**. This is identical in shape to M9.3's UI
+  default reversal, just propagated through the runtime fallback.
+
+  Net effect on Hypha:
+  - Newly-created via UI: M9.3 sets explicit value → unchanged.
+  - Imported via folder: nil → false → upload skips e2ee entirely →
+    fixes Phase 1.6 V10 user story.
+  - Older graphs: nil → false → upload skips e2ee → user can opt back
+    in via Settings if desired.
+
+  Net effect on Logseq.com: unchanged (no custom server → keeps true).
+
+- **Companion change (NOT a patch)**: none. This is a single-file
+  worker-internal change.
+
+- **Additive alternatives considered**:
+  - Patch `<rtc-upload-graph!` to pass the user-confirmed `graph-e2ee?`
+    through to the worker via `:thread-api/db-sync-upload-graph`:
+    rejected — the parameter is currently `_graph-e2ee?` (underscored,
+    unused) in upstream, suggesting Logseq intended to do this but
+    didn't. Plumbing through the parameter would change the thread-api
+    signature and ripple to every caller; one-line worker default is
+    cleaner.
+  - Patch `frontend.components.repo/graph-e2ee-enabled?` to default
+    false in Hypha mode: rejected — that function's result is
+    consumed by `upload-local-graph-with-confirm!` but then thrown away
+    by `<rtc-upload-graph!`'s unused `_graph-e2ee?` parameter, so
+    patching it has no runtime effect.
+  - Set the DB KV `:logseq.kv/graph-rtc-e2ee?` explicitly to false
+    during import: rejected — would require a separate migration for
+    pre-existing graphs and would silently change semantics; better to
+    keep the database honest and patch the consumer.
+  - Submit this as an upstream Logseq fix: ideal long-term — when
+    Logseq accepts a config-driven e2ee default, this entry can be
+    removed.
+
+- **Break signal — structural**:
+  - `graph-e2ee?` is renamed, moved out of `worker/sync/crypt.cljs`,
+    or has its signature changed.
+  - `worker-state/*db-sync-config` is renamed or restructured.
+
+- **Break signal — semantic**:
+  - Upstream Logseq changes the `normalize-graph-e2ee?` callers so that
+    nil no longer maps to true. Then this patch becomes redundant or
+    inverted (verify all 6 caller sites match the expected polarity).
+  - Logseq introduces a new e2ee-default semantic where unset means
+    "ask the user" (UI prompt). Then the worker fallback should defer
+    to that UI flow rather than silently defaulting.
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/crypt.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the `(if (some? explicit) ...)` branch
+    must read `:http-base` from `worker-state/*db-sync-config`, and the
+    polarity must be `(not (seq ...))` — present-http-base implies
+    default-false.
+
+- **On break**:
+  - Structural rename → re-anchor on the new definition site.
+  - Semantic upstream-merged → remove this patch and re-verify the
+    import-then-upload V10 user story still works.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
