@@ -321,6 +321,79 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+---
+
+## Patch #6 — Schema completeness for `:logseq.property.sync/large-title-object`
+
+- **ID**: HYPHA-PATCH-006
+- **Introduced**: Milestone M11 (Phase 1.6 cross-device snapshot-import schema fix), 2026-05-28
+- **Files**:
+  - `deps/db/src/logseq/db/frontend/schema.cljs`
+  - `deps/db/src/logseq/db/frontend/malli_schema.cljs`
+- **Patch form** (two-piece, semantically one patch — both files must move
+  in lockstep to keep the db-sync adapter's symmetry check happy):
+
+  In `schema.cljs`, add to the `(def schema ...)` map:
+  ```clojure
+  :logseq.property.sync/large-title-object {:db/index true}
+  ```
+
+  In `malli_schema.cljs`, extend `page-or-block-attrs`:
+  ```clojure
+  [:logseq.property.sync/large-title-object {:optional true} :map]
+  ```
+- **Line count**: ~10 (including the explanatory comments — both files
+  reference the cross-device-V10 diagnosis in phase-1.6-cross-device.md
+  for context).
+- **Rationale**: `worker/sync/large_title.cljs` lines 51 + 259 call
+  `(d/datoms db :avet :logseq.property.sync/large-title-object)`, which
+  Datascript only allows when the attribute is marked `:db/index true`.
+  The static Datascript schema didn't declare it. Without this patch,
+  the snapshot-import path in `worker/sync/download.cljs/complete-datoms-import!`
+  → `rehydrate-large-titles-from-db!` throws ("should be marked as
+  :db/index true"), which the parent catches and logs as
+  `:rehydrate-large-title-failed`, but downstream the UI is left in the
+  "Wird heruntergeladen..." (downloading...) state. The Malli companion
+  declaration is needed because the db-sync node-adapter performs a
+  startup symmetry check between the Datascript schema and the Malli
+  entity schemas; declaring `large-title-object` in Datascript without
+  declaring it in Malli would make the adapter refuse to start.
+- **Additive alternatives considered**:
+  - Patch only the frontend caller (use `:eavt` + filter): rejected —
+    O(N) iteration over the whole DB on every snapshot import is a
+    real performance regression, and the same workaround would be
+    needed if upstream Logseq ever invents another `:avet` consumer for
+    this attribute.
+  - Skip the call entirely with a `(try ... (catch))`: rejected —
+    silently swallows future schema problems and leaves large-title
+    object reconstruction half-broken.
+  - Submit this to upstream Logseq as a bugfix PR and drop the patch:
+    ideal long-term — when Logseq accepts it, this entry can be removed.
+- **Break signal — structural**:
+  - The `schema` def in `deps/db/.../schema.cljs` is renamed, moved,
+    or restructured.
+  - The `page-or-block-attrs` def in `malli_schema.cljs` is renamed or
+    restructured.
+- **Break signal — semantic**:
+  - Logseq accepts the upstream fix → both lines become duplicate
+    declarations.
+  - The attribute is renamed or removed from upstream's built-in
+    properties.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c ':logseq.property.sync/large-title-object' deps/db/src/logseq/db/frontend/schema.cljs`
+    ⇒ `1`
+    `rg -c ':logseq.property.sync/large-title-object' deps/db/src/logseq/db/frontend/malli_schema.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: both occurrences must be in the
+    expected `def` (schema vs. page-or-block-attrs).
+- **On break**:
+  - Structural → re-anchor in whatever the new schema-map location is.
+  - Semantic upstream-merged → remove both lines, leave a TODO breadcrumb
+    referencing this entry's history.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
