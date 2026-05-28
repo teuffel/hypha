@@ -37,6 +37,7 @@
             [frontend.flows :as flows]
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.asset-cache :as asset-cache]
             ;; Required for its side-effecting defonce: the plugin-init ns
             ;; patches `window.fetch` and installs the `window.apis` shim at
             ;; namespace-load time, which lands before frontend.handler/start!
@@ -136,9 +137,14 @@
   "Hypha-mode app-boot entry point.
 
   Idempotent: callable multiple times. Returns nil (the side-effects are the
-  point)."
+  point).
+
+  Phase 1.6.1: also kicks off the LRU asset-cache eviction background tick
+  via `asset-cache/start!`. Runs independent of login state — the cache
+  needs guarding even when the user is logged out."
   []
   (config/set-custom-sync-server-url! js/window.location.origin)
+  (asset-cache/start!)
   (go
     (let [resp (<! (<fetch-session))]
       (cond

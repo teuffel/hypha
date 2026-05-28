@@ -49,19 +49,40 @@ ein Block sie anfordert.
 
 ## 2. VA2 — Cache-Verhalten + Eviction
 
-**Verdict: BESTÄTIGT (OPFS-Cache) + KORRIGIERT (kein Eviction).**
+**Verdict (Phase 1.6 Stand): BESTÄTIGT (IDB-Cache via LightningFS) +
+KORRIGIERT (kein Eviction).**
+
+**Phase 1.6.1 Update:** LRU-Eviction nachgerüstet — siehe
+[`phase-1.6.1-asset-cache.md`](./phase-1.6.1-asset-cache.md) und §6 U31
+unten.
+
+**Terminologie-Update:** Die ursprüngliche Phase-1.6-Notiz sprach von
+"OPFS-Cache". Das ist nicht ganz akkurat: SQLite-Datenbanken liegen
+in OPFS (via `@sqlite.org/sqlite-wasm` SAH-Pool), aber
+**Asset-Binaries** liegen in einer IndexedDB-Database namens `logseq`
+(via LightningFS mounted at `memory:///`). Siehe
+`resources/js/worker.js:18-19` für den `LightningFS('logseq')`-Setup
+und `src/main/frontend/persist_db/browser.cljs:104,107` für die
+`window.pfs`-Comlink-Bridge.
 
 | Aspekt | Beleg |
 |---|---|
-| Cache-Location | OPFS, `<graph-assets-dir>/<asset-uuid>.<asset-type>` via `src/main/frontend/worker/platform/browser.cljs:141-147 asset-write-bytes!` |
+| Cache-Location | LightningFS auf IndexedDB (`logseq` DB), Pfade unter `memory:///<graph-name>/assets/<asset-uuid>.<asset-type>` via `src/main/frontend/worker/platform/browser.cljs:141-147 asset-write-bytes!` |
 | Cache-Key | `<asset-uuid>.<asset-type>` aus `src/main/frontend/worker/sync/assets.cljs:29-31 asset-file-name` |
 | Cache-Lookup vor Fetch | `assets.cljs:367-372` ruft `platform/asset-stat`; truthy → `missing-local?=false` → kein Download |
-| Eviction-Mechanismus | **NICHT vorhanden.** `asset-delete!` (`browser.cljs:158-162`) wird ausschließlich durch `:remove-asset`-Op aus dem Server-Tx-Stream getriggert (`assets.cljs:239-251`) — also nur dann, wenn der Server explizit "Asset gelöscht" sagt |
+| Upstream-Eviction-Mechanismus | **NICHT vorhanden.** `asset-delete!` (`browser.cljs:158-162`) wird ausschließlich durch `:remove-asset`-Op aus dem Server-Tx-Stream getriggert (`assets.cljs:239-251`) — also nur dann, wenn der Server explizit "Asset gelöscht" sagt |
+| Hypha-Eviction (Phase 1.6.1) | `frontend.hypha.asset-cache` — Background-Interval, LRU by LightningFS `mtimeMs`, trigger bei `usage/quota > 0.8`, target 0.6. Hypha-eigen, kein Upstream-Patch |
 
-**Konsequenz:** Cache wächst monoton. Bei jahrelangem Personal-Cloud-Use
-mit vielen Anhängen müsste der User manuell OPFS leeren oder den
-gesamten lokalen Graphen löschen+re-downloaden, um Platz zu schaffen.
-Keine LRU-, Quota- oder Time-basierte Eviction.
+**Pre-1.6.1 Konsequenz war:** Cache wuchs monoton. Bei jahrelangem
+Personal-Cloud-Use mit vielen Anhängen müsste der User manuell IDB
+leeren oder den gesamten lokalen Graphen löschen+re-downloaden.
+
+**Post-1.6.1:** Background-Eviction hält den Browser-Storage-Pool
+(IDB + OPFS + Cache-API + SW gemeinsam laut
+`navigator.storage.estimate()`) unter 80% durch Löschen von
+LRU-Asset-Files. Evictete Assets werden bei Re-Render durch
+VA1-Lazy-Path neu vom Server geholt — akzeptable Trade-Off zwischen
+Quota-Druck und gelegentlichem Re-Download.
 
 ## 3. VA3 — HTTP-Range-Request-Support
 
@@ -194,27 +215,33 @@ leeren oder Graph re-downloaden.
    Block die `:logseq.property.asset/checksum`-Property gesetzt
    bekommt. Synchron zur Asset-Binary-Persistierung in OPFS.
 
-### 5.3 Patch-Budget-Auswirkung (post-Phase-1.6)
+### 5.3 Patch-Budget-Auswirkung
 
-Aktueller Stand nach Phase 1.6 Sign-off: **6/20**.
+Aktueller Stand nach Phase 1.6 + 1.6.1 Sign-off: **6/20**.
 
 | VA-Befund | Eingriff nötig? | Upstream-Patch ja/nein |
 |---|---|---|
 | VA1 (Lazy ✅) | keiner | 0 |
-| VA2 (kein Eviction) | optional, Phase-2-Feature | wenn ja: +1 in `worker/sync/assets.cljs` oder verwandt |
-| VA3 (kein Range) | optional, Phase-2-Feature | wenn ja: +1 in `deps/db-sync/.../worker/handler/assets.cljs` |
+| VA2 (Eviction nachgerüstet in 1.6.1) | Hypha-eigen, kein Upstream | **0** |
+| VA3 (kein Range) | Phase 2+ (Architektur-Switch nötig, siehe §6 U30) | dann: +2-3 Patches in Adapter + Frontend |
 | VA4 (Upload ✅) | keiner — `proxy.ts` deckt alle Methoden bereits ab | **0** |
 
 **Explizit bestätigt:** Asset-Upload-Pfad ist bereits funktional durch
 die existierende `/assets/*`-Proxy-Definition (M8) ohne Method-Filter.
 Kein Patch-Inventar-Wachstum nötig für Cross-Browser-Asset-Sync.
 
+**Phase 1.6.1 hat 0 Patches addiert** — U31-Eviction lebt in
+`frontend.hypha.asset-cache`, einem Hypha-eigenen Namespace ohne
+Upstream-Berührung.
+
 ## 6. Phase-2-Optionen mit Use-Cases
 
 Falls Asset-Optimierungen in einer späteren Phase (1.6.2 / 2.x)
 adressiert werden, folgen sie der Use-Cases-Konvention:
 
-### U30 — HTTP-Range-Support für große Assets
+### U30 — HTTP-Range-Support für große Assets (Phase 2)
+
+**Status:** Verschoben in Phase 2 nach tieferer Architektur-Analyse.
 
 **Beschreibung:** Browser kann eine PDF/Video-Datei progressive
 laden, statt sie komplett vor Sichtbarkeit zu fetchen.
@@ -223,32 +250,57 @@ laden, statt sie komplett vor Sichtbarkeit zu fetchen.
 liefert die erste 1 MB als `206 Partial Content` + `Content-Range:
 bytes 0-1048575/82345678`. PDF.js zeigt Seite 1 sobald das genügt.
 
+**Warum nicht Phase 1.6.1:**
+
+Der ursprüngliche U30-Plan ("~15-20 LoC Upstream-Patch in
+`handle-get-asset`") adressiert nur die **Server-Seite**, aber der
+heutige Frontend-Code würde Range-Requests gar nicht senden:
+
+| Code-Pfad heute | Was passiert |
+|---|---|
+| `asset-cp :did-mount` (`block.cljs:1098`) → `download-remote-asset!` | `js/fetch` ohne Range-Header → `.arrayBuffer()` → ganze Datei in OPFS |
+| `asset-link` rendered `<img>/<video>/<embed>` | `<make-asset-url>` (`handler/assets.cljs:117`) baut `blob:`-URL via `URL.createObjectURL` aus OPFS-Bytes |
+| Browser-interne Range-Requests (PDF.js, `<video>`) | Gehen gegen die `blob:`-URL → lesen direkt aus dem Memory-Buffer, **kein HTTP-Roundtrip** |
+
+Server-Range alleine ist heute funktional totes Feature. Range würde
+nur greifen, wenn das Frontend `<embed src="http://localhost:3030/assets/...">`
+direkt setzt (Cache-bypass), und das wirft drei Folge-Probleme auf:
+
+1. **Auth-Vector:** `<embed src>`/`<video src>` schickt keinen
+   `Authorization: Bearer`-Header. Adapter braucht entweder
+   Cookie-Auth für `/assets/`-GET (~15 LoC + Test) oder ein
+   Signed-URL-Pattern (~30 LoC + Token-Validation).
+2. **Cache-Bypass:** Streaming bricht Offline-Verfügbarkeit für die
+   großen Files. Akzeptabel als Trade-Off, aber Trade-Off muss
+   explizit sein.
+3. **Threshold-Logik:** Wann Streaming, wann OPFS? Per Size? Per
+   Mime-Type? Was bei Range-Failure (Fallback)?
+
+**Realistische Aufwandsschätzung:**
+- Adapter Range-Support: ~15 LoC = **Patch #7**
+- Adapter Cookie-Auth bzw. Signed-URL: ~15-30 LoC = **Patch #8**
+- Frontend Threshold + skip-cache + direct-URL: ~25-40 LoC = **Patch #9**
+- Tests: ~50 LoC Adapter + Frontend
+
+→ +2-3 Patches, ~80-100 LoC, neuer Auth-Vector. Das ist eigene
+Mini-Phase, nicht U31-Beipack. Wenn realisiert, dann als Phase 1.7
+(asset-streaming) oder konsolidiert mit U21 (Realtime) als
+Phase 2-Material.
+
+### U31 — Asset-Cache-Eviction bei Quota-Druck (implementiert in Phase 1.6.1)
+
+**Status:** Implementiert. Siehe
+[`phase-1.6.1-asset-cache.md`](./phase-1.6.1-asset-cache.md).
+
 **Implementation:**
-- `deps/db-sync/.../worker/handler/assets.cljs:52-91 handle-get-asset`
-  erweitern: Range-Header parsen, `bucket.get(key, {range:{offset,
-  length}})` (Cloudflare-R2-API unterstützt das), 206-Response + 
-  `Content-Range`-Header.
-- `hypha-server/src/proxy.ts`: keine Änderung — Range-Header geht
-  schon durch.
-- Schätzung: ~15-20 LoC Upstream-Patch (#7).
-
-### U31 — OPFS-Eviction bei Quota-Druck
-
-**Beschreibung:** Cache-Wachstum stoppen ohne User-Eingriff bei
-OPFS-Quota-Knappheit.
-
-**Konkret:** LRU oder size-based Eviction von Asset-Files, die nicht
-in den letzten N Tagen / nicht in den letzten K Blocks gerendert
-wurden. Bei Re-Render werden sie dann via VA1-Lazy nachgeladen.
-
-**Implementation:**
-- Last-access-timestamp im OPFS-Filesystem oder separater sqlite-Table
-- Eviction-Loop bei `:rtc/asset-upload-download-progress` oder als
-  Background-Task
-- Trigger via `navigator.storage.estimate()` 
-- Schätzung: ~50-80 LoC, einer der zwei: Hypha-eigener Code in
-  `frontend/worker/sync/assets.cljs` (= Upstream-Patch #8) oder neuer
-  Hypha-eigener Namespace `frontend.hypha.asset-cache`.
+- Hypha-eigener Namespace `frontend.hypha.asset-cache`, kein
+  Upstream-Patch.
+- LRU via LightningFS `mtimeMs` (Surrogat für last-access; Assets sind
+  write-once).
+- Reactive Background-Loop alle 30 s, trigger bei `usage/quota > 0.8`,
+  evict bis `<= 0.6`.
+- Enumeration via `window.pfs` (worker-proxied LightningFS-Bridge via
+  MagicPortal/Comlink), Quota via `navigator.storage.estimate()`.
 
 ### Use Cases bewusst nicht adressiert (Phase 3+ oder nie)
 
@@ -265,12 +317,13 @@ wurden. Bei Re-Render werden sie dann via VA1-Lazy nachgeladen.
 | Frage | Antwort | Beleg |
 |---|---|---|
 | Lazy oder Eager? | **Lazy on Block-Mount** | VA1 Code-Belege (7 Stufen) |
-| Cache existiert? | **Ja, OPFS pro Graph** | VA2 §2 |
-| Eviction? | **Nein, monotones Wachstum** | VA2 §2 |
-| Range-Support? | **Nein, weder Adapter noch effektiv im Proxy** | VA3 §3.1+3.2 |
+| Cache existiert? | **Ja, LightningFS auf IndexedDB pro Graph (`logseq`-DB)** | VA2 §2 |
+| Eviction? | **Ja, in Phase 1.6.1 — LRU via mtime, 30 s background tick, 80% Quota-Trigger** | VA2 §2 + [`phase-1.6.1-asset-cache.md`](./phase-1.6.1-asset-cache.md) |
+| Range-Support? | **Nein. Architektur-Switch erforderlich (Phase 2)** | VA3 §3 + §6 U30 |
 | Upload sofort? | **Ja, async pro Tx, parallelism 10** | VA4 §4.1 |
 | Proxy alle Methoden? | **Ja, GET/PUT/DELETE/OPTIONS** | VA4 §4.2 |
 | Cross-Browser-Asset-Sync funktional? | **Ja, kein Patch nötig** | M8 + VA4 |
 
-**Stand:** Hypha-Phase-1.6 erfüllt Asset-Sync end-to-end. Optimierungen
-(Range, Eviction) sind Phase-2-optional, kein Phase-1.6-Blocker.
+**Stand:** Hypha-Phase-1.6 erfüllt Asset-Sync end-to-end; Phase 1.6.1
+ergänzt Eviction. Range-Support bleibt Phase-2-Material wegen
+Architektur-Switch (Auth-Vector + Streaming-Path).
