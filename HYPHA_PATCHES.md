@@ -394,6 +394,96 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #7 — Surface cloud-upload failures as a user notification
+
+- **ID**: HYPHA-PATCH-007
+- **Introduced**: Phase 1.6.2 (post-V10 user-visibility fix), 2026-05-28
+- **File**: `src/main/frontend/handler/db_based/sync.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL (~line 407)
+  (defn <rtc-upload-graph!
+    [repo _graph-e2ee?]
+    (if-let [operation (active-graph-operation)]
+      (reject-graph-operation-in-progress :upload operation)
+      (do
+        (state/set-state! :rtc/uploading? true)
+        (-> (p/let [_ (state/<invoke-db-worker :thread-api/db-sync-upload-graph repo)
+                    _ (<get-remote-graphs)
+                    _ (state/set-state! :rtc/uploading? false)
+                    _ (<rtc-start! repo)]
+              true)
+            (p/finally
+              (fn []
+                (state/set-state! :rtc/uploading? false)))))))
+
+  ;; HYPHA — adds a p/catch between the p/let and p/finally that logs
+  ;; the failure under :db-sync/upload-graph-failed and surfaces it
+  ;; as a notification using (t :graph/upload-failed <ex-message>).
+  ```
+- **Line count**: +10 (the p/catch block plus a 7-line explanatory comment
+  block above it).
+- **Rationale**: Stock Logseq's chain pairs p/let with p/finally only,
+  no p/catch. Every rejection (worker → `:db-sync/missing-datascript-conn`,
+  server → 4xx, e2ee preflight, network down, …) propagates as
+  "Uncaught (in promise)" — visible only when DevTools is open. The
+  spinner clears via p/finally, so the UI looks identical to success.
+  Phase 1.6 V10 surfaced this as the cause of "Cloud icon clicked,
+  spinner blinked, nothing synced" reports: server-side flow worked,
+  but the per-user diagnosis path was silent.
+
+  This patch adds the missing p/catch step: logs the failure under a
+  structured glogi keyword and shows a single-line notification using
+  the new `:graph/upload-failed` translation key. Re-rejects so any
+  upstream caller still sees the rejection.
+
+- **Companion change (NOT a patch)**:
+  `src/resources/dicts/en.edn` + `src/resources/dicts/zh-cn.edn` gain
+  `:graph/upload-failed "Cloud upload failed: {1}"` (i18n source plus
+  zh-CN translation per `.agents/skills/logseq-i18n` mandatory locale
+  policy). The key is reused only by this notification; lives between
+  `:graph/updated-switching` and `:graph/upload-local-confirm-desc`.
+
+- **Additive alternatives considered**:
+  - Hypha-side wrapper that intercepts `<rtc-upload-graph!`: rejected
+    — clean intercept point would still need to call the upstream
+    function, which produces the same uncaught-rejection problem.
+  - Worker-side notification: rejected — workers cannot dispatch UI
+    notifications without round-tripping through the main thread, and
+    the chain crosses both worker and frontend rejects (worker error,
+    network error, e2ee setup error). The frontend catch covers them
+    all uniformly.
+  - Submit this to upstream Logseq as a UX bug: ideal long-term — when
+    accepted upstream, this entry can be removed and the i18n key
+    refactored to upstream's preferred location.
+
+- **Break signal — structural**:
+  - `<rtc-upload-graph!` is renamed, deleted, or its body is rewritten
+    such that the p/let → p/finally pair no longer surrounds the worker
+    invocation.
+  - `notification/show!` API changes signature, or `frontend.context.i18n/t`
+    moves.
+
+- **Break signal — semantic**:
+  - Upstream adds its own p/catch with a different notification — both
+    would fire on the same error.
+  - `:graph/upload-failed` is reused for a different message elsewhere
+    (track via `bb lang:validate-translations` unused-key check).
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c ':db-sync/upload-graph-failed' src/main/frontend/handler/db_based/sync.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the p/catch must call both
+    `log/error` and `notification/show!`, and must re-reject so
+    downstream `p/finally` still runs.
+
+- **On break**:
+  - Structural → re-anchor on the new shape of `<rtc-upload-graph!`.
+  - Semantic upstream-merged → remove the patch and the dict entries.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

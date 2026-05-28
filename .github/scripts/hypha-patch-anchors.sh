@@ -65,6 +65,13 @@ check "patch-6b: large-title-object declared in deps/db malli_schema.cljs" \
       "rg -c '\[:logseq.property.sync/large-title-object' deps/db/src/logseq/db/frontend/malli_schema.cljs" \
       "1"
 
+# === Patch #7 ===
+# The p/catch block logs under :db-sync/upload-graph-failed before showing
+# the notification — that keyword is the structural anchor.
+check "patch-7: <rtc-upload-graph! catches and notifies via :db-sync/upload-graph-failed" \
+      "rg -c ':db-sync/upload-graph-failed' src/main/frontend/handler/db_based/sync.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
