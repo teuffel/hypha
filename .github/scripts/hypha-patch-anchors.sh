@@ -72,6 +72,13 @@ check "patch-7: <rtc-upload-graph! catches and notifies via :db-sync/upload-grap
       "rg -c ':db-sync/upload-graph-failed' src/main/frontend/handler/db_based/sync.cljs" \
       "1"
 
+# === Patch #8 ===
+# Worker-side graph-e2ee? hypha-aware default. Anchor on the patch ID comment
+# inside the file; the function name graph-e2ee? alone is not unique enough.
+check "patch-8: graph-e2ee? defaults to false in hypha mode" \
+      "rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/crypt.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
