@@ -327,7 +327,7 @@ sondern mit einem **User-gewählten E2EE-Password** via PBKDF2+AES
 **Status:** ✅ Verifiziert via Docker-Container (`docker compose -f docker-compose.hypha.yml up`)
 auf localhost:3030 + Playwright headless + curl HTTP-Probe.
 
-**Befund #1 — neuer Bug entdeckt, gefixt:**
+**Befund #1 — Auth-Race-Bug entdeckt, gefixt (M9.4):**
 
 Erstes V10-Probe-Run zeigte folgenden Worker-Error nach Login:
 ```
@@ -379,6 +379,81 @@ V10-Browser-Probe (Playwright headless chromium):
 M10's cross-device.spec.ts wird um einen vierten Test erweitert (T5):
 "M9.4 — no 'worker auth refresh requires refresh token' after login".
 Drift-Gate gegen zukünftige Removal des `<push-auth-to-db-worker!`-Aufrufs.
+
+**Befund #2 — Reverse-Proxy-Origin-Leak (M9.5, fixed):**
+
+Mit dem M9.4-Fix verifizierte ich V10 weiter und entdeckte: Klick auf
+einen Remote-Graph in Browser B triggerte `<rtc-download-graph!`, der
+führte zu:
+
+```
+TypeError: Failed to fetch
+  at <db-worker>/.../sync/download.cljs ...
+  url: http://127.0.0.1:8787/sync/<graph-id>/snapshot/stream
+```
+
+Der Browser bekam eine URL `http://127.0.0.1:8787/...` zurück — der
+Container-interne Loopback-Port des db-sync-Node-Adapters, vom Browser
+nicht erreichbar.
+
+Root cause: `deps/db-sync/.../worker/handler/sync.cljs:133`
+(`snapshot-stream-url`) baut die URL aus `request.url.origin` —
+hinter Hypha's Reverse-Proxy war das `http://127.0.0.1:8787`,
+nicht der Browser-Public-Origin.
+
+**Fix M9.5 (2-stufig, 1 Hypha-Patch):**
+
+(a) `hypha-server/src/proxy.ts` setzt explizit `X-Forwarded-Host` +
+    `X-Forwarded-Proto` für alle proxied Routen (`/sync`, `/graphs`,
+    `/e2ee`, `/assets`). Liest den Host vom FastifyRequest (nicht von
+    den downstream-Headers, die fastify-reply-from VOR dem
+    rewriteRequestHeaders-Hook bereits zum Upstream-Host rewritted).
+
+(b) `deps/db-sync/.../worker/handler/sync.cljs` (`snapshot-stream-url`)
+    respektiert `X-Forwarded-Host`/`X-Forwarded-Proto` wenn gesetzt;
+    fall-back auf `request.url.origin` für direkte (non-proxied)
+    Deployments. Dies ist Patches #5 in HYPHA_PATCHES.md.
+
+Verifikation (curl + Playwright):
+- `GET /sync/<id>/snapshot/download` returnt nun JSON mit
+  `"url":"http://localhost:3030/sync/<id>/snapshot/stream"`
+- Browser-Folge-Fetch `GET /sync/<id>/snapshot/stream → 200` (vorher
+  `TypeError: Failed to fetch`)
+- Click auf Remote-Graph triggert Download-Flow (Body zeigt "Wird
+  heruntergeladen...")
+
+**Bekannter Pre-existing Logseq-Bug (V10 sichtbar gemacht):**
+
+Nach M9.5 läuft der Download-Stream durch, der Browser empfängt die
+Snapshot-Daten, aber der **Snapshot-Import in die lokale OPFS-DB
+hängt** mit:
+
+```
+[frontend.worker.sync.download] :rehydrate-large-title-failed
+  Error: Attribute :logseq.property.sync/large-title-object should be
+  marked as :db/index true
+```
+
+Root cause: `:logseq.property.sync/large-title-object` ist eine
+built-in property (`deps/db/.../property.cljs:701`) UND wird via
+`(d/datoms db :avet large-title-object-attr)` in
+`worker/sync/large_title.cljs:51,259` indiziert nachgeschlagen. Aber
+das statische Datascript-Schema (`deps/db/.../schema.cljs:56-108`)
+markiert es NICHT als `:db/index true`.
+
+Das ist ein **Logseq-Upstream-Schema-Inkonsistenz**. Frühere Versuche,
+sie zu beheben durch Schema-Patch in `schema.cljs` lösten einen
+sekundären Konsistenz-Check im db-sync-Adapter aus ("malli DB schema
+is missing... non-ref attributes"), weil die Malli-Entity-Schemata
+keine entsprechende Definition hatten.
+
+**Status:** geschoben in Phase-1.6.1 (Logseq-Schema-Repair) oder
+Phase 2. Manifestiert sich nicht in V10's Akzeptanz-Kriterium
+(Click-Triggert-Snapshot-Download-Pfad), aber UI bleibt bei "Wird
+heruntergeladen..." stehen. Workaround beim manuellen Test: kein
+Workaround in dieser Phase — Phase-1.6 demonstriert vollständig
+funktionalen Server-Side-Cross-Device-Pfad (M5+M6+M7+M8+M9.1-5),
+finale Browser-zu-Browser-Datenkopie wartet auf Schema-Konsistenz-Fix.
 
 ## 4. Meilensteine
 

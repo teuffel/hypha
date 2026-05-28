@@ -249,6 +249,78 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+---
+
+## Patch #5 — db-sync snapshot-stream-url respects X-Forwarded-Host
+
+- **ID**: HYPHA-PATCH-005
+- **Introduced**: Milestone M9.5 (Phase 1.6 V10 reverse-proxy-origin-leak fix), 2026-05-28
+- **File**: `deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL
+  (defn- snapshot-stream-url [request graph-id]
+    (let [url (js/URL. (.-url request))]
+      (str (.-origin url) "/sync/" graph-id "/snapshot/stream")))
+
+  ;; HYPHA
+  (defn- snapshot-stream-url
+    "... reverse-proxy-aware ..."
+    [request graph-id]
+    (let [url (js/URL. (.-url request))
+          headers (.-headers request)
+          forwarded-host (some-> headers (.get "x-forwarded-host"))
+          forwarded-proto (some-> headers (.get "x-forwarded-proto"))
+          origin (if (seq forwarded-host)
+                   (str (if (seq forwarded-proto) forwarded-proto "http")
+                        "://"
+                        forwarded-host)
+                   (.-origin url))]
+      (str origin "/sync/" graph-id "/snapshot/stream")))
+  ```
+- **Line count**: +13 (8 net lines of code, plus a 5-line docstring)
+- **Rationale**: When db-sync runs behind hypha-server's reverse proxy,
+  the request URL the adapter sees has the internal loopback host
+  (`http://127.0.0.1:8787`). Using `request.url.origin` for embedded URLs
+  in JSON responses (here: the `url` field of GET /sync/<id>/snapshot/download
+  pointing at the follow-up /snapshot/stream fetch) makes the browser
+  attempt to reach the loopback host, which fails with `TypeError: Failed
+  to fetch`. This is a standard reverse-proxy pattern — the proxy sets
+  `X-Forwarded-Host` + `X-Forwarded-Proto`, the downstream service uses
+  them to reconstruct the public-facing URL.
+- **Companion change (NOT a patch)**:
+  `hypha-server/src/proxy.ts` injects these headers on every proxied path
+  (rewriteRequestHeaders hook). Counts as Hypha-server-own code, not an
+  upstream patch.
+- **Additive alternatives considered**:
+  - Modify the response body in `hypha-server` proxy with a JSON-rewrite
+    hook: rejected — fragile (depends on exact response shape) and
+    invasive (would need to parse + rewrite + re-serialize every response
+    body that might contain URLs).
+  - Make all proxied URLs relative on the db-sync side: rejected — many
+    other downstream consumers (Cloudflare Worker deployments, electron
+    apps) rely on absolute URLs.
+  - Submit this as an upstream Logseq PR and remove the patch: ideal
+    long-term, queued as a future contribution.
+- **Break signal — structural**:
+  - `snapshot-stream-url` is renamed, moved out of
+    `logseq.db-sync.worker.handler.sync`, or has its signature changed.
+- **Break signal — semantic**:
+  - Logseq adds other places that build embedded URLs from
+    `request.url.origin`. Those will silently break self-hosted setups
+    too (and we'll need to extend the same forwarded-host pattern).
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'defn- snapshot-stream-url' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the function body must read
+    `x-forwarded-host` from `.headers`.
+- **On break**:
+  - Structural → find the new URL-building location, re-anchor.
+  - Semantic → re-apply the X-Forwarded-Host respect logic.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
