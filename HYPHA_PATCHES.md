@@ -598,6 +598,99 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #9 — `local-uploadable-graph?` defends against stale repos-state
+
+- **ID**: HYPHA-PATCH-009
+- **Introduced**: Phase 1.6.2 follow-up (toolbar dual-cloud-icon fix), 2026-05-28
+- **File**: `src/main/frontend/components/repo.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL (~line 34)
+  (defn local-uploadable-graph?
+    [{:keys [root remote?]}]
+    (and (or root
+             (mobile-util/native-platform?))
+         (not remote?)
+         (user-handler/logged-in?)
+         (user-handler/rtc-group?)))
+
+  ;; HYPHA — adds a `url` destructure and a defensive guard:
+  ;; `(not (some #(= url (:url %)) (state/get-rtc-graphs)))`.
+  ```
+- **Line count**: +10 (1 line of guard logic + 1 destructure update + 8
+  lines of explanatory comment).
+- **Rationale**: Stock Logseq gates the toolbar's "manual cloud upload"
+  icon (`components/header.cljs:469`) on
+  `(repo/local-uploadable-graph? graph)`. That fn only looks at the
+  `:remote?` flag in the repos-state. After a successful upload, the
+  state propagation chain is:
+
+  ```
+  <rtc-upload-graph! → <get-remote-graphs → set-state! :rtc/graphs
+                                         → repo-handler/refresh-repos!
+                                         → state/set-repos! (with :remote? merged in)
+  ```
+
+  Empirically, the `:remote?` flag does NOT always end up true in the
+  resulting repos-state. The diagnosis trail points at
+  `combine-local-&-remote-graphs:107-134` where the merge depends on
+  group-by `:url` matching across local-vs-remote and a
+  `:GraphSchemaVersion` filter that can drop the remote entry. The
+  symptom is two cloud icons rendered side-by-side: one with the
+  green status dot from `rtc-indicator/indicator` (gated on
+  `:rtc/graphs` membership + DB `:graph/rtc-uuid`, both of which ARE
+  correct), and one plain cloud from `local-graph-sync-button` (gated
+  on the stale `:remote? false`).
+
+  Rather than chase the merge logic, this patch treats `:rtc/graphs`
+  as the authoritative answer to "is this graph on the server?". If
+  the server lists the graph by URL, hide the upload trigger. The
+  worst case (false positive: stale rtc-graphs containing a server
+  graph the user already deleted) still produces correct behavior:
+  the upload button stays hidden, and the user has to use the
+  Settings → Graphs flow to re-upload, which is the expected pattern.
+
+- **Additive alternatives considered**:
+  - Fix the merge in `combine-local-&-remote-graphs`: rejected for
+    now — that fn is hot-path on every graph-list refresh and
+    changes to the version-matched-merge logic risk other UX
+    regressions. The defensive `local-uploadable-graph?` guard
+    addresses the user-visible symptom in one place with no other
+    rendering side effects.
+  - Run `refresh-repos!` again after `<rtc-upload-graph!` resolves:
+    rejected — that's exactly what `<get-remote-graphs` already
+    does in the chain. The bug isn't a missing call; it's the
+    merge result not propagating.
+  - Submit as upstream Logseq bugfix PR: ideal long-term — the
+    bug is universal (not Hypha-specific), so when accepted
+    upstream this patch can be removed.
+
+- **Break signal — structural**:
+  - `local-uploadable-graph?` is renamed, deleted, or its destructure
+    pattern changes such that the `:url` key is no longer accessible.
+  - `state/get-rtc-graphs` is renamed or moves.
+
+- **Break signal — semantic**:
+  - Upstream tightens the `refresh-repos!` merge logic and the
+    `:remote?` flag becomes reliable. This patch becomes redundant
+    (no harm — the extra check just makes both gates evaluate the
+    same answer).
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-009' src/main/frontend/components/repo.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the guard must reference
+    `state/get-rtc-graphs` and be inside the `(and …)` of
+    `local-uploadable-graph?`.
+
+- **On break**:
+  - Structural → re-anchor on the new shape of `local-uploadable-graph?`.
+  - Semantic upstream-merged → remove the patch and re-verify the
+    "two cloud icons" symptom is gone.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

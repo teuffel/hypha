@@ -32,10 +32,20 @@
     (if graph-e2ee? "lock" "cloud")))
 
 (defn local-uploadable-graph?
-  [{:keys [root remote?]}]
+  [{:keys [root remote? url]}]
   (and (or root
            (mobile-util/native-platform?))
        (not remote?)
+       ;; HYPHA-PATCH-009: defense against stale :remote? in repos-state.
+       ;; The manual "cloud upload" toolbar button (header.cljs:469) is
+       ;; gated on this fn. Without this extra check, a graph already
+       ;; on the server (server lists it in :rtc/graphs, DB has rtc-uuid,
+       ;; rtc-indicator's cloud-with-status-dot renders) but whose
+       ;; repos-state :remote? flag is stale-false makes the toolbar
+       ;; render TWO cloud icons side-by-side. We treat :rtc/graphs as
+       ;; ground-truth: if the server has the graph, hide the upload
+       ;; trigger regardless of how repos-state arrived.
+       (not (some #(= url (:url %)) (state/get-rtc-graphs)))
        (user-handler/logged-in?)
        (user-handler/rtc-group?)))
 
