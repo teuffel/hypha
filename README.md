@@ -1,3 +1,20 @@
+<!--
+  Hypha fork notice — keep at the very top so GitHub visitors who land
+  on the README see the fork relationship before the upstream content.
+-->
+> **This repository is [Hypha](HYPHA.md)** — a self-hostable single-user
+> fork of Logseq DB-flavor with one-command Docker deploy, access-code
+> auth, cross-device personal cloud, and a cached plugin marketplace.
+>
+> - **Looking for Hypha?** Start at [HYPHA.md](HYPHA.md) or jump straight
+>   to the [self-hosting walkthrough](docs/hypha/self-hosting.md).
+> - **Looking for upstream Logseq** (the original, hosted by the Logseq
+>   team)? See [logseq/logseq](https://github.com/logseq/logseq). The
+>   rest of this README is the upstream Logseq README, preserved verbatim
+>   for clean upstream-sync merges.
+
+---
+
 <!-- logo -->
 <p align="center">
     <a href="https://logseq.com" alt="Logseq Logo">

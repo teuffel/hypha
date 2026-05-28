@@ -1,3 +1,24 @@
+# Contributing
+
+> **This repository is [Hypha](HYPHA.md)**, a fork of Logseq DB-flavor.
+> Two contribution lanes:
+>
+> - **Hypha-specific changes** (anything under `hypha-server/`,
+>   `src/main/frontend/hypha/`, `docs/hypha/`, `bin/hypha-*`, or a patch
+>   listed in [`HYPHA_PATCHES.md`](HYPHA_PATCHES.md)) → issues and pull
+>   requests against **this repo** are the right place.
+> - **Upstream Logseq bugs and features** (anything you would also see
+>   in stock Logseq) → please file at
+>   [logseq/logseq](https://github.com/logseq/logseq). Reproducing
+>   against upstream first helps both projects.
+>
+> The rest of this document is the upstream Logseq CONTRIBUTING guide,
+> preserved verbatim for clean upstream-sync merges. The PR-review
+> processes and Discord/Forum links it references belong to upstream
+> Logseq; Hypha does not maintain its own community channels.
+
+---
+
 # Contributing to Logseq
 
 Thanks for your interest! :heart: :man_dancing: :woman_dancing: We would love
