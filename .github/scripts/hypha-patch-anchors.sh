@@ -54,6 +54,17 @@ check "patch-5: snapshot-stream-url defn exists in deps/db-sync handler/sync.clj
       "rg -c 'defn- snapshot-stream-url' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" \
       "1"
 
+# === Patch #6 (two files, lockstep) ===
+# Match the code line (with :db/index true) not the explanatory comment.
+check "patch-6a: large-title-object indexed in deps/db schema.cljs" \
+      "rg -c ':logseq.property.sync/large-title-object \{:db/index true' deps/db/src/logseq/db/frontend/schema.cljs" \
+      "1"
+
+# Match the malli vector form, not any future comment that might mention the keyword.
+check "patch-6b: large-title-object declared in deps/db malli_schema.cljs" \
+      "rg -c '\[:logseq.property.sync/large-title-object' deps/db/src/logseq/db/frontend/malli_schema.cljs" \
+      "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code

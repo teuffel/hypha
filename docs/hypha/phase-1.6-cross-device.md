@@ -447,13 +447,7 @@ sekundären Konsistenz-Check im db-sync-Adapter aus ("malli DB schema
 is missing... non-ref attributes"), weil die Malli-Entity-Schemata
 keine entsprechende Definition hatten.
 
-**Status:** geschoben in Phase-1.6.1 (Logseq-Schema-Repair) oder
-Phase 2. Manifestiert sich nicht in V10's Akzeptanz-Kriterium
-(Click-Triggert-Snapshot-Download-Pfad), aber UI bleibt bei "Wird
-heruntergeladen..." stehen. Workaround beim manuellen Test: kein
-Workaround in dieser Phase — Phase-1.6 demonstriert vollständig
-funktionalen Server-Side-Cross-Device-Pfad (M5+M6+M7+M8+M9.1-5),
-finale Browser-zu-Browser-Datenkopie wartet auf Schema-Konsistenz-Fix.
+**Status:** behoben in M11 (siehe §4).
 
 ## 4. Meilensteine
 
@@ -667,6 +661,84 @@ CI-Image inkl. better-sqlite3-binary).
   neuen Spec automatisch via `testMatch` auf (keine YAML-Änderungen)
 - Patches-Bilanz: 4/20 (unverändert seit M9)
 
+### M11 — Schema-Konsistenz für `:logseq.property.sync/large-title-object`
+
+**Dateien:** `deps/db/src/logseq/db/frontend/schema.cljs` + `malli_schema.cljs`
+
+Der Snapshot-Download-Pfad (post-M9.5) hängt im Worker-Import bei
+`rehydrate-large-titles-from-db!` mit:
+```
+Attribute :logseq.property.sync/large-title-object should be marked
+as :db/index true
+```
+
+Root cause aus V10-Diagnose (siehe §3 Befund #2):
+- `worker/sync/large_title.cljs:51,259` ruft `(d/datoms db :avet attr)` auf
+- Datascript braucht dafür `:db/index true` im Schema
+- Das statische Datascript-Schema (`deps/db/.../schema.cljs:56-108`) hat
+  den Eintrag nicht
+- Direkter Schema-Patch alleine löst secondary check im db-sync-Adapter
+  aus ("malli DB schema is missing... non ref attributes"), weil die
+  Malli-Entity-Schemata das Attribute auch nicht in einer attr-list haben
+
+**Fix (zwei-stufig, 1 Patch-Inventar-Eintrag — beide Files in deps/db
+sind Logseq-Upstream-Code, zusammen ein einziger semantischer Patch #6
+im Inventar):**
+
+(a) `deps/db/.../schema.cljs` Map-Extension um:
+   ```clojure
+   :logseq.property.sync/large-title-object {:db/index true}
+   ```
+
+(b) `deps/db/.../malli_schema.cljs` `page-or-block-attrs` Extension um:
+   ```clojure
+   [:logseq.property.sync/large-title-object {:optional true} :map]
+   ```
+   Im `page-or-block-attrs`, weil das Attribute auf Block-Entities lebt
+   die gleichzeitig in pages und blocks rendered werden. `:optional`
+   weil nur Blocks mit large titles es haben.
+
+#### M11 — Verifikations-Probes (vor Implementation)
+
+V11 (`:logseq.property.sync/large-title-object` symmetrie post-fix):
+  - clj-kondo lint clean auf beiden Files
+  - `pnpm --dir deps/db-sync run build:node-adapter` 0 warnings
+  - Container startup: node-adapter wirft KEINEN
+    "malli DB schema is missing"-Error
+  - Datascript schema-version-Compatibility-Check (`compare-schema-version`)
+    bleibt happy
+
+V12 (end-to-end Cross-Device-Datenflow):
+  - Browser A erstellt Cloud-Graph + editiert Block mit unique marker
+  - Browser B (fresh context) loggt sich ein, sieht Graph, klickt
+  - Download completes (UI verlässt "Wird heruntergeladen...")
+  - Block-Marker aus Browser A ist in Browser B sichtbar
+  - **DAS ist die finale V10-DoD aus dem User-Story-Ursprung**
+
+#### M11 — Use Cases erfüllt
+
+- **U4-vollständig** (Phase-1.6-Closer): Browser B klickt Remote-Graph
+  → Download läuft komplett durch → Graph öffnet sich → editierter
+  Inhalt aus Browser A sichtbar
+- **U7-vollständig** (Phase-1.6-Closer): die ursprünglich gemeinte
+  V10-User-Story ("Firefox erstellt, Chrome sieht") funktioniert
+  end-to-end byte-für-byte, nicht nur HTTP-Pfad
+
+#### M11 — Use Cases bewusst nicht erfüllt
+
+- **U21** (Phase 2): Live-Sync zwischen aktiven A+B parallel
+- **U22** (Phase 2): Automatischer E2EE-Key-Sync (manual-password weiter
+  funktional via M9.3-Defaults-Toggle)
+
+#### M11 — DoD
+
+- V11 + V12 grün
+- `bb dev:lint-and-test` weiterhin grün (frontend tests betroffen?
+  vermutlich nicht, aber prüfen)
+- `pnpm --dir hypha-server test:headless-auth` 17/17 grün (keine Regression)
+- Manueller V10-Test im Browser: Block-Marker in Chrome sichtbar nach Click
+- Patches-Bilanz: 5/20 → 6/20
+
 ## 5. Patches-Bilanz
 
 | # | Datei | Zweck | Phase | LoC |
@@ -675,8 +747,10 @@ CI-Image inkl. better-sqlite3-binary).
 | 2 | `frontend/handler/events/ui.cljs` | `:user/login`-Routing → Hypha-Modal | Phase 1 | ~3 |
 | 3 | `frontend/handler/user.cljs` | `logged-in?` Hypha-aware | Phase 1.6 M9 | ~6 |
 | 4 | `frontend/components/repo.cljs` | Hypha-Defaults in `new-db-graph-inner` | Phase 1.6 M9 | ~4 |
+| 5 | `deps/db-sync/.../worker/handler/sync.cljs` | `snapshot-stream-url` respektiert X-Forwarded-Host | Phase 1.6 M9.5 | ~13 |
+| 6 | `deps/db/.../schema.cljs` + `malli_schema.cljs` | `:db/index true` für `large-title-object` plus malli-Symmetrie | Phase 1.6 M11 | ~5 |
 
-End-Inventar nach Phase 1.6: **4/20** (20% Smell-Schwelle).
+End-Inventar nach Phase 1.6: **6/20** (30% Smell-Schwelle).
 
 Alle anderen Phase-1.6-Code-Änderungen sind additiv:
 - `hypha-server/src/proxy.ts`: 3 neue `register`-Aufrufe (Hypha-eigen, kein Logseq-Patch)
