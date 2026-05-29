@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# Generate a bcrypt-hashed Hypha access code suitable for HYPHA_ACCESS_CODE_HASH.
+#
+# Usage:
+#   bin/hypha-gen-access-hash                     # generates a fresh random code
+#   bin/hypha-gen-access-hash my-own-code         # hashes the supplied code
+#
+# The plaintext is printed once; copy it to a password manager. The hash is
+# what goes into your .env file.
+#
+# Runs in a throwaway Node container so the host needs no Node toolchain.
+
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+  CODE="$1"
+else
+  # cryptographically-random fallback when no code is supplied
+  CODE="$(docker run --rm node:24-bookworm-slim node -e \
+    'console.log(require("crypto").randomBytes(16).toString("hex"))')"
+fi
+
+HASH="$(docker run --rm \
+  -v "$(pwd)/hypha-server":/work \
+  -w /work \
+  --entrypoint node \
+  node:24-bookworm-slim \
+  -e "console.log(require('bcryptjs').hashSync(process.argv[1], 12))" \
+  "$CODE")"
+
+echo "── Hypha access code ───────────────────────────────────────"
+echo "Plaintext (save in a password manager — you'll type this at login):"
+echo "  $CODE"
+echo
+echo "Add this line to .env (single quotes required — bcrypt hashes"
+echo "contain '\$' which docker-compose otherwise interprets as a"
+echo "variable reference):"
+echo
+echo "  HYPHA_ACCESS_CODE_HASH='$HASH'"
+echo "─────────────────────────────────────────────────────────────"

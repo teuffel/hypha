@@ -91,3 +91,17 @@ deps/db-sync/data
 /.agent-shell/
 
 clj-e2e/.clj-kondo/imports
+
+# ── Hypha ─────────────────────────────────────────────────────────────────
+# Operator-supplied env overrides (HYPHA_ACCESS_CODE_HASH etc.)
+.env
+.env.local
+.env.*.local
+# Bind-mount target for docker-compose.hypha.yml
+/data/
+# hypha-server compiled output + Playwright artifacts
+/hypha-server/dist/
+/hypha-server/node_modules/
+/hypha-server/test-results/
+/hypha-server/playwright-report/
+/hypha-server/test/playwright/.state/

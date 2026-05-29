@@ -1,0 +1,132 @@
+name: Hypha CI
+
+# Hypha-specific CI. Runs the Hypha release build + unit tests + headless
+# auth smoke + Docker production image. Does NOT replace Logseq's own build.yml
+# (which still runs on master for Logseq upstream behaviour).
+
+on:
+  push:
+    branches: [master, develop]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+  pull_request:
+    branches: [master, develop]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+
+env:
+  # Pinned to match Dockerfile.dev + Dockerfile.hypha.
+  CLOJURE_VERSION: '1.12.4.1618'
+  JAVA_VERSION: '21'
+  NODE_VERSION: '24'
+  BABASHKA_VERSION: '1.12.215'
+  PNPM_VERSION: '10.33.0'
+
+jobs:
+  hypha-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Clojure
+        uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          cli: ${{ env.CLOJURE_VERSION }}
+          bb: ${{ env.BABASHKA_VERSION }}
+
+      - name: Lint (carve)
+        # Fast prophylactic check: catches orphan defs that future
+        # upstream-sync merges or refactors might leave behind. Runs
+        # before the build so lint failures surface in seconds instead
+        # of minutes. See .carve/ignore for explicit allow-list entries
+        # (Hypha namespace-load-time side-effect defonces et al.).
+        run: bb lint:carve
+
+      - name: Hypha release build
+        # Runs bin/hypha-build --release which is the canonical pipeline used
+        # by Dockerfile.hypha. Catches A8 propagation + gulp + cljs:release +
+        # webpack + db-sync node-adapter + hypha-server tsc in one step.
+        run: bin/hypha-build --release
+
+      - name: hypha-server unit tests
+        run: pnpm --dir hypha-server test
+
+      - name: Install Playwright browsers + system deps
+        run: pnpm --dir hypha-server exec playwright install --with-deps chromium
+
+      - name: Headless auth smoke
+        # Uses the static/ bundle produced two steps above.
+        run: pnpm --dir hypha-server test:headless-auth
+
+      - name: Build production Docker image
+        # M3-smoke: prove Dockerfile.hypha builds end-to-end. Tag local;
+        # publishing to a registry is a separate concern handled by
+        # release-tag workflows (future).
+        run: docker build -f Dockerfile.hypha -t hypha:ci .
+
+      - name: Container smoke
+        # Spawn the image briefly, hit /health, login with dev code, check
+        # response. Same shape as the local smoke documented in
+        # docs/hypha/operations.md.
+        env:
+          DEV_HASH: $2b$10$QsHRSpOlRo8R7Be1GspghOlxi5beCNAN2b2en9F7mezJZ253gNui2
+        run: |
+          mkdir -p ci-data
+          chmod 777 ci-data
+          docker run --rm -d --name hypha-ci \
+            -p 13000:3000 \
+            -v "$(pwd)/ci-data:/data" \
+            -e HYPHA_ACCESS_CODE_HASH="$DEV_HASH" \
+            -e HYPHA_JWT_ISSUER=http://localhost:13000 \
+            -e HYPHA_JWT_AUDIENCE=hypha-ci \
+            hypha:ci
+
+          # Wait for ready
+          for i in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:13000/health > /dev/null; then
+              echo "Ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # /health
+          curl -fs http://127.0.0.1:13000/health | grep -q '"status":"ok"'
+
+          # Login
+          curl -fs -X POST http://127.0.0.1:13000/auth/login \
+            -H 'content-type: application/json' \
+            -d '{"code":"dev"}' | grep -q 'id-token'
+
+          docker stop hypha-ci
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            hypha-server/playwright-report
+            hypha-server/test-results
+          retention-days: 14

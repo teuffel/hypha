@@ -10,6 +10,7 @@
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.config :as hypha-config]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.ui :as ui]
@@ -31,10 +32,20 @@
     (if graph-e2ee? "lock" "cloud")))
 
 (defn local-uploadable-graph?
-  [{:keys [root remote?]}]
+  [{:keys [root remote? url]}]
   (and (or root
            (mobile-util/native-platform?))
        (not remote?)
+       ;; HYPHA-PATCH-009: defense against stale :remote? in repos-state.
+       ;; The manual "cloud upload" toolbar button (header.cljs:469) is
+       ;; gated on this fn. Without this extra check, a graph already
+       ;; on the server (server lists it in :rtc/graphs, DB has rtc-uuid,
+       ;; rtc-indicator's cloud-with-status-dot renders) but whose
+       ;; repos-state :remote? flag is stale-false makes the toolbar
+       ;; render TWO cloud icons side-by-side. We treat :rtc/graphs as
+       ;; ground-truth: if the server has the graph, hide the upload
+       ;; trigger regardless of how repos-state arrived.
+       (not (some #(= url (:url %)) (state/get-rtc-graphs)))
        (user-handler/logged-in?)
        (user-handler/rtc-group?)))
 
@@ -605,8 +616,16 @@
 (rum/defc new-db-graph-inner
   [rtc-group?]
   (let [[creating-db? set-creating-db?] (hooks/use-state false)
-        [cloud? set-cloud?] (hooks/use-state false)
-        [graph-e2ee? set-graph-e2ee?] (hooks/use-state true)
+        ;; Hypha-defaults: cloud ON (personal-cloud is the whole point of
+        ;; self-hosting; default-off broke cross-device in Phase 1.5),
+        ;; e2ee OFF (encrypted_private_key needs the same user password
+        ;; on every device, so default-on plus default-cloud silently
+        ;; breaks cross-device until the user types the password in
+        ;; Browser B; default-off is the sensible single-user-trusts-own-server
+        ;; setting). User can flip either checkbox manually.
+        ;; See HYPHA_PATCHES.md #4 + docs/hypha/phase-1.6-cross-device.md §M9.3.
+        [cloud? set-cloud?] (hooks/use-state (boolean hypha-config/hypha-mode?))
+        [graph-e2ee? set-graph-e2ee?] (hooks/use-state (not hypha-config/hypha-mode?))
         [e2ee-rsa-key-ensured? set-e2ee-rsa-key-ensured?] (hooks/use-state nil)
         input-ref (hooks/create-ref)
         new-db-f (fn new-db-f

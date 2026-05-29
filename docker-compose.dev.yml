@@ -1,0 +1,74 @@
+# Hypha development environment.
+#
+# All Hypha development happens through this compose file; the host needs
+# only Docker + Compose. Entry point is bin/dev (interactive shell) or
+# bin/dev <command> (one-shot command).
+#
+# Caches (pnpm modules, Maven/.m2, gitlibs, .shadow-cljs, .cpcache) live in
+# named docker volumes so they survive container removal and don't pollute
+# the host repo with root-owned files. The repo itself is bind-mounted at
+# /workspace so live editing on the host works as expected.
+#
+# This file is DEV only. Production images live in docker-compose.hypha.yml
+# and Dockerfile.hypha (M3).
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        USER_UID: "${HOST_UID:-1000}"
+        USER_GID: "${HOST_GID:-1000}"
+    image: hypha-dev:local
+    init: true
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /workspace
+    volumes:
+      # Repo bind-mount — host UID/GID match the dev user in the image so
+      # files created inside the container are owned by the host user.
+      - .:/workspace
+      # Named volumes for HOME caches only. Workspace-internal caches like
+      # .cpcache, .shadow-cljs, and node_modules live inside the bind mount
+      # — they're gitignored on the host and persist naturally between runs.
+      # (Named volumes on top of bind-mounted subpaths get root-owned by
+      # Docker, which the dev user can't write to. Avoid that trap.)
+      - hypha-m2:/home/dev/.m2
+      - hypha-gitlibs:/home/dev/.gitlibs
+      # Holds Playwright's ms-playwright/ browser binaries (~300 MB Chromium).
+      # Without this, every `bin/dev` invocation lands in a fresh container
+      # and would re-download the browser. Added in M4.
+      - hypha-cache:/home/dev/.cache
+    environment:
+      HOME: /home/dev
+      # Forward shadow-cljs's default nrepl port for editor connections
+      # (REPL workflows in M1+; harmless at this stage).
+      LOGSEQ_SHADOW_HTTPS: "false"
+      # ── hypha-server runtime defaults (dev only) ────────────────────────
+      # Lets `bin/dev pnpm --dir hypha-server start` boot the full stack
+      # without needing each developer to set HYPHA_* env vars by hand.
+      # DO NOT reuse these values in any production deployment.
+      #
+      # Access code: "dev" (bcrypt-10 hash committed below). Regenerate:
+      #   bin/dev bash -c 'node -e "const b=require(\"bcryptjs\"); \
+      #     console.log(b.hashSync(process.argv[1], 10))" YOUR_CODE'
+      HYPHA_ACCESS_CODE_HASH: "$$2b$$10$$QsHRSpOlRo8R7Be1GspghOlxi5beCNAN2b2en9F7mezJZ253gNui2"
+      HYPHA_JWT_ISSUER: "http://localhost:3000"
+      HYPHA_JWT_AUDIENCE: "hypha-dev"
+      # Container-local: data is fresh per container start (no host pollution
+      # via the bind-mount). M3 introduces a proper named-volume mount for
+      # the production image.
+      HYPHA_DATA_DIR: "/tmp/hypha-dev-data"
+    ports:
+      # Hypha-server dev port (matches default in hypha-server/src/main.ts)
+      - "3000:3000"
+      # shadow-cljs HTTP server (Logseq dev frontend)
+      - "3001:3001"
+      # shadow-cljs nREPL
+      - "8701:8701"
+    command: bash
+
+volumes:
+  hypha-m2:
+  hypha-gitlibs:
+  hypha-cache:

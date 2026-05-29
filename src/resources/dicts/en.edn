@@ -749,6 +749,7 @@
  :graph/time-travel-now "Now"
  :graph/toggle-tag "Toggle tag {1}"
  :graph/updated-switching "Graph updated! Switching to graph ..."
+ :graph/upload-failed "Cloud upload failed: {1}"
  :graph/upload-local-confirm-desc "Upload graph \"{1}\" to Logseq Server?"
  :graph/use-sync-beta "Use Logseq Sync (Beta testing)"
  :graph/use-sync-label "Use Logseq Sync?"
@@ -866,6 +867,10 @@
  :help.shortcuts/shortcut-column "Shortcut"
  :help.shortcuts/title "Keyboard shortcuts"
  :help.shortcuts/triggers "Triggers"
+
+ :hypha.login/access-code-placeholder "Access code"
+ :hypha.login/invalid-code "Invalid access code"
+ :hypha.login/network-error "Could not reach the server. Please try again."
 
  :icon/emojis-count "Emojis ({1})"
  :icon/icons-count "Icons ({1})"

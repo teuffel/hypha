@@ -130,9 +130,28 @@
 ;;   (let [url (js/URL. (.-url request))]
 ;;     (str (.-origin url) "/assets/" graph-id "/" snapshot-id ".snapshot")))
 
-(defn- snapshot-stream-url [request graph-id]
-  (let [url (js/URL. (.-url request))]
-    (str (.-origin url) "/sync/" graph-id "/snapshot/stream")))
+(defn- snapshot-stream-url
+  "Build the public URL the browser should fetch for the snapshot stream.
+
+  Respects X-Forwarded-Host and X-Forwarded-Proto if present (set by a
+  reverse proxy like Hypha's fastify-http-proxy). Falls back to the
+  request URL's own origin when no forwarded headers exist (direct
+  Cloudflare Worker or no-proxy node deployment).
+
+  Without forwarded-header awareness, a node-adapter behind a reverse
+  proxy would return URLs pointing at its internal loopback
+  (e.g. http://127.0.0.1:8787) which the browser cannot reach."
+  [request graph-id]
+  (let [url (js/URL. (.-url request))
+        headers (.-headers request)
+        forwarded-host (some-> headers (.get "x-forwarded-host"))
+        forwarded-proto (some-> headers (.get "x-forwarded-proto"))
+        origin (if (seq forwarded-host)
+                 (str (if (seq forwarded-proto) forwarded-proto "http")
+                      "://"
+                      forwarded-host)
+                 (.-origin url))]
+    (str origin "/sync/" graph-id "/snapshot/stream")))
 
 (defn- maybe-decompress-stream [stream encoding]
   (if (and (= encoding snapshot-content-encoding) (exists? js/DecompressionStream))

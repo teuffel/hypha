@@ -31,6 +31,8 @@
             [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.config :as hypha-config]
+            [frontend.hypha.init :as hypha-init]
             [frontend.common.idb :as idb]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.instrumentation.core :as instrument]
@@ -158,6 +160,8 @@
 
     (register-components-fns!)
     (user-handler/restore-tokens-from-localstorage)
+    (when hypha-config/hypha-mode?
+      (hypha-init/start!))
     (user.login/setup-configure!)
     (state/set-db-restoring! true)
     (when (util/electron?)
