@@ -101,15 +101,61 @@ snapshot prefer one of:
 
 ## Upgrade
 
+There are two ways to run Hypha, and therefore two upgrade paths.
+
+### A. Published image (recommended)
+
+Pull a versioned image from GHCR — no local build toolchain needed. Use
+`docker-compose.hypha.prod.yml`, which references
+`ghcr.io/teuffel/hypha:${HYPHA_VERSION:-latest}`:
+
+```bash
+cd hypha
+# 1. Back up first — see Backup section above.
+docker compose -f docker-compose.hypha.prod.yml down
+
+# 2. Pin the new version (recommended for real data) and pull.
+export HYPHA_VERSION=v0.1.6.2
+docker compose -f docker-compose.hypha.prod.yml pull
+
+# 3. Start.
+docker compose -f docker-compose.hypha.prod.yml up -d
+```
+
+Pinning an immutable `vX.Y.Z` tag (rather than `latest`) makes upgrades a
+deliberate act and lets you roll back by setting `HYPHA_VERSION` to the
+previous tag. Each GitHub Release states the Logseq DB schema version it
+carries; if its MAJOR component changed, graphs auto-migrate forward on
+first open and every device must run the new version or newer to keep
+syncing — so back up `./data` and upgrade all devices together.
+
+### B. Build from source
+
 ```bash
 cd hypha
 git pull
 docker compose -f docker-compose.hypha.yml up --build -d
 ```
 
-The build is idempotent; existing data in `./data` is untouched. On boot
+Either path is idempotent; existing data in `./data` is untouched. On boot
 the new container will pick up the existing SQLite files. Outstanding
 JWTs are invalidated by the restart (ephemeral signing key).
+
+### Cutting a release (maintainer)
+
+Releases are produced by `.github/workflows/hypha-release.yml` on any `v*`
+tag. The workflow builds the image, smoke-tests it (`/health` + access-code
+login) and only then pushes `vX.Y.Z` + `vX.Y` + `latest` to GHCR, finally
+opening a GitHub Release.
+
+```bash
+git tag v0.1.6.2
+git push origin v0.1.6.2
+```
+
+After the first release, set the GHCR package visibility to Public once
+(GitHub → Packages → hypha → Package settings → Change visibility), so
+consumers can `docker pull` without authenticating.
 
 ## Troubleshooting
 

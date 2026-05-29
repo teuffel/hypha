@@ -23,13 +23,26 @@ the same app on their own server.
 
 ## Quick start
 
+### Run the published image (recommended — no build toolchain)
+
 ```bash
 git clone https://github.com/teuffel/hypha.git
 cd hypha
-cp .env.example .env       # then edit HYPHA_ACCESS_CODE_HASH
+cp .env.example .env              # then edit HYPHA_ACCESS_CODE_HASH
 mkdir -p data
+export HYPHA_VERSION=v0.1.6.2     # pin a release; omit to use :latest
+docker compose -f docker-compose.hypha.prod.yml pull
+docker compose -f docker-compose.hypha.prod.yml up -d
+# open http://localhost:3000
+```
+
+Images are published to `ghcr.io/teuffel/hypha` per release tag (see
+[Releases](https://github.com/teuffel/hypha/releases)).
+
+### Build from source (alternative)
+
+```bash
 docker compose -f docker-compose.hypha.yml up --build
-# open http://localhost:3030
 ```
 
 Full 10-minute walkthrough: [`docs/hypha/self-hosting.md`](docs/hypha/self-hosting.md).
