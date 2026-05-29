@@ -706,6 +706,129 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #10 — e2ee-password persistence works without a refresh-token
+
+- **ID**: HYPHA-PATCH-010
+- **Introduced**: Phase 1.6.2 follow-up (cross-device upload on a fresh
+  origin behind a reverse proxy), 2026-05-29
+- **File**: `src/main/frontend/worker/sync/crypt.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ADDED — secret material for the locally-persisted e2ee password.
+  (defn- password-persistence-secret
+    [refresh-token]
+    (if (seq refresh-token)
+      refresh-token
+      (when (browser-runtime? (platform/current))
+        (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))))
+
+  (defn- ensure-password-persistence-secret!
+    [secret]
+    (when-not (seq secret)
+      (fail-missing-e2ee-password! {:reason :missing-refresh-token
+                                    :hint "Run logseq login first."})))
+
+  ;; <save-e2ee-password / <read-e2ee-password-text /
+  ;; <decrypt-e2ee-password-text / <read-e2ee-password / <decrypt-in-headless
+  ;; now resolve the refresh-token to `secret` via password-persistence-secret
+  ;; and use it for encrypt/decrypt instead of the raw refresh-token.
+  ```
+- **Line count**: +~20 (helper pair + comment; call sites swap
+  `refresh-token` → `secret`). `ensure-refresh-token!` is kept for the
+  node auth-file path only.
+- **Rationale**: Stock Logseq persists the e2ee password encrypted with
+  the OAuth **refresh-token** as the symmetric key (so the password
+  survives reboots without re-entry). Hypha's auth model has **no
+  refresh-token** (Patch #3) — auth is an HttpOnly cookie session whose
+  JWT is re-minted on every boot. Every e2ee-password save/read path
+  therefore hit `ensure-refresh-token!` and failed with
+  `:reason :missing-refresh-token`, surfacing to the user as
+  `Cloud upload failed: missing-e2ee-password`. The failure fired
+  **before** the entered password could take effect, so even typing a
+  password could not unblock sync. The bug only manifests on a fresh
+  origin (e.g. first login through a reverse proxy) where no user
+  RSA-keypair exists in that origin's IndexedDB yet, forcing the
+  generate path that needs to persist a password.
+
+  This patch resolves the persistence secret through
+  `password-persistence-secret`: the refresh-token when present (stock
+  Logseq, CLI), else — **only in browser runtime** — the stable JWT
+  `sub` (user-id). The user-id is identical across reboots and devices,
+  so the saved password re-decrypts correctly. The user still chooses
+  and enters the password; only the symmetric key wrapping the *stored*
+  password changes from refresh-token to user-id.
+
+  Net effect:
+  - Hypha browser: password save/read works; entered once per device,
+    survives reboots.
+  - Stock Logseq / CLI: `(seq refresh-token)` is true → unchanged.
+  - Node/CLI without refresh-token: `browser-runtime?` is false → no
+    fallback → still fails as before (auth-file is the source of truth).
+
+- **Security note**: In Hypha the *local reusability* of the persisted
+  password rests on the non-secret user-id, not on a secret. The
+  password itself remains the secret protecting the RSA private key.
+  Acceptable under Hypha's single-user, trusts-own-server model (same
+  rationale as Patch #4's e2ee-off default); it would be a weakening for
+  a don't-trust-the-server threat model.
+
+- **Companion change (NOT a patch)**: none. Single-file worker-internal
+  change. The paired UI copy clarification
+  (`:encryption/set-password-desc` in `components/e2ee.cljs` + dicts) is
+  an additive i18n string, not an upstream-logic patch.
+
+- **Additive alternatives considered**:
+  - Synthesize a sentinel refresh-token (`"hypha-session"`) so the
+    existing predicate passes: rejected — same hacky sentinel rejected
+    in Patch #3; leaks Hypha-knowledge into shared crypto and would
+    change the wrapping key if the sentinel ever changed.
+  - Skip persisting the password entirely in Hypha (encrypt the RSA key
+    with the entered password but never store it): rejected — the user
+    would re-enter the password on every reboot, not just once per
+    device.
+  - Derive a fully passwordless key from the user-id (no prompt at all):
+    rejected for now — weakens the RSA-key protection more than the user
+    asked for; the user explicitly accepted entering one password.
+  - Submit as upstream Logseq fix (config-driven, refresh-token-optional
+    persistence): ideal long-term — when accepted upstream this entry
+    can be removed.
+
+- **Break signal — structural**:
+  - `password-persistence-secret` or `ensure-password-persistence-secret!`
+    is renamed/removed, or a save/read path reverts to using the raw
+    `refresh-token` for encrypt/decrypt.
+  - `sync-util/auth-token`, `browser-runtime?`, or `worker-util/parse-jwt`
+    is renamed/moved.
+
+- **Break signal — semantic**:
+  - Upstream makes refresh-token optional for password persistence (e.g.
+    keys the stored password off the user-id or a device key). Then this
+    patch becomes redundant — verify the Hypha upload still works on a
+    fresh origin.
+  - Hypha gains a real refresh-token model. Then the fallback is dead
+    code and can be dropped.
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-010' src/main/frontend/worker/sync/crypt.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: `password-persistence-secret` must gate
+    the user-id fallback on `browser-runtime?`, and the save/read paths
+    must encrypt/decrypt with the resolved `secret`, not the raw
+    refresh-token.
+  - Regression guard: `save-e2ee-password-missing-refresh-token-in-auth-file-test`
+    and `decrypt-private-key-headless-ignores-config-e2ee-password-test`
+    (node-path, must still fail) plus the two
+    `*-falls-back-to-user-id-in-browser-without-refresh-token-test`
+    cases (browser-path, must succeed) in `crypt_test.cljs`.
+
+- **On break**:
+  - Structural → re-anchor on the new save/read secret-resolution shape.
+  - Semantic upstream-merged → remove the patch and re-verify the
+    fresh-origin upload user story still works.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

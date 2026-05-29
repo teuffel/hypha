@@ -290,13 +290,70 @@
                  (#'sync-crypt/<save-e2ee-password "password"))
                (p/then (fn [_]
                          (is false "expected missing refresh-token failure")))
+                (p/catch (fn [e]
+                           (is (contains? #{:db-sync/missing-e2ee-password
+                                            :missing-e2ee-password}
+                                          (or (:code (ex-data e))
+                                              (keyword (ex-message e)))))
+                           (is (zero? @encrypt-calls))))
+                (p/finally done)))))
+
+;; HYPHA-PATCH-010: a Hypha browser session has no refresh-token (cookie
+;; auth), so <save-e2ee-password must encrypt the persisted password with
+;; the stable JWT sub (user-id) instead of failing with missing-refresh-token.
+(deftest save-e2ee-password-falls-back-to-user-id-in-browser-without-refresh-token-test
+  (async done
+         (let [old-state @worker-state/*state
+               encrypt-calls (atom [])]
+           (reset! worker-state/*state (assoc old-state :auth/refresh-token nil
+                                              :auth/id-token "hypha-jwt"))
+           (-> (p/with-redefs [platform/current (fn [] {:env {:runtime :browser}})
+                               worker-util/parse-jwt (fn [token]
+                                                       (if (= token "hypha-jwt")
+                                                         {:sub "hypha-user-id"}
+                                                         {}))
+                               crypt/<encrypt-text-by-text-password (fn [secret password]
+                                                                      (swap! encrypt-calls conj [secret password])
+                                                                      {:cipher "payload"})
+                               ldb/write-transit-str pr-str
+                               platform/save-secret-text! (fn [_platform' _key _text]
+                                                            (p/resolved nil))]
+                 (#'sync-crypt/<save-e2ee-password "password"))
+               (p/then (fn [_]
+                         (is (= [["hypha-user-id" "password"]] @encrypt-calls))))
                (p/catch (fn [e]
-                          (is (contains? #{:db-sync/missing-e2ee-password
-                                           :missing-e2ee-password}
-                                         (or (:code (ex-data e))
-                                             (keyword (ex-message e)))))
-                          (is (zero? @encrypt-calls))))
-               (p/finally done)))))
+                          (is false (str e))))
+               (p/finally (fn []
+                            (reset! worker-state/*state old-state)
+                            (done)))))))
+
+;; HYPHA-PATCH-010: the read path must use the same user-id secret so a
+;; password saved under a Hypha session can be re-decrypted across reboots.
+(deftest read-e2ee-password-falls-back-to-user-id-in-browser-without-refresh-token-test
+  (async done
+         (let [old-state @worker-state/*state
+               decrypt-calls (atom [])]
+           (reset! worker-state/*state (assoc old-state :auth/refresh-token nil
+                                              :auth/id-token "hypha-jwt"))
+           (-> (p/with-redefs [platform/current (fn [] {:env {:runtime :browser}})
+                               worker-util/parse-jwt (fn [token]
+                                                       (if (= token "hypha-jwt")
+                                                         {:sub "hypha-user-id"}
+                                                         {}))
+                               platform/read-secret-text (fn [_platform' _key]
+                                                           (p/resolved (ldb/write-transit-str {:cipher "payload"})))
+                               crypt/<decrypt-text-by-text-password (fn [secret _data]
+                                                                      (swap! decrypt-calls conj secret)
+                                                                      (p/resolved "password"))]
+                 (#'sync-crypt/<read-e2ee-password nil))
+               (p/then (fn [password]
+                         (is (= "password" password))
+                         (is (= ["hypha-user-id"] @decrypt-calls))))
+               (p/catch (fn [e]
+                          (is false (str e))))
+               (p/finally (fn []
+                            (reset! worker-state/*state old-state)
+                            (done)))))))
 
 (deftest read-e2ee-password-uses-secret-storage-in-browser-runtime-test
   (async done

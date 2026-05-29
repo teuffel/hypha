@@ -587,6 +587,7 @@
  :encryption/remember-password-rich (fn [] [[:span "Please make sure you "] "remember the password you have set, as we are unable to reset or retrieve it if you forget it, " [:span "and we recommend you "] "keep a secure backup of the password."])
  :encryption/reset-password "Reset password"
  :encryption/set-new-password "Set new password"
+ :encryption/set-password-desc "This password protects the encryption key for your remote graphs. You'll need it on each device that syncs."
  :encryption/set-password-title "Set password for remote graphs"
  :encryption/updating-password "Updating password ..."
  :encryption/wrong-password "Wrong password"
