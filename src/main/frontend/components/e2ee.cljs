@@ -21,6 +21,7 @@
     [:div.e2ee-password-modal-overlay
      [:div.encryption-password.max-w-2xl.e2ee-password-modal-content.flex.flex-col.gap-8.p-4
       [:div.text-2xl.font-medium (t :encryption/set-password-title)]
+      [:div.text-sm.opacity-70 (t :encryption/set-password-desc)]
 
       [:div.init-remote-pw-tips.space-x-4.hidden.sm:flex
        [:div.flex-1.flex.items-center

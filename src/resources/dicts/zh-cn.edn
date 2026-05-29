@@ -584,6 +584,7 @@
  :encryption/remember-password-rich (fn [] [[:span "请务必"] "记住你设置的密码，因为一旦遗忘，我们无法为你重置或找回，" [:span "并建议你"] "妥善保存一份安全备份。"])
  :encryption/reset-password "重置密码"
  :encryption/set-new-password "设置新密码"
+ :encryption/set-password-desc "此密码用于保护远程图谱的加密密钥。每台参与同步的设备都需要输入它。"
  :encryption/set-password-title "为远程图谱设置密码"
  :encryption/updating-password "正在更新密码..."
  :encryption/wrong-password "密码错误"

@@ -559,6 +559,7 @@
  :encryption/remember-password-rich (fn [] [[:span "Bitte stellen Sie sicher, dass Sie "] "sich an das gesetzte Passwort erinnern, da wir es nicht zurücksetzen oder wiederherstellen können, wenn Sie es vergessen, " [:span "und wir empfehlen Ihnen, "] "eine sichere Sicherungskopie des Passworts aufzubewahren."])
  :encryption/reset-password "Passwort zurücksetzen"
  :encryption/set-new-password "Neues Passwort festlegen"
+ :encryption/set-password-desc "Dieses Passwort schützt den Verschlüsselungsschlüssel für Ihre entfernten Graphen. Sie benötigen es auf jedem Gerät, das synchronisiert."
  :encryption/set-password-title "Passwort festlegen"
  :encryption/updating-password "Passwort wird aktualisiert"
  :encryption/wrong-password "Falsches Passwort"

@@ -78,6 +78,28 @@
     (fail-missing-e2ee-password! {:reason :missing-refresh-token
                                   :hint "Run logseq login first."})))
 
+;; HYPHA-PATCH-010: symmetric key material for the locally-persisted e2ee
+;; password. Stock Logseq encrypts the saved password with the OAuth
+;; refresh-token. Hypha self-hosted has no refresh-token (HttpOnly cookie
+;; session only), so it falls back to the stable JWT `sub` (user-id). The
+;; user-id is stable per user across reboots, so the persisted password
+;; can be re-decrypted without a refresh-token. See HYPHA_PATCHES.md #10.
+(defn- password-persistence-secret
+  [refresh-token]
+  (if (seq refresh-token)
+    refresh-token
+    ;; Restricted to browser runtime: node/CLI uses the auth-file
+    ;; refresh-token and must keep failing without it. Only the Hypha
+    ;; browser session (cookie auth, no refresh-token) takes the fallback.
+    (when (browser-runtime? (platform/current))
+      (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))))
+
+(defn- ensure-password-persistence-secret!
+  [secret]
+  (when-not (seq secret)
+    (fail-missing-e2ee-password! {:reason :missing-refresh-token
+                                  :hint "Run logseq login first."})))
+
 (defn- missing-persisted-password-error?
   [error]
   (let [data (ex-data error)]
@@ -114,8 +136,9 @@
           refresh-token (if (browser-runtime? platform')
                           (:auth/refresh-token @worker-state/*state)
                           (<read-refresh-token-from-auth-file platform'))
-          _ (ensure-refresh-token! refresh-token)
-          result (crypt/<encrypt-text-by-text-password refresh-token password)
+          secret (password-persistence-secret refresh-token)
+          _ (ensure-password-persistence-secret! secret)
+          result (crypt/<encrypt-text-by-text-password secret password)
           text (ldb/write-transit-str result)
           native-saved? (if (capacitor-runtime? platform')
                           (-> (ui-request/<request :native-save-e2ee-password
@@ -139,8 +162,8 @@
                  nil))))
 
 (defn- <read-e2ee-password-text
-  [refresh-token]
-  (ensure-refresh-token! refresh-token)
+  [secret]
+  (ensure-password-persistence-secret! secret)
   (p/let [platform' (platform/current)
           native-result (if (capacitor-runtime? platform')
                           (-> (ui-request/<request :native-get-e2ee-password
@@ -155,7 +178,7 @@
     text))
 
 (defn- <decrypt-e2ee-password-text
-  [refresh-token text]
+  [secret text]
   (if-not (seq text)
     (p/rejected (missing-e2ee-password-ex {:reason :missing-persisted-password
                                            :hint "Provide --e2ee-password to persist it."}))
@@ -167,12 +190,13 @@
         (fail-fast :db-sync/invalid-e2ee-password-payload
                    {:field :e2ee-password
                     :reason :invalid-transit-payload}))
-      (crypt/<decrypt-text-by-text-password refresh-token data))))
+      (crypt/<decrypt-text-by-text-password secret data))))
 
 (defn- <read-e2ee-password
   [refresh-token]
-  (p/let [text (<read-e2ee-password-text refresh-token)]
-    (<decrypt-e2ee-password-text refresh-token text)))
+  (let [secret (password-persistence-secret refresh-token)]
+    (p/let [text (<read-e2ee-password-text secret)]
+      (<decrypt-e2ee-password-text secret text))))
 
 (defn- <clear-e2ee-password!
   []
@@ -444,10 +468,10 @@
 
         <decrypt-in-headless
         (fn [encrypted-private-key]
-          (let [refresh-token (:auth/refresh-token @worker-state/*state)]
-            (p/let [text (<read-e2ee-password-text refresh-token)]
+          (let [secret (password-persistence-secret (:auth/refresh-token @worker-state/*state))]
+            (p/let [text (<read-e2ee-password-text secret)]
               (if (seq text)
-                (p/let [password (<decrypt-e2ee-password-text refresh-token text)]
+                (p/let [password (<decrypt-e2ee-password-text secret text)]
                   (when-not (seq password)
                     (fail-missing-e2ee-password! {:reason :headless-empty-password
                                                   :hint "Provide --e2ee-password to persist it."}))
