@@ -73,10 +73,13 @@ check "patch-7: <rtc-upload-graph! catches and notifies via :db-sync/upload-grap
       "1"
 
 # === Patch #8 ===
-# Worker-side graph-e2ee? hypha-aware default. Anchor on the patch ID comment
-# inside the file; the function name graph-e2ee? alone is not unique enough.
-check "patch-8: graph-e2ee? defaults to false in hypha mode" \
-      "rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/crypt.cljs" \
+# Hypha-aware e2ee default for graphs with no explicit kv value. Lives in the
+# upload path's normalize-graph-e2ee? (the actual nil->true coercion site), so
+# graph-e2ee? itself stays a pure passthrough and upstream's
+# graph-e2ee-preserves-nil/false-kv-value tests keep holding. Anchor on the
+# patch ID comment inside the file.
+check "patch-8: hypha-aware e2ee default in normalize-graph-e2ee?" \
+      "rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/upload.cljs" \
       "1"
 
 # === Patch #9 ===

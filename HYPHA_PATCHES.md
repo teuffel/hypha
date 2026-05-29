@@ -488,25 +488,32 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 - **ID**: HYPHA-PATCH-008
 - **Introduced**: Phase 1.6.2 (companion to V10 import-then-upload diagnosis), 2026-05-28
-- **File**: `src/main/frontend/worker/sync/crypt.cljs`
+- **Relocated**: 2026-05-29 — moved from `crypt.cljs/graph-e2ee?` into
+  `upload.cljs/normalize-graph-e2ee?` so the patch sits at the actual
+  `nil → true` coercion site and `graph-e2ee?` stays a pure kv passthrough.
+  This keeps upstream's `graph-e2ee-preserves-nil-kv-value-test` and
+  `graph-e2ee-preserves-false-kv-value-test` (added by upstream commit
+  `36ae802983`) green; the earlier form changed `graph-e2ee?`'s return
+  value and broke both.
+- **File**: `src/main/frontend/worker/sync/upload.cljs`
 - **Patch form**:
   ```clojure
-  ;; ORIGINAL (~line 210)
-  (defn graph-e2ee?
-    [repo]
-    (when-let [conn (worker-state/get-datascript-conn repo)]
-      (ldb/get-graph-rtc-e2ee? @conn)))
+  ;; ORIGINAL (~line 216)
+  (defn- normalize-graph-e2ee?
+    [graph-e2ee?]
+    (if (nil? graph-e2ee?)
+      true
+      (true? graph-e2ee?)))
 
   ;; HYPHA
-  (defn graph-e2ee?
-    [repo]
-    (when-let [conn (worker-state/get-datascript-conn repo)]
-      (let [explicit (ldb/get-graph-rtc-e2ee? @conn)]
-        (if (some? explicit)
-          explicit
-          (not (seq (:http-base @worker-state/*db-sync-config)))))))
+  (defn- normalize-graph-e2ee?
+    [graph-e2ee?]
+    (if (nil? graph-e2ee?)
+      (not (seq (:http-base @worker-state/*db-sync-config)))
+      (true? graph-e2ee?)))
   ```
-- **Line count**: +12 (3 lines of logic plus a 9-line explanatory comment).
+- **Line count**: +8 (1 line of logic plus a 7-line explanatory comment).
+  `crypt.cljs/graph-e2ee?` is left untouched at its upstream definition.
 - **Rationale**: Stock Logseq's `graph-e2ee?` returns `nil` for graphs
   with no explicit `:logseq.kv/graph-rtc-e2ee?` setting. Every consumer
   in `worker/sync/{upload,assets,apply_txs,handle_message}.cljs` treats
@@ -528,13 +535,18 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   - **Older graphs created before M9.3**: same nil default, same failure.
 
-  This patch makes `graph-e2ee?` hypha-aware: when the worker's
-  `db-sync-config` has a custom `:http-base` (= self-hosted Hypha, set
-  by `persist_db/browser.cljs` from `frontend.config/set-custom-sync-server-url!`),
-  unset state defaults to **false** (no e2ee). When `:http-base` is
-  empty (= stock Logseq pointing at Logseq.com), unset state keeps the
-  safer default **true**. This is identical in shape to M9.3's UI
-  default reversal, just propagated through the runtime fallback.
+  This patch makes the upload path's `normalize-graph-e2ee?` hypha-aware:
+  when the worker's `db-sync-config` has a custom `:http-base` (=
+  self-hosted Hypha, set by `persist_db/browser.cljs` from
+  `frontend.config/set-custom-sync-server-url!`), unset state defaults to
+  **false** (no e2ee). When `:http-base` is empty (= stock Logseq pointing
+  at Logseq.com), unset state keeps the safer default **true**. This is
+  identical in shape to M9.3's UI default reversal, just propagated through
+  the upload-path fallback. `graph-e2ee?` itself remains the upstream pure
+  passthrough; the truthiness consumers (`<ensure-graph-aes-key`,
+  `<grant-graph-access!`, assets, apply-txs, handle-message) already treat
+  its `nil` as falsy (skip e2ee), so only the upload preflight needed the
+  hypha default.
 
   Net effect on Hypha:
   - Newly-created via UI: M9.3 sets explicit value → unchanged.
@@ -570,26 +582,29 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     removed.
 
 - **Break signal — structural**:
-  - `graph-e2ee?` is renamed, moved out of `worker/sync/crypt.cljs`,
-    or has its signature changed.
+  - `normalize-graph-e2ee?` is renamed, moved out of
+    `worker/sync/upload.cljs`, or stops gating the `<preflight-upload-e2ee!`
+    call.
   - `worker-state/*db-sync-config` is renamed or restructured.
 
 - **Break signal — semantic**:
-  - Upstream Logseq changes the `normalize-graph-e2ee?` callers so that
-    nil no longer maps to true. Then this patch becomes redundant or
-    inverted (verify all 6 caller sites match the expected polarity).
+  - Upstream Logseq changes `normalize-graph-e2ee?` so nil no longer maps
+    to true on its own. Then this patch becomes redundant — verify the
+    upload preflight still skips e2ee for imported graphs in Hypha mode.
   - Logseq introduces a new e2ee-default semantic where unset means
-    "ask the user" (UI prompt). Then the worker fallback should defer
+    "ask the user" (UI prompt). Then the upload fallback should defer
     to that UI flow rather than silently defaulting.
 
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/crypt.cljs`
+    `rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/upload.cljs`
     ⇒ `1`
-  - Semantic, manual at triage: the `(if (some? explicit) ...)` branch
-    must read `:http-base` from `worker-state/*db-sync-config`, and the
-    polarity must be `(not (seq ...))` — present-http-base implies
-    default-false.
+  - Semantic, manual at triage: the `(nil? graph-e2ee?)` branch must read
+    `:http-base` from `worker-state/*db-sync-config`, and the polarity
+    must be `(not (seq ...))` — present-http-base implies default-false.
+  - Regression guard: upstream's `graph-e2ee-preserves-nil-kv-value-test`
+    and `graph-e2ee-preserves-false-kv-value-test` in
+    `crypt_test.cljs` must stay green (they assert `graph-e2ee?` purity).
 
 - **On break**:
   - Structural rename → re-anchor on the new definition site.
