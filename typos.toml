@@ -21,6 +21,9 @@ Damon = "Damon"
 extend-exclude = ["resources/*",
                   "src/resources/*",
                   "scripts/resources/*",
+                  # Hypha fork docs are primarily German prose; the English
+                  # typos checker flags ordinary German words (oder, ist, …).
+                  "docs/hypha/*",
                   "src/test/fixtures/*",
                   "deps/db-sync/test/logseq/db_sync/fixtures/*.edn",
                   "clj-e2e/resources/*",
