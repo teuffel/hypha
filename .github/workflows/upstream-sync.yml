@@ -156,6 +156,7 @@ jobs:
           gh pr create \
             --base develop \
             --head hypha-staging \
+            --assignee ${{ github.repository_owner }} \
             --title "Weekly upstream sync — $(date +%Y-%m-%d)" \
             --body "Automatic merge of upstream/master into develop.
               - Merge:                 clean
@@ -206,6 +207,7 @@ jobs:
           gh issue create \
             --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
             --label "upstream-sync,needs-triage" \
+            --assignee ${{ github.repository_owner }} \
             --body-file issue-body.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
