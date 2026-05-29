@@ -210,18 +210,7 @@
 (defn graph-e2ee?
   [repo]
   (when-let [conn (worker-state/get-datascript-conn repo)]
-    (let [explicit (ldb/get-graph-rtc-e2ee? @conn)]
-      (if (some? explicit)
-        explicit
-        ;; HYPHA-PATCH-008: hypha-aware default. When a custom sync
-        ;; server is configured (self-hosted Hypha), an unset e2ee
-        ;; state means "no e2ee" because the personal-cloud trust model
-        ;; makes client-side encryption optional and the password-prompt
-        ;; UX conflicts with the import-then-upload flow exposed by
-        ;; Phase 1.6 (V10 surfaced this as a JSON.parse-on-key-decrypt
-        ;; failure for imported graphs). Logseq.com (no custom server
-        ;; configured) keeps the safer default true.
-        (not (seq (:http-base @worker-state/*db-sync-config)))))))
+    (ldb/get-graph-rtc-e2ee? @conn)))
 
 (defn- get-user-uuid []
   (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))
