@@ -14,10 +14,13 @@ the production-bundle behavior under realistic conditions.
 ## Running
 
 The scripts assume a hypha-server reachable on `$HYPHA_BASE_URL`
-(default `http://localhost:3030`) configured with `$HYPHA_ACCESS_CODE`.
+(default `http://localhost:3030`). `HYPHA_ACCESS_CODE` is **required** and
+has no default — set it to the plaintext code whose bcrypt hash the target
+server was started with (never hardcode a real code in a tracked file).
 
 ```bash
-# Default — against the dev container started via docker-compose.hypha.yml
+# Against the dev container (docker-compose.dev.yml uses the bcrypt hash of "dev")
+HYPHA_ACCESS_CODE=dev \
 ./hypha-server/test/smoke/cross-device-import-sync.sh
 
 # Custom base + code (CI / remote deploy)

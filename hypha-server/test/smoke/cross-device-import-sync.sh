@@ -43,12 +43,14 @@
 # Usage
 # -----
 # Pre-requisite: a running hypha-server reachable at $HYPHA_BASE_URL
-# (default http://localhost:3030) configured with $HYPHA_ACCESS_CODE
-# (default the dev code matching .env).
+# (default http://localhost:3030). $HYPHA_ACCESS_CODE is REQUIRED (no
+# default) — the plaintext code whose bcrypt hash the server was started
+# with. Never hardcode a real code in this tracked file.
 #
 # Examples:
 #
-#   # Default — local dev container started via docker-compose.hypha.yml
+#   # Against the dev container (docker-compose.dev.yml hashes the code "dev")
+#   HYPHA_ACCESS_CODE=dev \
 #   ./hypha-server/test/smoke/cross-device-import-sync.sh
 #
 #   # Custom base + code (CI / remote deploy)
@@ -68,7 +70,10 @@
 set -euo pipefail
 
 BASE="${HYPHA_BASE_URL:-http://localhost:3030}"
-CODE="${HYPHA_ACCESS_CODE:-a6cd37b73bf5dd9a8f6d9047104d7b79}"
+# Access code must be provided explicitly — never hardcode a real one in a
+# tracked file. Set HYPHA_ACCESS_CODE to the plaintext code whose bcrypt hash
+# the target server was started with (e.g. "dev" for the dev container).
+CODE="${HYPHA_ACCESS_CODE:?set HYPHA_ACCESS_CODE to the plaintext access code of the target server, e.g. HYPHA_ACCESS_CODE=dev for the dev container}"
 RUN_ID=$(date +%s)
 GRAPH_NAME="imported-notes-${RUN_ID}"
 ASSET_UUID="aaaaaaaa-bbbb-cccc-dddd-$(printf '%012d' "$RUN_ID")"
