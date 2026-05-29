@@ -88,3 +88,22 @@ After the change changes, React will dutifully refresh the screen.
 ## Architecture
 
 Logseq has undergone a heavy refactoring, results in a much more robust and clear architecture. Read [this article](https://docs.logseq.com/#/page/The%20Refactoring%20Of%20Logseq) written by the main contributor to the refactoring for a detailed tour.
+
+---
+
+## Hypha Fork Layer
+
+Everything above describes upstream Logseq and is preserved verbatim for clean upstream-sync merges. This repository is [Hypha](HYPHA.md), a self-hostable single-user fork. Hypha keeps the upstream tree intact and adds a thin layer on top. If you are orienting yourself in the Hypha-specific code, here is where it lives:
+
+- `HYPHA.md` — fork landing page (what Hypha adds, quick start, doc map).
+- `HYPHA_PATCHES.md` — per-line inventory of every upstream-Logseq line Hypha modifies, with rationale and a structural-break grep. Start here before touching upstream code.
+- `src/main/frontend/hypha/` — the browser-side Hypha layer (additive ClojureScript). Notable namespaces:
+  - `init.cljs` — bootstraps the Hypha layer at app start.
+  - `plugin_init.cljs` — runtime monkey-patch that rewrites plugin asset URLs through the Hypha CORP proxy (no upstream `LSPlugin.core` patch).
+  - `asset_cache.cljs` — background LRU eviction of cached asset binaries via `navigator.storage.estimate` + IndexedDB cleanup.
+- `hypha-server/` — the TypeScript reverse-proxy that fronts the upstream `db-sync` node-adapter on port 3030: access-code auth + JWT/JWKS, plugin-marketplace caching, plugin-asset CORP injection, and pass-through of `/sync/`, `/graphs/`, `/assets/`, `/e2ee/` routes. Tests live in `hypha-server/test/`.
+- `docs/hypha/` — operator and architecture docs (self-hosting, operations, phase plans).
+- `bin/hypha-*` — build entry points (`bin/hypha-build`, `--release` for production).
+- `docker-compose.hypha.yml` — single-container deploy; data bind-mounted to `./data/`.
+
+Upstream Logseq surgical patches are intentionally capped (self-imposed 20-patch soft limit, currently 9/20); beyond ~50 % the interception strategy would be refactored rather than extended. See [`HYPHA_PATCHES.md`](HYPHA_PATCHES.md) for the current inventory and `.github/scripts/hypha-patch-anchors.sh` for the break-detection checks.
