@@ -745,6 +745,7 @@
  :graph/time-travel-now "现在"
  :graph/toggle-tag "切换标签 {1}"
  :graph/updated-switching "图谱已更新！正在切换到图谱……"
+ :graph/upload-failed "云端上传失败：{1}"
  :graph/upload-local-confirm-desc "要将图谱“{1}”上传到 Logseq Server 吗？"
  :graph/use-sync-beta "使用 Logseq Sync（Beta 测试）"
  :graph/use-sync-label "使用 Logseq Sync？"
@@ -862,6 +863,10 @@
  :help.shortcuts/shortcut-column "快捷键"
  :help.shortcuts/title "完整快捷键"
  :help.shortcuts/triggers "触发"
+
+ :hypha.login/access-code-placeholder "访问码"
+ :hypha.login/invalid-code "访问码无效"
+ :hypha.login/network-error "无法连接到服务器，请重试。"
 
  :icon/emojis-count "表情符号（{1}）"
  :icon/icons-count "图标（{1}）"

@@ -1,0 +1,211 @@
+name: Upstream Sync (weekly)
+
+# Watchdog that attempts to merge logseq/logseq:master into Hypha's develop
+# every Monday. On success, opens a PR for human review. On any failure
+# (merge conflict, broken patch anchor, build/smoke regression), opens an
+# issue with a detailed report.
+#
+# Logic mirrors docs/hypha/phase-1-plan.md Anhang A verbatim — keeping the
+# YAML aligned with the plan makes review-vs-spec checks trivial.
+#
+# Pre-requisites:
+#   - .github/scripts/hypha-patch-anchors.sh exists (M4 introduced).
+#   - hypha-server/test:headless-auth runnable (M4 introduced).
+#   - HYPHA_PATCHES.md kept current (the anchor script reads it implicitly
+#     via the checks codified inside the script).
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'      # Mo 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  CLOJURE_VERSION: '1.12.4.1618'
+  JAVA_VERSION: '21'
+  NODE_VERSION: '24'
+  BABASHKA_VERSION: '1.12.215'
+  PNPM_VERSION: '10.33.0'
+
+jobs:
+  sync:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Configure git + upstream remote
+        run: |
+          git remote add upstream https://github.com/logseq/logseq.git
+          git fetch upstream master
+          git config user.name  "hypha-sync-bot"
+          git config user.email "sync-bot@hypha.local"
+
+      - name: Mirror upstream-master
+        run: |
+          git push origin refs/remotes/upstream/master:refs/heads/upstream-master --force
+
+      - name: Recreate hypha-staging
+        run: |
+          git checkout develop
+          git branch -D hypha-staging || true
+          git checkout -b hypha-staging
+
+      - name: Attempt merge
+        id: merge
+        run: |
+          if git merge upstream/master --no-edit; then
+            echo "result=clean" >> $GITHUB_OUTPUT
+          else
+            echo "result=conflict" >> $GITHUB_OUTPUT
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            echo "conflicts<<EOF" >> $GITHUB_OUTPUT
+            echo "$CONFLICTS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            git merge --abort
+          fi
+
+      - name: Patch-Anchor-Checks
+        if: steps.merge.outputs.result == 'clean'
+        id: anchors
+        run: |
+          bash .github/scripts/hypha-patch-anchors.sh > anchor-report.txt
+          if grep -q "FAIL" anchor-report.txt; then
+            echo "result=fail" >> $GITHUB_OUTPUT
+          else
+            echo "result=pass" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up pnpm
+        if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node
+        if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Java
+        if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Clojure
+        if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
+        uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          cli: ${{ env.CLOJURE_VERSION }}
+          bb: ${{ env.BABASHKA_VERSION }}
+
+      - name: Smoke-Build (Closure-Define-Propagation)
+        if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
+        id: smoke
+        run: |
+          # Compile-mode is sufficient and faster than release-mode here.
+          # The literal CLOSURE_DEFINES grep is the canonical A8 test.
+          pnpm install --frozen-lockfile --ignore-scripts
+          clojure -M:cljs compile app \
+            --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true}}'
+          if grep -q '"frontend.hypha.config.HYPHA_MODE":true' static/js/main.js; then
+            echo "result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "result=fail" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static (release) for headless-auth smoke
+        if: steps.smoke.outputs.result == 'pass'
+        run: bin/hypha-build --release
+
+      - name: Headless-Smoke-Test (Runtime-Verifikation)
+        if: steps.smoke.outputs.result == 'pass'
+        id: auth_smoke
+        run: |
+          # Specs live in hypha-server/test/playwright/*.spec.ts.
+          # Catches semantic upstream drift that the literal grep cannot:
+          # render-time exceptions, dispatch table changes, modal harness
+          # regressions, AND (M7) Logseq moving plugin-marketplace fetches
+          # away from window.fetch — which would silently leak outbound
+          # GitHub/Cloudflare traffic past Hypha's interceptor.
+          pnpm --dir hypha-server install --frozen-lockfile
+          pnpm --dir hypha-server exec playwright install --with-deps chromium
+          if timeout 120 pnpm --dir hypha-server test:headless-auth; then
+            echo "result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "result=fail" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push + PR on full success
+        if: steps.merge.outputs.result == 'clean'
+              && steps.anchors.outputs.result == 'pass'
+              && steps.smoke.outputs.result == 'pass'
+              && steps.auth_smoke.outputs.result == 'pass'
+        run: |
+          git push origin hypha-staging --force
+          gh pr create \
+            --base develop \
+            --head hypha-staging \
+            --title "Weekly upstream sync — $(date +%Y-%m-%d)" \
+            --body "Automatic merge of upstream/master into develop.
+              - Merge:                 clean
+              - Patch anchors:         pass
+              - Closure-Define build:  pass
+              - Headless-Auth smoke:   pass
+
+              Review for semantic changes before merging."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open issue on any failure
+        if: steps.merge.outputs.result == 'conflict'
+              || steps.anchors.outputs.result == 'fail'
+              || steps.smoke.outputs.result == 'fail'
+              || steps.auth_smoke.outputs.result == 'fail'
+        run: |
+          {
+            echo "## Upstream sync needs attention — $(date +%Y-%m-%d)"
+            echo
+            echo "### Merge result"
+            echo "${{ steps.merge.outputs.result }}"
+            echo
+            echo "### Conflicted files"
+            echo '```'
+            echo "${{ steps.merge.outputs.conflicts }}"
+            echo '```'
+            echo
+            echo "### Patch-Anchor-Report"
+            echo '```'
+            cat anchor-report.txt 2>/dev/null || echo "(not run — merge conflict)"
+            echo '```'
+            echo
+            echo "### Closure-Define-Smoke"
+            echo "${{ steps.smoke.outputs.result }}"
+            echo
+            echo "### Headless-Auth-Smoke"
+            echo "${{ steps.auth_smoke.outputs.result }}"
+            echo
+            echo "### Last 10 upstream commits"
+            echo '```'
+            git log --oneline upstream/master ^develop | head -10
+            echo '```'
+            echo
+            echo "### Action-Run"
+            echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > issue-body.md
+          gh issue create \
+            --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
+            --label "upstream-sync,needs-triage" \
+            --body-file issue-body.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

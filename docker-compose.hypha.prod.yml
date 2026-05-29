@@ -1,0 +1,40 @@
+# Hypha consumer deployment — runs a pre-built, published image.
+#
+# Unlike docker-compose.hypha.yml (which builds Dockerfile.hypha locally), this
+# pulls a versioned image from GHCR. No CLJS/TS toolchain or local build needed.
+#
+# Usage:
+#   1. cp .env.example .env  and edit (HYPHA_ACCESS_CODE_HASH is required).
+#   2. mkdir -p data
+#   3. Pin a version (recommended for real data) or use latest:
+#        export HYPHA_VERSION=v0.1.6.2
+#      then:
+#        docker compose -f docker-compose.hypha.prod.yml pull
+#        docker compose -f docker-compose.hypha.prod.yml up -d
+#
+# Upgrade: back up ./data, bump HYPHA_VERSION, pull, up -d.
+# See docs/hypha/operations.md#upgrade.
+
+services:
+  hypha:
+    image: ghcr.io/teuffel/hypha:${HYPHA_VERSION:-latest}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${HYPHA_HOST_PORT:-3000}:3000"
+    volumes:
+      # Bind-mount: data survives container removal. On host, ensure the
+      # directory is owned by UID 1000 (the `node` user inside the image)
+      # OR override `user:` to match host. See docs/hypha/self-hosting.md.
+      - ./data:/data
+    environment:
+      # Required — fail-fast if unset. Generate with: bin/hypha-gen-access-hash
+      HYPHA_ACCESS_CODE_HASH: ${HYPHA_ACCESS_CODE_HASH:?HYPHA_ACCESS_CODE_HASH must be set in .env}
+      HYPHA_JWT_ISSUER: ${HYPHA_JWT_ISSUER:-http://localhost:3000}
+      HYPHA_JWT_AUDIENCE: ${HYPHA_JWT_AUDIENCE:-hypha}
+      # Secure cookie only over TLS. Set to "true" when behind https.
+      HYPHA_COOKIE_SECURE: ${HYPHA_COOKIE_SECURE:-false}
+      # Optional: extend the JWT lifetime, default 30d.
+      HYPHA_JWT_TTL: ${HYPHA_JWT_TTL:-30d}
+      # Internal — keep at /data; the volume mount above is the persistence.
+      HYPHA_DATA_DIR: /data

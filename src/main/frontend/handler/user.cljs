@@ -15,6 +15,7 @@
             [frontend.debug :as debug]
             [frontend.flows :as flows]
             [frontend.handler.notification :as notification]
+            [frontend.hypha.config :as hypha-config]
             [frontend.state :as state]
             [frontend.util :as util]
             [logseq.common.path :as path]
@@ -88,9 +89,17 @@
    :sub))
 
 (defn logged-in? []
-  (let [token (state/get-auth-refresh-token)]
-    (when (string? token)
-      (not (string/blank? token)))))
+  (if hypha-config/hypha-mode?
+    ;; Hypha auth model has no refresh-token (the HttpOnly session cookie
+    ;; is the long-lived material; the JWT lives in-memory only). An
+    ;; unexpired :auth/id-token is the authentication proof.
+    ;; See HYPHA_PATCHES.md #3 + docs/hypha/phase-1.6-cross-device.md §M9.2.
+    (when-let [token (state/get-auth-id-token)]
+      (and (string? token)
+           (not (-> token parse-jwt-safe expired?))))
+    (let [token (state/get-auth-refresh-token)]
+      (when (string? token)
+        (not (string/blank? token))))))
 
 (defn- set-token-to-localstorage!
   ([id-token access-token]

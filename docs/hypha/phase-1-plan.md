@@ -496,31 +496,56 @@ Siehe 4.6 für vollständigen Flow.
 
 ## 7. Meilensteinplan
 
-### M0 — Build-Skeleton
+### M0 — Build-Skeleton (Docker-first Dev)
 
-**Scope:** Hypha-Build-Pipeline aufstellen, Top-Level-Verzeichnisse anlegen, hypha-server Hello-World.
+**Scope:** Hypha-Build-Pipeline aufstellen, Top-Level-Verzeichnisse anlegen, hypha-server Hello-World, **vollständige Dev-Toolchain in einem Docker-Container** sodass Host nur Docker+Compose braucht.
+
+**Designprinzip:** Alle Hypha-Entwicklung läuft im Dev-Container. Damit ist die Toolchain reproduzierbar (Node, Java, Clojure, Babashka, pnpm allesamt mit CI-Versionen gepinnt) und Host-OS-Diskrepanzen (z. B. Node 20 auf Arch Linux vs. Node 24 in CI) werden eliminiert. Production-Image bleibt eine separate Datei (`Dockerfile.hypha`, M3) — Dev-Image hat zusätzliche Tools die Production nicht braucht.
 
 **Upstream-Dateien:** 0
 
 **Hypha-Dateien neu:**
 - `src/main/frontend/hypha/config.cljs` (`(goog-define HYPHA-MODE false)` + `hypha-mode?`)
-- `src/main/frontend/hypha/init.cljs` (`(defn start! [])` leer)
-- `hypha-server/package.json` (TS-Deps: fastify, fastify-http-proxy, jose)
+- `src/main/frontend/hypha/init.cljs` (`(defn start! [])` leer, wird in M1 gefüllt)
+- `hypha-server/package.json` (TS-Deps: fastify, @fastify/http-proxy, jose)
 - `hypha-server/tsconfig.json`
-- `hypha-server/src/main.ts` (Hello-World, `/health` → 200)
-- `bin/hypha-build`
+- `hypha-server/src/main.ts` (Fastify-Hello-World, `/health` → 200)
+- `hypha-server/.gitignore` (dist/, node_modules/)
+- `hypha-server/pnpm-lock.yaml` (Dependabot-Reproduzierbarkeit, per 8.5)
+- `bin/hypha-build` (Build-Pipeline-Wrapper, läuft im Container)
+- `bin/dev` (Wrapper für `docker compose run`, auto-builds Image + pnpm-install on first call)
+- `Dockerfile.dev` (Eclipse-Temurin-JDK-21-jammy-Base + Node 24 + pnpm 10.33.0 + Clojure 1.12.4.1618 + Babashka 1.12.215, alle Versionen CI-gepinnt)
+- `docker-compose.dev.yml` (Bind-Mount-Repo + Named-Volumes für `.m2`/`.gitlibs`)
+- `.github/dependabot.yml` (per Plan-Section 8.5)
+- `.carve/ignore` (zwei Hypha-Vars unter Patches-pending-Begründung)
 
-**Verifiziert / nutzt Annahme:** A8 (reproduziert)
+**Verifiziert / nutzt Annahme:** A8 — V4 war manuell (Chat-Test 2026-05-27). M0 reproduziert das Pattern im containerisierten `bin/hypha-build`, der per Smoke-Grep verifiziert dass `HYPHA-MODE` propagiert. Damit ist A8 ab M0 in jedem Build automatisiert verifiziert.
 
-**Warum vor M1 nötig:** M1 braucht funktionierende Build-Infrastruktur.
+**Warum vor M1 nötig:** M1 braucht funktionierende Build-Infrastruktur und reproduzierbare Dev-Umgebung. M0 ist Voraussetzung **und** trägt die wiederkehrende A8-Verifikation.
+
+**Dev-Workflow nach M0:**
+- `bin/dev` — interaktive Shell im Container
+- `bin/dev bin/hypha-build` — Hypha-Build laufen lassen
+- `bin/dev bb dev:lint-and-test` — voller Lint+Test-Preflight
+- `bin/dev bb dev:test -v <ns/test-name>` — Einzeltest
+- `bin/dev pnpm --dir hypha-server dev` — hypha-server Dev-Mode mit tsx-watch
+- Erstaufruf baut das Image (~5 min) und macht ein erstes `pnpm install` mit native-Module-Compile (~2 min). Caches in Named-Volumes überleben Container-Removal.
 
 **DoD:**
-- `bin/hypha-build` produziert `static/js/main.js` mit `"frontend.hypha.config.HYPHA_MODE":true` im `CLOSURE_DEFINES`
-- `pnpm --dir hypha-server start` läuft, `curl localhost:80/health` → 200
-- `bb dev:lint-and-test` weiterhin grün
+- `bin/dev bin/hypha-build` produziert `static/js/main.js` mit `"frontend.hypha.config.HYPHA_MODE":true` im `CLOSURE_DEFINES`
+- Container-Toolchain verifiziert: Node 24.x ∧ pnpm 10.33.0 ∧ Java 21 ∧ Clojure 1.12.4.1618 ∧ Babashka 1.12.215
+- `bin/dev pnpm --dir hypha-server start` läuft, `curl localhost:3000/health` → 200 (Container exponiert Port 3000; M3-Production-Image bindet 80)
+- `bin/dev bb dev:lint-and-test` Lints alle grün: clj-kondo (0/0), carve (clean), large-vars (clean), ns-docstrings (alle dokumentiert), worker-frontend-separate (clean), lang-validate (alles ok)
+- Test-Lauf zeigt keine durch Hypha-Code verursachten Regressions (Hypha-Code referenziert nur in eigenen Top-Level-Verzeichnissen, kein bestehender Test wird durch Hypha-Pfad ausgelöst)
 - `git status` zeigt nur neue Hypha-Dateien
 
-**Dauer:** 0.5–1 Tag
+**Dauer:** 1–1.5 Tage (Docker-Setup erhöht initial leicht, spart aber alle nachgelagerten Toolchain-Diskrepanzen)
+
+**Bruchrisiko (Docker-spezifisch):**
+- **Volume-Permissions:** Named-Volumes auf bind-mounted Subpfaden werden root-owned (Docker propagiert Bind-Owner nicht). Workaround: Workspace-interne Caches (`.cpcache`, `.shadow-cljs`, `node_modules`) im Bind-Mount lassen, Named-Volumes nur für `/home/dev/{.m2,.gitlibs}`. Lokal validiert.
+- **Native-Modules:** `keytar` (Linux-keychain) braucht python3 + libsecret-1-dev zum Compile. Im Dockerfile.dev installiert.
+- **UID/GID-Mismatch:** Wenn Host-User nicht UID 1000, muss `bin/dev` HOST_UID/HOST_GID forwarden (eingebaut).
+- **Plattform-Spezifik:** Auf macOS/Windows haben Bind-Mounts höhere Latenz; Phase 1 wird primär auf Linux getestet.
 
 ### M1 — Login-Spike + V3-Verifikation
 
@@ -611,13 +636,25 @@ Siehe 4.6 für vollständigen Flow.
 - `docs/hypha/troubleshooting.md`
 - `docker-compose.hypha.yml` (erweitert)
 - `hypha-server/src/routes/health.ts` (erweitert)
+- `hypha-server/test/headless-auth.spec.ts` (Playwright-Smoke-Test, siehe unten)
 - `.github/workflows/hypha-build.yml`
 
-**Verifiziert / nutzt Annahme:** keine neuen
+**Verifiziert / nutzt Annahme:** keine neuen, aber: prophylaktische Erweiterung des Smoke-Build-Schutzes für die wöchentliche Upstream-Sync-Action (siehe Headless-Auth-Smoke-Test unten).
+
+**Headless-Auth-Smoke-Test (prophylaktisch ergänzt):**
+Der reine `grep`-Test in der Upstream-Sync-Action (Anhang A) verifiziert nur, dass das Closure-Define propagiert hat. Ein Logseq-Build kann erfolgreich kompilieren und trotzdem im Browser sofort eine `:user/login`-Dispatch-Exception werfen, wenn upstream-Reagent-Logik sich verändert. Der Headless-Auth-Smoke-Test schließt diese Lücke:
+- Startet Hypha-Stack (hypha-server + bereits gebaute Statics, ohne node-adapter — der wird via Stub-Endpoint auf `/sync/*` mockiert)
+- Playwright-Browser ruft `POST /auth/login` mit Test-AccessCode
+- Assertion: 200, `id-token`-Feld im Body ist ein wohlgeformtes JWT (3 base64url-Teile, parsebar, `sub == "hypha-user"`)
+- Browser lädt `/` (Hypha-Frontend), wartet auf DOM-Ready, prüft `state/get-auth-id-token` via injected JS gleich gesetzt
+- Laufzeit-Budget: < 30 Sekunden
+- Erfasst geschätzt 80 % der semantischen Drift, die das `grep` allein nicht sieht
 
 **DoD:**
 - Dritte Person kann Hypha nach `docs/hypha/self-hosting.md` aufsetzen
 - Hypha-CI baut Distro + M3-Smoke-Test headless
+- Headless-Auth-Smoke-Test grün gegen frischen Hypha-Build
+- Wöchentliche Upstream-Sync-Action (Anhang A) ruft den Headless-Auth-Smoke-Test nach dem `grep`-Test (siehe aktualisierte YAML)
 - `bb dev:lint-and-test` grün
 - `HYPHA_PATCHES.md` hat exakt zwei Einträge
 
@@ -638,34 +675,47 @@ Siehe 4.6 für vollständigen Flow.
 
 ## 8. Upstream-Sync-Strategie
 
-### 8.1 Branch-Layout
+### 8.1 Branch-Layout (git flow + Hypha-Erweiterung)
+
+Hypha verwendet das **Standard-git-flow-Layout** mit zwei Hypha-spezifischen Zusatz-Branches für die Upstream-Sync-Disziplin.
 
 ```
 origin (teuffel/hypha)
-├── master              # Hypha-Hauptbranch
+├── master              # Production-Releases (Tags wie v0.1.0)
+├── develop             # Aktive Integration; Hypha-Hauptbranch
+├── feature/<topic>     # WIP-Feature-Branches, mergen in develop
+├── release/<version>   # Release-Vorbereitung, von develop → master
+├── hotfix/<topic>      # Notfall-Fixes von master → master + develop
 ├── upstream-master     # 1:1-Mirror von logseq/logseq:master (read-only)
-├── hypha-staging       # Wöchentlicher Rebase-Branch, Action-Spielwiese
-└── feature/<scope>     # Hypha-Feature-Branches
+└── hypha-staging       # Wöchentlicher Upstream-Sync-Test-Branch
 
 upstream (logseq/logseq)
 └── master
 ```
 
 **Beziehungen:**
-- `upstream-master` wird wöchentlich gefetcht, force-pushed auf `origin/upstream-master`
-- `master` enthält upstream + Hypha-Code
-- `hypha-staging` ist Inspektions-Branch der wöchentlichen Action
+- `master` ist Production. Nur Release-Branches und Hotfixes mergen direkt rein.
+- `develop` ist das aktive Integrationsziel. Hier landen Features, hier landet auch die Upstream-Sync.
+- `feature/<topic>`-Branches werden via `git flow feature start <topic>` erstellt, gehen via PR oder `git flow feature finish` zurück in `develop`.
+- `upstream-master` wird wöchentlich gefetcht und force-pushed (read-only Spiegel des Upstream-Stands).
+- `hypha-staging` ist Inspektions-Branch der wöchentlichen Action. Bei Erfolg: PR gegen **`develop`** (nicht master). Bei Konflikt: Branch bleibt zur manuellen Diagnose stehen.
+- Releases laufen via `git flow release start <version>` von `develop` aus, finishen nach `master`.
+
+**Begründung gegen direkten Upstream-Sync nach master:** Upstream-Änderungen sind „next release"-Material, kein Hotfix. Sie gehören in `develop`, durchlaufen Stabilisierung, und gehen via Release-Branch nach `master`.
+
+**git-flow Setup-Status:** initial konfiguriert mit `git flow init -d` (Standard-Defaults: master/develop, Prefixes `feature/`, `bugfix/`, `release/`, `hotfix/`, `support/`, kein Version-Tag-Prefix).
 
 ### 8.2 GitHub-Action
 
 Volle YAML in Anhang A. Logik:
 - Wöchentlich Mo 06:00 UTC (cron)
 - Mirror `upstream-master`
-- Test-Merge auf `hypha-staging`
+- Test-Merge auf `hypha-staging` (basierend auf `develop`)
 - Patch-Anchor-Checks (Anhang B)
-- Smoke-Build (replay V4)
-- Bei vollem Erfolg: automatische PR gegen `master`
-- Bei Konflikt/Anchor-Fail/Smoke-Fail: Issue mit Detail-Report
+- Closure-Define-Smoke-Build (replay V4)
+- **Headless-Auth-Smoke-Test** (Runtime-Verifikation via Playwright, fängt semantische Drift, die der Closure-Define-Test nicht sieht)
+- Bei vollem Erfolg: automatische PR gegen **`develop`** (git-flow-konform; nicht direkt nach master)
+- Bei Konflikt/Anchor-Fail/Smoke-Fail/Auth-Smoke-Fail: Issue mit Detail-Report
 
 ### 8.3 `HYPHA_PATCHES.md`
 
@@ -692,6 +742,50 @@ Format mit Pflichtfeldern (Vollvorlage in Anhang C):
 
 **Roter Faden:** Patches sind Diagnose-Instrument. Bei häufigem Brechen/Wachsen: Hypha-Architektur eine Stelle früher anders ansetzen.
 
+### 8.5 Hypha-Server-Deps-Disziplin
+
+Die wöchentliche Upstream-Sync-Action (8.2) deckt **Logseq-Upstream** ab, nicht aber Hypha-eigene npm-Dependencies (`hypha-server/package.json`: fastify, jose, fastify-http-proxy, etc.). Diese brauchen eigene Update-Disziplin, insbesondere für Security-Patches (jose ist Krypto-Code, fastify hat Network-Surface).
+
+**Mechanismus**: GitHub Dependabot für `hypha-server/package.json`, monatliche Frequenz.
+
+| Update-Typ | Behandlung |
+|---|---|
+| Patch-Bumps (x.y.**Z**) | Auto-Merge wenn CI grün — fällt in die hochautomatisierbare Klasse |
+| Minor-Bumps (x.**Y**.z) für `jose`, `fastify` | Auto-Merge wenn CI grün, weil Security-relevant |
+| Minor-Bumps für `fastify-http-proxy` | Manueller Review (Proxy-Verhalten ändert sich subtil) |
+| Major-Bumps (**X**.y.z) | Immer manueller Review; API-Bruchpotential |
+| `@types/*`-Packages | Auto-Merge wenn CI grün |
+
+**Konfigurations-Artefakt** (entsteht in M0 zusammen mit `hypha-server/package.json`):
+
+```yaml
+# .github/dependabot.yml (auszubauen in M0)
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /hypha-server
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels: [hypha-deps]
+    groups:
+      jose-fastify-security:
+        patterns: [jose, fastify, "@fastify/*"]
+        update-types: [patch, minor]
+      types:
+        patterns: ["@types/*"]
+    ignore:
+      # Major bumps require manual review — keep dependabot out of them
+      - dependency-name: fastify
+        update-types: [version-update:semver-major]
+      - dependency-name: fastify-http-proxy
+        update-types: [version-update:semver-major, version-update:semver-minor]
+```
+
+Die `pnpm-lock.yaml` in `hypha-server/` muss vorhanden sein, sobald `hypha-server/package.json` existiert (entsteht in M0), damit Dependabot reproduzierbare Updates produziert.
+
+**Aufnahme-Zeitpunkt**: nicht relevant für M0–M4 funktional, aber `.github/dependabot.yml` sollte zusammen mit dem ersten `hypha-server/package.json`-Commit in M0 angelegt werden. Damit greift die Disziplin ab dem ersten Tag.
+
 ---
 
 ## 9. Anhang A — GitHub-Action `upstream-sync.yml`
@@ -715,7 +809,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: master
+          ref: develop
           fetch-depth: 0
 
       - name: Configure git + upstream remote
@@ -731,7 +825,7 @@ jobs:
 
       - name: Recreate hypha-staging
         run: |
-          git checkout master
+          git checkout develop
           git branch -D hypha-staging || true
           git checkout -b hypha-staging
 
@@ -760,7 +854,7 @@ jobs:
             echo "result=pass" >> $GITHUB_OUTPUT
           fi
 
-      - name: Smoke-Build
+      - name: Smoke-Build (Closure-Define-Propagation)
         if: steps.merge.outputs.result == 'clean' && steps.anchors.outputs.result == 'pass'
         id: smoke
         run: |
@@ -774,20 +868,39 @@ jobs:
             echo "result=fail" >> $GITHUB_OUTPUT
           fi
 
+      - name: Headless-Auth-Smoke-Test (Runtime-Verifikation)
+        if: steps.smoke.outputs.result == 'pass'
+        id: auth_smoke
+        run: |
+          # Verifiziert, dass Hypha-Stack zur Laufzeit kommt und der Auth-Flow
+          # nicht durch semantische Upstream-Drift gebrochen wurde.
+          # Spec lebt in hypha-server/test/headless-auth.spec.ts (siehe M4).
+          pnpm --dir hypha-server install --frozen-lockfile
+          pnpm --dir hypha-server build
+          # Test startet hypha-server intern (mit Stub-Proxy für /sync/*),
+          # ruft /auth/login + verifiziert JWT-Form. Timeout 60s.
+          if timeout 60 pnpm --dir hypha-server test:headless-auth; then
+            echo "result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "result=fail" >> $GITHUB_OUTPUT
+          fi
+
       - name: Push + PR on full success
         if: steps.merge.outputs.result == 'clean'
               && steps.anchors.outputs.result == 'pass'
               && steps.smoke.outputs.result == 'pass'
+              && steps.auth_smoke.outputs.result == 'pass'
         run: |
           git push origin hypha-staging --force
           gh pr create \
-            --base master \
+            --base develop \
             --head hypha-staging \
             --title "Weekly upstream sync — $(date +%Y-%m-%d)" \
-            --body "Automatic merge of upstream/master into master.
-              - Merge:         clean
-              - Patch anchors: pass
-              - Smoke build:   pass
+            --body "Automatic merge of upstream/master into develop.
+              - Merge:                 clean
+              - Patch anchors:         pass
+              - Closure-Define build:  pass
+              - Headless-Auth smoke:   pass
 
               Review for semantic changes before merging."
         env:
@@ -797,6 +910,7 @@ jobs:
         if: steps.merge.outputs.result == 'conflict'
               || steps.anchors.outputs.result == 'fail'
               || steps.smoke.outputs.result == 'fail'
+              || steps.auth_smoke.outputs.result == 'fail'
         run: |
           {
             echo "## Upstream sync needs attention — $(date +%Y-%m-%d)"
@@ -814,12 +928,15 @@ jobs:
             cat anchor-report.txt 2>/dev/null || echo "(not run — merge conflict)"
             echo '```'
             echo
-            echo "### Smoke-Build"
+            echo "### Closure-Define-Smoke"
             echo "${{ steps.smoke.outputs.result }}"
+            echo
+            echo "### Headless-Auth-Smoke"
+            echo "${{ steps.auth_smoke.outputs.result }}"
             echo
             echo "### Last 10 upstream commits"
             echo '```'
-            git log --oneline upstream/master ^master | head -10
+            git log --oneline upstream/master ^develop | head -10
             echo '```'
             echo
             echo "### Action-Run"
@@ -850,7 +967,9 @@ check() {
   local expected="$3"
   local result
   result=$(bash -c "$cmd" 2>&1)
-  if [[ "$result" == "$expected" ]]; then
+  # Numerical comparison: -eq tolerates trailing whitespace (rg -c "1\n"),
+  # and falls through to FAIL when result is non-numeric (e.g. rg error).
+  if [[ "$result" -eq "$expected" ]] 2>/dev/null; then
     echo "PASS: $name"
   else
     echo "FAIL: $name (expected '$expected', got '$result')"

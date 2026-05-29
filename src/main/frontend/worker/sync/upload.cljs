@@ -216,7 +216,15 @@
 (defn- normalize-graph-e2ee?
   [graph-e2ee?]
   (if (nil? graph-e2ee?)
-    true
+    ;; HYPHA-PATCH-008: hypha-aware default for graphs with no explicit
+    ;; e2ee state (imported folder graphs, or graphs created before M9.3).
+    ;; A custom http-base (self-hosted Hypha) defaults such graphs to NO
+    ;; e2ee, so upload-graph! skips the e2ee preflight that crashed with a
+    ;; JSON.parse-on-key-decrypt error in Phase 1.6 V10. Stock Logseq.com
+    ;; (no custom http-base) keeps the safer default of true. graph-e2ee?
+    ;; itself stays a pure kv passthrough so upstream's
+    ;; graph-e2ee-preserves-nil/false-kv-value tests hold.
+    (not (seq (:http-base @worker-state/*db-sync-config)))
     (true? graph-e2ee?)))
 
 (defn- graph-id->uuid
