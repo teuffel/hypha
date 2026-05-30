@@ -3,6 +3,7 @@
   (:require [frontend.common.crypt :as crypt]
             [frontend.common.missionary :as c.m]
             [frontend.components.e2ee :as e2ee]
+            [frontend.components.graph-rebind :as graph-rebind]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.handler.events :as events]
@@ -63,6 +64,16 @@
 
 (defmethod events/handle :rtc/graph-count-exceed-limit [[_]]
   (notification/show! (t :sync/graph-count-exceed-limit) :warning false))
+
+;; HYPHA-PATCH-013: opens the name-collision resolve dialog instead of
+;; the dead-end error toast that <rtc-upload-graph! would otherwise show
+;; when a local graph's name is already taken on the server. Triggered
+;; from frontend.handler.db-based.sync/<rtc-upload-graph!'s p/catch.
+(defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
+  (shui/dialog-open!
+   #(graph-rebind/graph-already-exists-dialog payload)
+   {:auto-width? true
+    :content-props {:onPointerDownOutside #(.preventDefault %)}}))
 
 (defn- sync-app-state!
   []

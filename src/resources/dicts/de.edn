@@ -707,6 +707,21 @@
 
  :graph.page/title "Seiten-Graph"
 
+ :graph.rebind/banner-action "Verbinden"
+ :graph.rebind/banner-desc "Verbinden führt die lokale Kopie mit der Cloud-Version zusammen. Es werden keine Daten sofort hochgeladen; die normale Synchronisation gleicht die Änderungen ab."
+ :graph.rebind/banner-title "Diese lokalen Graphen haben denselben Namen wie einer Ihrer Cloud-Graphen"
+ :graph.rebind/connect-action "Mit vorhandenem Remote-Graphen verbinden"
+ :graph.rebind/desc "Ein Remote-Graph namens „{1}\" existiert bereits. Verbinden Sie diese lokale Kopie mit dem Remote-Graphen, um Ihre lokalen Änderungen mit der Cloud-Version zusammenzuführen."
+ :graph.rebind/error "Verbinden mit Remote-Graph fehlgeschlagen: {1}"
+ :graph.rebind/footer-hint "Es werden keine Daten sofort hochgeladen; die normale Synchronisation führt die Änderungen nach dem Verbinden zusammen."
+ :graph.rebind/remote-e2ee-label "Verschlüsselt:"
+ :graph.rebind/remote-e2ee-off "nein"
+ :graph.rebind/remote-e2ee-on "ja"
+ :graph.rebind/remote-id-label "Remote-ID:"
+ :graph.rebind/remote-updated-at-label "Letztes Server-Update:"
+ :graph.rebind/success "Mit Remote-Graph „{1}\" verbunden."
+ :graph.rebind/title "Mit vorhandenem Remote-Graphen verbinden"
+
  :graph.switch/add-graph-action "Ja, weiteren Graphen hinzufügen"
  :graph.switch/empty-desc "Keine übereinstimmenden Graphen. Möchten Sie einen weiteren hinzufügen?"
  :graph.switch/prompt "Wechseln zu:"

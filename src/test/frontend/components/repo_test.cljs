@@ -462,3 +462,38 @@
       (is (= [[:graph/open-new-window "logseq_db_demo"]]
              @events))
       (is (zero? @registry-reads)))))
+
+;; HYPHA-PATCH-014: banner shows only when a local-only graph shares
+;; its name with one of the user's remote graphs.
+(deftest local-graphs-with-remote-name-match-detects-collisions-test
+  (let [match-fn (some-> (resolve 'frontend.components.repo/local-graphs-with-remote-name-match)
+                         deref)]
+    (is (fn? match-fn) "private helper must be resolvable for the rebind banner")
+    (when match-fn
+      (let [local [{:url "logseq_db_teuffel.io" :remote? false}
+                   {:url "logseq_db_other" :remote? false}
+                   {:url "logseq_db_already-remote" :remote? true}]
+            remote [{:GraphName "teuffel.io"}
+                    {:GraphName "unmatched-remote"}]
+            result (match-fn local remote)]
+        (is (= 1 (count result)))
+        (is (= "logseq_db_teuffel.io" (:url (first result))))))))
+
+(deftest local-graphs-with-remote-name-match-ignores-remote-marked-graphs-test
+  (let [match-fn (some-> (resolve 'frontend.components.repo/local-graphs-with-remote-name-match)
+                         deref)]
+    (when match-fn
+      (let [;; same name on both, but local is already :remote? true →
+            ;; it's the synced view of the remote, not a collision
+            local [{:url "logseq_db_teuffel.io" :remote? true}]
+            remote [{:GraphName "teuffel.io"}]
+            result (match-fn local remote)]
+        (is (empty? result)
+            "a graph already marked :remote? is the synced view, not a collision")))))
+
+(deftest local-graphs-with-remote-name-match-empty-when-no-remotes-test
+  (let [match-fn (some-> (resolve 'frontend.components.repo/local-graphs-with-remote-name-match)
+                         deref)]
+    (when match-fn
+      (is (empty? (match-fn [{:url "logseq_db_foo" :remote? false}] []))
+          "no remote graphs → no collisions to surface"))))

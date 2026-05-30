@@ -423,18 +423,42 @@
           ;; upload spinner clears via p/finally, so the UI looks identical
           ;; to success. Phase 1.6 V10 turned this up as the cause of
           ;; "Cloud icon clicked, spinner blinked, nothing synced" reports.
+          ;;
+          ;; HYPHA-PATCH-013: when the failure is a name collision
+          ;; (`:db-sync/graph-already-exists`), instead of a dead-end
+          ;; error toast pub the [:rtc/graph-already-exists-resolve] event
+          ;; which opens a dialog letting the user rebind this local graph
+          ;; to the remote one that owns the name.
           (p/catch (fn [e]
-                     (log/error :db-sync/upload-graph-failed
-                                {:repo repo :error e})
-                     (notification/show!
-                      (t :graph/upload-failed
-                         (or (some-> e ex-message)
-                             (str e)))
-                      :error)
-                     (p/rejected e)))
+                     (let [data (ex-data e)]
+                       (log/error :db-sync/upload-graph-failed
+                                  {:repo repo :error e})
+                       (if (= :db-sync/graph-already-exists (:code data))
+                         (state/pub-event!
+                          [:rtc/graph-already-exists-resolve
+                           (assoc data :repo repo)])
+                         (notification/show!
+                          (t :graph/upload-failed
+                             (or (some-> e ex-message)
+                                 (str e)))
+                          :error))
+                       (p/rejected e))))
           (p/finally
             (fn []
               (state/set-state! :rtc/uploading? false)))))))
+
+;; HYPHA-PATCH-013: rebind a local-only graph to an existing remote graph.
+;; Triggered from the name-collision resolve dialog. On success the
+;; standard RTC start kicks in so client_ops get merged with the server
+;; without a re-upload.
+(defn <rtc-rebind-to-remote!
+  [repo remote-graph-id remote-graph-e2ee?]
+  (p/let [_ (state/<invoke-db-worker
+             :thread-api/db-sync-rebind-to-remote
+             repo remote-graph-id (boolean remote-graph-e2ee?))
+          _ (<get-remote-graphs)
+          _ (<rtc-start! repo)]
+    true))
 
 (defn <rtc-create-graph-and-start-sync!
   [repo graph-e2ee?]

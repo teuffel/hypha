@@ -6,6 +6,7 @@
             [frontend.context.i18n :as i18n]
             [frontend.handler.e2ee :as e2ee-handler]
             [frontend.handler.notification :as notification]
+            [frontend.hypha.auth :as hypha-auth]
             [frontend.state :as state]
             [lambdaisland.glogi :as log]
             [logseq.db :as ldb]
@@ -150,6 +151,14 @@
           (p/resolved {:supported? false})
           (p/let [_ (e2ee-handler/<native-delete-secret! key)]
             {:supported? true}))))
+
+    ;; HYPHA-PATCH-012: worker asks main thread to re-mint the JWT via
+    ;; /auth/session (cookie-bound, cannot run in a Web Worker). Returns
+    ;; {:id-token <jwt>} on success; nil id-token means the session is
+    ;; gone and the caller's promise rejects with :hypha-refresh-empty-id-token.
+    :hypha-refresh-id-token
+    (p/let [id-token (hypha-auth/<refresh-hypha-id-token!)]
+      {:id-token id-token})
 
     (p/rejected (ex-info "unsupported db-worker ui action"
                          {:code :unsupported-ui-action

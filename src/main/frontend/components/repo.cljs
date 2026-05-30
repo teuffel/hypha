@@ -291,6 +291,19 @@
                                                      (state/set-state! :rtc/loading-graphs? false)))))))))}
               (t :graph/leave-action))))))]]]))
 
+;; HYPHA-PATCH-014: identify local-only graphs whose name matches an
+;; existing remote graph the user already owns. These are the graphs
+;; that would hit Patch #13's name-collision dialog on upload; we
+;; surface a banner so the user can rebind without first trying — and
+;; failing — to upload.
+(defn- local-graphs-with-remote-name-match
+  [local-graphs remote-graphs]
+  (let [remote-names (set (keep :GraphName remote-graphs))]
+    (filter (fn [{:keys [url remote?]}]
+              (and (not remote?)
+                   (contains? remote-names (config/db-graph-name url))))
+            local-graphs)))
+
 (rum/defc repos-cp < rum/reactive
   {:will-mount (fn [state]
                  (let [login? (:auth/id-token @state/state)]
@@ -315,7 +328,14 @@
                           (config/db-based-graph? (:url item)))))
         {remote-graphs true local-graphs false} (group-by (comp boolean :remote?) repos)
         {own-graphs true shared-graphs false}
-        (group-by (fn [graph] (= "manager" (:graph<->user-user-type graph))) remote-graphs)]
+        (group-by (fn [graph] (= "manager" (:graph<->user-user-type graph))) remote-graphs)
+        ;; HYPHA-PATCH-014: local graphs that collide by name with one
+        ;; of the user's own remote graphs. Banner shown only in Hypha
+        ;; mode (the only target where the collision flow has a
+        ;; one-click resolve via Patch #13).
+        name-collision-graphs (when hypha-config/hypha-mode?
+                                (local-graphs-with-remote-name-match
+                                 local-graphs own-graphs))]
     [:div#graphs
      (when-not (util/capacitor?)
        [:h1.title (t :graph/all-graphs)])
@@ -328,6 +348,32 @@
           (ui/button
            (t :graph/create-new)
            :on-click #(state/pub-event! [:graph/new-db-graph]))]])
+
+      ;; HYPHA-PATCH-014: hint banner — one row per name-collision.
+      ;; Each "Connect" button triggers the Patch #13 resolve dialog
+      ;; without requiring an upload click first.
+      (when (seq name-collision-graphs)
+        [:div.cp__hypha-rebind-banner.bg-amber-02.border.border-amber-06.rounded.p-3.mb-6.flex.flex-col.gap-2
+         [:div.text-sm.font-medium (t :graph.rebind/banner-title)]
+         [:div.text-xs.opacity-80 (t :graph.rebind/banner-desc)]
+         (for [{:keys [url]} name-collision-graphs]
+           (let [graph-name (config/db-graph-name url)
+                 match (first (filter #(= graph-name (:GraphName %)) own-graphs))]
+             [:div.flex.flex-row.items-center.gap-2.text-sm
+              {:key url}
+              [:span.flex-1.font-mono graph-name]
+              (shui/button
+               {:variant :outline
+                :size :sm
+                :on-click
+                #(state/pub-event!
+                  [:rtc/graph-already-exists-resolve
+                   {:repo url
+                    :graph-name graph-name
+                    :remote-graph-id (:GraphUUID match)
+                    :remote-graph-e2ee? (:graph-e2ee? match)
+                    :remote-updated-at (:updated-at match)}])}
+               (t :graph.rebind/banner-action))]))])
 
       [:div
        [:h2.text-lg.font-medium.mb-4 (t :graph/local-graphs)]
