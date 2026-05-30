@@ -71,3 +71,33 @@
       (is (= @actual-ops 4))
       (is (= (m+ 3 5) 8))
       (is (= @actual-ops 4)))))
+
+;; HYPHA-PATCH-011: standalone-display-mode? detects installed-PWA windows.
+;; with-redefs can't bind dotted JS properties (js/window.matchMedia), so
+;; these tests save/restore the original via set! around a stub.
+(defn- with-match-media-stub
+  [stub thunk]
+  (let [orig (.-matchMedia js/window)]
+    (try
+      (set! (.-matchMedia js/window) stub)
+      (thunk)
+      (finally
+        (set! (.-matchMedia js/window) orig)))))
+
+(deftest standalone-display-mode-detects-matching-media-query
+  (testing "returns true when display-mode: standalone matches"
+    (let [received-query (atom nil)]
+      (with-match-media-stub
+        (fn [query]
+          (reset! received-query query)
+          #js {:matches true})
+        (fn []
+          (is (true? (util/standalone-display-mode?)))
+          (is (= "(display-mode: standalone)" @received-query)))))))
+
+(deftest standalone-display-mode-returns-false-in-regular-browser-tab
+  (testing "returns false when display-mode: standalone does not match"
+    (with-match-media-stub
+      (fn [_query] #js {:matches false})
+      (fn []
+        (is (false? (util/standalone-display-mode?)))))))
