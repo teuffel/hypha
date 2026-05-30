@@ -4,6 +4,7 @@
             [frontend.worker-common.util :as worker-util]
             [frontend.worker.state :as worker-state]
             [frontend.worker.sync.util :as sync-util]
+            [frontend.worker.ui-request :as ui-request]
             [logseq.common.util :as common-util]
             [promesa.core :as p]))
 
@@ -42,39 +43,68 @@
       (when-let [domain (not-empty (:auth/oauth-domain state))]
         (str "https://" domain "/oauth2/token"))))
 
+(defn- hypha-mode?
+  "True when the worker is configured to talk to a self-hosted Hypha
+  server. Same signal as HYPHA-PATCH-008/010: a custom :http-base is
+  present in *db-sync-config*. Avoids requiring `frontend.hypha.config`
+  from the worker (forbidden by the worker/frontend separation lint)."
+  []
+  (boolean (seq (:http-base @worker-state/*db-sync-config))))
+
+(defn- <refresh-id&access-token-hypha
+  "HYPHA-PATCH-012: Hypha worker-side refresh path.
+
+  The worker cannot call /auth/session itself (no document cookies in a
+  Web Worker context). It asks the main thread via a ui-request; the
+  main thread runs `frontend.hypha.auth/<refresh-hypha-id-token!` which
+  reads the HttpOnly session cookie and returns a fresh JWT. The worker
+  receives the JWT and writes it into worker-state, mirroring what the
+  OAuth path does on success."
+  []
+  (p/let [resp (ui-request/<request :hypha-refresh-id-token nil
+                                     {:hint "Hypha JWT refresh"})
+          id-token (:id-token resp)]
+    (when-not (seq id-token)
+      (throw (ex-info "hypha worker auth refresh returned empty id-token"
+                      {:code :hypha-refresh-empty-id-token})))
+    {:id-token id-token
+     :access-token nil}))
+
 (defn <refresh-id&access-token
   []
-  (let [state @worker-state/*state
-        refresh-token (:auth/refresh-token state)
-        token-url (oauth-token-url state)
-        oauth-client-id (:auth/oauth-client-id state)]
-    (when-not (seq refresh-token)
-      (throw (ex-info "worker auth refresh requires refresh token"
-                      {:code :missing-refresh-token})))
-    (when-not (seq token-url)
-      (throw (ex-info "worker auth refresh requires oauth token url"
-                      {:code :missing-oauth-token-url})))
-    (when-not (seq oauth-client-id)
-      (throw (ex-info "worker auth refresh requires oauth client id"
-                      {:code :missing-oauth-client-id})))
-    (let [form-data (js/URLSearchParams.)]
-      (.set form-data "grant_type" "refresh_token")
-      (.set form-data "client_id" oauth-client-id)
-      (.set form-data "refresh_token" refresh-token)
-      (p/let [resp (js/fetch token-url #js {:method "POST"
-                                            :headers #js {"content-type" "application/x-www-form-urlencoded"}
-                                            :body (.toString form-data)})
-              text (.text resp)
-              data (when (seq text)
-                     (js->clj (js/JSON.parse text) :keywordize-keys true))]
-        (if (.-ok resp)
-          {:id-token (:id_token data)
-           :access-token (:access_token data)}
-          (throw (ex-info "worker auth refresh failed"
-                          {:code :auth-refresh-failed
-                           :status (.-status resp)
-                           :token-url token-url
-                           :body data})))))))
+  (if (hypha-mode?)
+    (<refresh-id&access-token-hypha)
+    (let [state @worker-state/*state
+          refresh-token (:auth/refresh-token state)
+          token-url (oauth-token-url state)
+          oauth-client-id (:auth/oauth-client-id state)]
+      (when-not (seq refresh-token)
+        (throw (ex-info "worker auth refresh requires refresh token"
+                        {:code :missing-refresh-token})))
+      (when-not (seq token-url)
+        (throw (ex-info "worker auth refresh requires oauth token url"
+                        {:code :missing-oauth-token-url})))
+      (when-not (seq oauth-client-id)
+        (throw (ex-info "worker auth refresh requires oauth client id"
+                        {:code :missing-oauth-client-id})))
+      (let [form-data (js/URLSearchParams.)]
+        (.set form-data "grant_type" "refresh_token")
+        (.set form-data "client_id" oauth-client-id)
+        (.set form-data "refresh_token" refresh-token)
+        (p/let [resp (js/fetch token-url #js {:method "POST"
+                                              :headers #js {"content-type" "application/x-www-form-urlencoded"}
+                                              :body (.toString form-data)})
+                text (.text resp)
+                data (when (seq text)
+                       (js->clj (js/JSON.parse text) :keywordize-keys true))]
+          (if (.-ok resp)
+            {:id-token (:id_token data)
+             :access-token (:access_token data)}
+            (throw (ex-info "worker auth refresh failed"
+                            {:code :auth-refresh-failed
+                             :status (.-status resp)
+                             :token-url token-url
+                             :body data}))))))))
 
 (defn <resolve-ws-token
   []

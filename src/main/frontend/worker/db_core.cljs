@@ -683,6 +683,13 @@
   (db-sync/create-remote-graph! repo {:graph-e2ee? graph-e2ee?
                                       :graph-ready-for-use? graph-ready-for-use?}))
 
+;; HYPHA-PATCH-013: bind a local-only graph to an existing remote graph
+;; with the same name. Called by the frontend's name-collision resolve
+;; dialog. See db-sync/rebind-to-remote-graph! for semantics.
+(def-thread-api :thread-api/db-sync-rebind-to-remote
+  [repo remote-graph-id remote-graph-e2ee?]
+  (db-sync/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
+
 (def-thread-api :thread-api/db-sync-stop-upload
   [repo]
   (db-sync/stop-upload! repo))

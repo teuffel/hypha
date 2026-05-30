@@ -15,6 +15,7 @@
             [frontend.debug :as debug]
             [frontend.flows :as flows]
             [frontend.handler.notification :as notification]
+            [frontend.hypha.auth :as hypha-auth]
             [frontend.hypha.config :as hypha-config]
             [frontend.state :as state]
             [frontend.util :as util]
@@ -201,42 +202,56 @@
                             :client_id config/COGNITO-CLIENT-ID
                             :refresh_token refresh-token}}))
 
+(defn- <refresh-id-token-hypha
+  "HYPHA-PATCH-012: Hypha-mode refresh path.
+
+  Re-mints the JWT via /auth/session (cookie auth) instead of OAuth
+  refresh-token. On session loss, surface the login UI so the user sees
+  the access-code prompt instead of an endless 401 background loop."
+  []
+  (go
+    (let [id-token (<! (p/then (hypha-auth/<refresh-hypha-id-token!) identity))]
+      (when (nil? id-token)
+        (state/pub-event! [:user/login])))))
+
 (defn <refresh-id-token&access-token
   "Refresh id-token and access-token"
   []
-  (go
-    (when-let [refresh-token (state/get-auth-refresh-token)]
-      (let [resp (<! (<refresh-tokens refresh-token))]
-        (cond
-          (and (<= 400 (:status resp))
-               (> 500 (:status resp)))
-          ;; invalid refresh-token
-          (let [invalid-grant? (and (= 400 (:status resp))
-                                    (= (:error (:body resp)) "invalid_grant"))]
-            (prn :debug :refresh-token-failed
-                 :status (:status resp))
-            (when invalid-grant?
-              (clear-tokens)))
+  (if hypha-config/hypha-mode?
+    (<refresh-id-token-hypha)
+    (go
+      (when-let [refresh-token (state/get-auth-refresh-token)]
+        (let [resp (<! (<refresh-tokens refresh-token))]
+          (cond
+            (and (<= 400 (:status resp))
+                 (> 500 (:status resp)))
+            ;; invalid refresh-token
+            (let [invalid-grant? (and (= 400 (:status resp))
+                                      (= (:error (:body resp)) "invalid_grant"))]
+              (prn :debug :refresh-token-failed
+                   :status (:status resp))
+              (when invalid-grant?
+                (clear-tokens)))
 
-          ;; e.g. api return 500, server internal error
-          ;; we shouldn't clear tokens if they aren't expired yet
-          ;; the `refresh-tokens-loop` will retry soon
-          (and (not (http/unexceptional-status? (:status resp)))
-               (not (-> (state/get-auth-id-token) parse-jwt expired?)))
-          (do
-            (prn :debug :refresh-token-failed
-                 :status (:status resp)
-                 :body (:body resp)
-                 :error-code (:error-code resp)
-                 :error-text (:error-text resp))
-            nil)                           ; do nothing
+            ;; e.g. api return 500, server internal error
+            ;; we shouldn't clear tokens if they aren't expired yet
+            ;; the `refresh-tokens-loop` will retry soon
+            (and (not (http/unexceptional-status? (:status resp)))
+                 (not (-> (state/get-auth-id-token) parse-jwt expired?)))
+            (do
+              (prn :debug :refresh-token-failed
+                   :status (:status resp)
+                   :body (:body resp)
+                   :error-code (:error-code resp)
+                   :error-text (:error-text resp))
+              nil)                           ; do nothing
 
-          (not (http/unexceptional-status? (:status resp)))
-          (notification/show! (t :account/refresh-token-warning) :warning true)
+            (not (http/unexceptional-status? (:status resp)))
+            (notification/show! (t :account/refresh-token-warning) :warning true)
 
-          :else                         ; ok
-          (when (and (:id_token (:body resp)) (:access_token (:body resp)))
-            (set-tokens! (:id_token (:body resp)) (:access_token (:body resp)))))))))
+            :else                         ; ok
+            (when (and (:id_token (:body resp)) (:access_token (:body resp)))
+              (set-tokens! (:id_token (:body resp)) (:access_token (:body resp))))))))))
 
 (defn restore-tokens-from-localstorage
   "Refresh id-token&access-token, pull latest repos, returns nil when tokens are not available."

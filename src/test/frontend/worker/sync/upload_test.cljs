@@ -126,7 +126,12 @@
            (-> (p/with-redefs [sync-crypt/<preflight-upload-e2ee! (fn [_repo _graph-e2ee?]
                                                                     (p/resolved nil))
                                sync-upload/list-remote-graphs! (fn []
-                                                                  (p/resolved [{:graph-name "repo-1"}]))
+                                                                  (p/resolved
+                                                                   ;; HYPHA-PATCH-013: enriched remote-graph fields
+                                                                   [{:graph-name "repo-1"
+                                                                     :graph-id "remote-uuid-1"
+                                                                     :graph-e2ee? false
+                                                                     :updated-at 1700000000000}]))
                                sync-upload/<create-remote-graph-aux! (fn [_repo _opts]
                                                                        (reset! create-aux-called? true)
                                                                        (p/resolved {:graph-id "new-graph-id"}))]
@@ -137,10 +142,64 @@
                (p/catch (fn [error]
                           (is (= "remote graph already exists; delete it before uploading again"
                                  (ex-message error)))
-                          (is (= :db-sync/graph-already-exists (:code (ex-data error))))
-                          (is (= "repo-1" (:graph-name (ex-data error))))
+                          (let [data (ex-data error)]
+                            (is (= :db-sync/graph-already-exists (:code data)))
+                            (is (= "repo-1" (:graph-name data)))
+                            ;; HYPHA-PATCH-013: enriched fields surface
+                            ;; the remote identity so the frontend's
+                            ;; resolve dialog can rebind without a
+                            ;; second list-remote-graphs round-trip.
+                            (is (= "remote-uuid-1" (:remote-graph-id data)))
+                            (is (false? (:remote-graph-e2ee? data)))
+                            (is (= 1700000000000 (:remote-updated-at data))))
                           (is (false? @create-aux-called?))))
                (p/finally done)))))
+
+;; HYPHA-PATCH-013: rebind happy path — KV bindings get written and the
+;; client-op graph-uuid index updated. No HTTP call, no upload.
+(deftest rebind-to-remote-graph-writes-kv-bindings-test
+  (async done
+         (let [kv-writes (atom [])
+               client-op-graph-uuid-updates (atom [])]
+           (try
+             (-> (p/with-redefs [sync-upload/set-graph-sync-metadata!
+                                 (fn [repo graph-id graph-e2ee?]
+                                   (swap! kv-writes conj {:repo repo
+                                                          :graph-id graph-id
+                                                          :graph-e2ee? graph-e2ee?}))
+                                 sync-upload/ensure-client-graph-uuid!
+                                 (fn [repo graph-id]
+                                   (swap! client-op-graph-uuid-updates conj
+                                          {:repo repo :graph-id graph-id}))]
+                   (sync-upload/rebind-to-remote-graph! "repo-1" "remote-uuid-1" false))
+                 (p/then (fn [result]
+                           (is (= "remote-uuid-1" (:graph-id result)))
+                           (is (false? (:graph-e2ee? result)))
+                           (is (= [{:repo "repo-1"
+                                    :graph-id "remote-uuid-1"
+                                    :graph-e2ee? false}] @kv-writes))
+                           (is (= [{:repo "repo-1"
+                                    :graph-id "remote-uuid-1"}] @client-op-graph-uuid-updates))))
+                 (p/catch (fn [error]
+                            (is false (str "unexpected error: " error))))
+                 (p/finally done))
+             (catch :default e
+               (is false (str "unexpected throw: " e))
+               (done))))))
+
+(deftest rebind-to-remote-graph-fails-fast-on-empty-remote-graph-id-test
+  (async done
+         (let [kv-writes (atom 0)]
+           (try
+             (sync-upload/rebind-to-remote-graph! "repo-1" "" false)
+             (is false "expected fail-fast")
+             (catch :default error
+               (let [data (ex-data error)]
+                 ;; fail-fast puts (name tag) in ex-message and the rest in ex-data
+                 (is (= "missing-field" (ex-message error)))
+                 (is (= :remote-graph-id (:field data)))
+                 (is (zero? @kv-writes))))
+             (finally (done))))))
 
 (deftest create-remote-graph-missing-e2ee-password-does-not-create-remote-graph-test
   (async done

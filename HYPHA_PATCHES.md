@@ -928,6 +928,427 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #12 — JWT lifecycle without an OAuth refresh-token
+
+- **ID**: HYPHA-PATCH-012
+- **Introduced**: Phase 1.6.2 hardening (silent-sync-loss after token
+  expiry), 2026-05-30
+- **Files**:
+  - `src/main/frontend/hypha/auth.cljs` (new namespace, ~115 lines)
+  - `src/main/frontend/hypha/init.cljs` (added `start-refresh-loop!`
+    call in `start!`)
+  - `src/main/frontend/handler/user.cljs` (added `<refresh-id-token-hypha`
+    branch in `<refresh-id-token&access-token`)
+  - `src/main/frontend/worker/sync/auth.cljs` (added Hypha branch in
+    `<refresh-id&access-token` via ui-request)
+  - `src/main/frontend/handler/worker.cljs` (added `:hypha-refresh-id-token`
+    ui-action)
+- **Patch form**:
+  ```clojure
+  ;; NEW namespace frontend.hypha.auth:
+  (defn <refresh-hypha-id-token!
+    "Re-mint id-token via /auth/session."
+    ([] (<refresh-hypha-id-token! <fetch-session-default))
+    ([fetch-fn] ...))    ;; resolves to fresh JWT or nil on session loss
+
+  (defn start-refresh-loop! [])  ;; 5-min tick, refresh when TTL < 15min
+
+  ;; frontend.handler.user/<refresh-id-token&access-token now branches:
+  (if hypha-config/hypha-mode?
+    (<refresh-id-token-hypha)
+    <existing-OAuth-path>)
+
+  ;; frontend.worker.sync.auth/<refresh-id&access-token now branches:
+  (if (hypha-mode?)  ;; detect via (seq (:http-base @*db-sync-config))
+    (<refresh-id&access-token-hypha)  ;; ui-request → main thread
+    <existing-OAuth-path>)
+
+  ;; frontend.handler.worker case-clause:
+  :hypha-refresh-id-token
+  (p/let [id-token (hypha-auth/<refresh-hypha-id-token!)]
+    {:id-token id-token})
+  ```
+- **Line count**: +~155 net code lines (helper ns, four branch points,
+  plus a 5-line config comment), -0 from upstream paths.
+- **Rationale**: Stock Logseq uses Cognito OAuth: a refresh-token plus
+  /oauth2/token mints a fresh id-token whenever the current one nears
+  expiry. Hypha has no refresh-token (Patch #3); the only persistent
+  auth material is the HttpOnly session cookie.
+
+  Before this patch, every JWT-expiry path failed silently:
+  - `frontend.handler.user/<refresh-id-token&access-token` returned without
+    doing anything (its `when-let [refresh-token ...]` was always false).
+  - `frontend.handler.user/task--ensure-id&access-token` threw
+    `:expired-token`.
+  - `frontend.worker.sync.auth/<refresh-id&access-token` threw
+    `:missing-refresh-token`.
+
+  Symptom for the user: long-open tab → token expires →
+  `frontend.handler.db-based.rtc-background-tasks/auto-start-rtc-if-possible`
+  bails → RTC stops → green cloud indicator vanishes → next sync attempt
+  hits 401 on `/graphs` → repos-state's `:rtc/graphs` empties →
+  `should-start-rtc?` returns false → `<rtc-stop!` runs → all without
+  surfacing a login prompt. The Phase-1.6.2 user-story trace is in
+  HYPHA.md (operational debrief).
+
+  This patch routes every Hypha-mode refresh through `/auth/session`,
+  which validates the cookie server-side and returns a fresh JWT. The
+  main thread can do this directly; the worker delegates back to the
+  main thread via a `:hypha-refresh-id-token` ui-request because Web
+  Workers cannot access document cookies.
+
+  Plus a proactive refresh loop: a 5-minute tick checks the in-state
+  JWT's `exp` claim and refreshes whenever TTL drops below 15 minutes.
+  Without this, a long-idle tab could wake up to find both the in-state
+  JWT and the server-side session both expired simultaneously. The loop
+  refreshes while the cookie is still valid, keeping both sides aligned.
+
+  Session loss (e.g. cookie expired, manual logout server-side) returns
+  nil from `<refresh-hypha-id-token!`; the main-thread frontend then
+  surfaces `[:user/login]` to show the access-code modal.
+
+- **Companion change (NOT a patch)**: none. `/auth/session` is already
+  Hypha-server's standard auth endpoint.
+
+- **Additive alternatives considered**:
+  - Use `:thread-api/ensure-id&access-token` (main→worker direction):
+    rejected — that's the reverse of what we need. The worker initiates
+    the refresh; only the main thread can read cookies. ui-request is
+    the correct direction.
+  - Make Hypha set `:auth/refresh-token` to a sentinel string (e.g.
+    `"hypha-session"`) to satisfy the existing predicates: rejected for
+    the same reason as Patch #3 — hacky, leaks Hypha-knowledge into
+    shared code, and the OAuth pipeline would still fail at the next
+    step (no `oauth-token-url`).
+  - Bypass the refresh-token check entirely in Hypha mode: rejected —
+    too coarse. Different call sites have different fallback semantics
+    (e.g. `task--ensure-id&access-token` throws to a background-task
+    handler vs `<refresh-id-token&access-token` runs cosmetically); a
+    blanket bypass would silently change all of them.
+  - Submit as upstream Logseq fix (a config-driven, cookie-session
+    refresh path): ideal long-term. When upstream accepts it, this entry
+    can be removed.
+
+- **Break signal — structural**:
+  - `frontend.handler.user/<refresh-id-token&access-token` is renamed,
+    deleted, or its OAuth body is restructured such that the Hypha
+    branch no longer sits at the top.
+  - `frontend.worker.sync.auth/<refresh-id&access-token` is similarly
+    refactored.
+  - The `:hypha-refresh-id-token` ui-action key is renamed.
+
+- **Break signal — semantic**:
+  - Upstream introduces its own cookie-session refresh path. Then both
+    Hypha branches can fold into the upstream code and this patch
+    becomes redundant — remove and re-verify the long-tab user story.
+  - `worker-state/*db-sync-config` is restructured such that
+    `:http-base` is no longer the Hypha-mode detection signal in the
+    worker.
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs` ⇒ `1`
+    (plus matches in `hypha/auth.cljs`, `worker/sync/auth.cljs`,
+    `handler/worker.cljs`).
+  - Semantic, manual at triage: `<refresh-id-token&access-token` must
+    branch on `hypha-config/hypha-mode?` to a Hypha-only function;
+    `<refresh-id&access-token` in the worker must branch on
+    `(hypha-mode?)` (the worker-side helper, which checks
+    `:http-base`) to a ui-request path.
+  - Regression guard: tests `refresh-hypha-id-token-*` in
+    `frontend.hypha.auth-test` (3 cases: 200+id-token, non-200, 200
+    without id-token).
+
+- **On break**:
+  - Structural rename → re-anchor the branch on the new entry-point name.
+  - Semantic upstream-merged → remove the patch and re-verify long-tab
+    behavior (open Hypha for >30 minutes idle, observe that sync stays
+    alive and cloud indicator stays green).
+
+---
+
+## Patch #13 — Name-collision resolve dialog (rebind to existing remote graph)
+
+- **ID**: HYPHA-PATCH-013
+- **Introduced**: Phase 1.6.2 hardening (graph-already-exists dead-end
+  recovery), 2026-05-30
+- **Files**:
+  - `src/main/frontend/worker/sync/upload.cljs` (enriched
+    fail-upload-graph-already-exists! + new rebind-to-remote-graph!)
+  - `src/main/frontend/worker/sync.cljs` (re-export `rebind-to-remote-graph!`)
+  - `src/main/frontend/worker/db_core.cljs` (new
+    `:thread-api/db-sync-rebind-to-remote` endpoint)
+  - `src/main/frontend/handler/db_based/sync.cljs` (differentiate
+    `<rtc-upload-graph!` catch + add `<rtc-rebind-to-remote!`)
+  - `src/main/frontend/handler/events/rtc.cljs` (new
+    `:rtc/graph-already-exists-resolve` event handler)
+  - `src/main/frontend/components/graph_rebind.cljs` (new namespace,
+    dialog component)
+  - `src/resources/dicts/{en,de,zh-cn}.edn` (new `:graph.rebind/*`
+    keys)
+- **Patch form**:
+  ```clojure
+  ;; worker/sync/upload.cljs: enrich the error with the remote graph's
+  ;; identity so the frontend can rebind without a second round-trip.
+  (fail-upload-graph-already-exists!
+   repo {:graph-name target-graph-name
+         :remote-graph-id (:graph-id match)
+         :remote-graph-e2ee? (:graph-e2ee? match)
+         :remote-updated-at (:updated-at match)})
+
+  ;; new worker fn:
+  (defn rebind-to-remote-graph!
+    [repo remote-graph-id remote-graph-e2ee?]
+    (set-graph-sync-metadata! repo remote-graph-id (boolean remote-graph-e2ee?))
+    (ensure-client-graph-uuid! repo remote-graph-id)
+    {:graph-id remote-graph-id
+     :graph-e2ee? (boolean remote-graph-e2ee?)})
+
+  ;; thread-api endpoint:
+  (def-thread-api :thread-api/db-sync-rebind-to-remote
+    [repo remote-graph-id remote-graph-e2ee?]
+    (db-sync/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
+
+  ;; handler/db_based/sync.cljs: catch differentiation
+  (if (= :db-sync/graph-already-exists (:code data))
+    (state/pub-event! [:rtc/graph-already-exists-resolve
+                       (assoc data :repo repo)])
+    ;; … existing toast path …)
+
+  ;; handler/events/rtc.cljs: event opens the resolve dialog
+  (defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
+    (shui/dialog-open! #(graph-rebind/graph-already-exists-dialog payload) …))
+  ```
+- **Line count**: +~230 net code lines (worker enrichment, new public
+  fns, new thread-api endpoint, new event handler, new dialog component)
+  plus +~40 i18n strings (3 locales × ~13 keys, en + de + zh-cn).
+- **Rationale**: Before this patch, uploading a local-only graph whose
+  name was already taken on the server was a hard dead end. The
+  upload-pipeline threw `:db-sync/graph-already-exists`, the frontend
+  rendered a toast (`graph/upload-failed`), and the user had no
+  affordance other than:
+  - deleting the remote graph (would lose data on the other devices),
+  - deleting the local graph (would lose the changes that triggered
+    the upload in the first place),
+  - or finding a hidden console workaround to write KV bindings by
+    hand.
+
+  This is exactly the path Patch #12's user story walked into on
+  2026-05-30: a Hypha session expired silently, the local graph's
+  `:logseq.kv/graph-uuid` got cleared (or never wrote in the first
+  place), the cloud icon turned non-green, and clicking "Upload" hit
+  the dead-end toast.
+
+  This patch routes the name-collision error to a one-action resolve
+  dialog: "Connect to existing remote graph". The action calls a new
+  worker endpoint that writes the KV bindings to the remote graph's
+  UUID (no upload, no delete) and starts RTC. RTC's normal merge logic
+  then reconciles the local `client_ops` queue with the server. The
+  dialog shows the remote graph's short ID, last server-update
+  timestamp, and e2ee flag so the user can visually confirm they
+  picked the right one.
+
+  Rename-and-upload (third option floated in the design) is
+  intentionally out of scope: it touches graph-identity rename code
+  paths that are not Hypha-specific and would risk regressions. It
+  can land as a separate patch later if demand surfaces.
+
+- **Companion change (NOT a patch)**: none.
+
+- **Additive alternatives considered**:
+  - Block the upload UI entirely when the server already has a graph
+    with the same name (preemptive guard in `local-uploadable-graph?`):
+    rejected — Patch #9 already does cosmetic gating but cannot
+    distinguish "the user wants to keep their local-only changes" from
+    "the user accidentally created a duplicate". The resolve dialog is
+    the conscious user choice.
+  - Auto-rebind silently on name match: rejected — strong
+    data-mutating action; the user must consent.
+  - Throw a richer code (`:db-sync/name-collision-rebindable`) instead
+    of enriching the existing one: rejected — keeps the API surface
+    smaller and downstream code that pattern-matches on the existing
+    code stays working.
+  - Submit as upstream Logseq fix: ideal long-term — the dead end is
+    not Hypha-specific. When upstream accepts it the patch can be
+    removed.
+
+- **Break signal — structural**:
+  - `fail-upload-graph-already-exists!` is renamed or its signature
+    changes such that the enriched fields don't reach the frontend.
+  - `:thread-api/db-sync-rebind-to-remote` is renamed.
+  - `:rtc/graph-already-exists-resolve` event key is renamed or its
+    payload shape changes.
+  - `rebind-to-remote-graph!` is moved/renamed in `worker/sync.cljs`'s
+    re-export layer.
+
+- **Break signal — semantic**:
+  - Upstream adds its own name-collision resolution flow. Then the
+    Hypha catch-differentiation can fold into upstream's path and this
+    patch's frontend half becomes redundant — verify the user can
+    still rebind without a regression.
+  - `set-graph-sync-metadata!` is restructured such that calling it
+    from outside an upload context no longer sets the bindings
+    correctly (e.g. additional side-effects are added that depend on
+    upload state).
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-013' src/main/frontend/worker/sync/upload.cljs` ⇒ `1`
+    (plus matches in `handler/db_based/sync.cljs`,
+    `handler/events/rtc.cljs`, `components/graph_rebind.cljs`,
+    `worker/db_core.cljs`, `worker/sync.cljs`, and the three dict
+    files via `:graph.rebind/*`).
+  - Semantic, manual at triage: the catch in `<rtc-upload-graph!` must
+    branch on `:db-sync/graph-already-exists`; the worker endpoint
+    must call `rebind-to-remote-graph!`; the dialog must offer the
+    rebind action (one of two buttons).
+  - Regression guard: tests `create-remote-graph-rejects-matching-remote-graph-test`
+    (enriched-error assertions) and `rebind-to-remote-graph-writes-kv-bindings-test`
+    + `rebind-to-remote-graph-fails-fast-on-empty-remote-graph-id-test`
+    in `frontend.worker.sync.upload-test`.
+
+- **On break**:
+  - Structural rename → re-anchor the patch on the renamed entry point.
+  - Semantic upstream-merged → remove this patch and re-verify the
+    name-collision user story (local graph with duplicate name → click
+    upload → see resolve dialog → click connect → cloud icon turns
+    green, local changes show up on the other device).
+
+---
+
+## Patch #14 — Skip demo-graph + rebind-banner for Hypha onboarding
+
+- **ID**: HYPHA-PATCH-014
+- **Introduced**: Phase 1.6.2 hardening (fresh-browser-session UX),
+  2026-05-30
+- **Files**:
+  - `src/main/frontend/handler.cljs` (skip demo-graph auto-create in
+    Hypha mode when no local repos exist yet)
+  - `src/main/frontend/components/repo.cljs` (add
+    `local-graphs-with-remote-name-match` helper + name-collision
+    banner in `repos-cp`)
+  - `src/resources/dicts/{en,de,zh-cn}.edn` (new
+    `:graph.rebind/banner-*` keys, 3 per locale)
+- **Patch form**:
+  ```clojure
+  ;; handler.cljs ~line 201
+  ;; ORIGINAL
+  _ (if (empty? repos)
+      (repo-handler/new-db! config/demo-repo)
+      (restore-and-setup! repo))
+
+  ;; HYPHA
+  _ (cond
+      (and (empty? repos) (not hypha-config/hypha-mode?))
+      (repo-handler/new-db! config/demo-repo)
+      (seq repos)
+      (restore-and-setup! repo))
+
+  ;; components/repo.cljs: new helper + banner injection
+  (defn- local-graphs-with-remote-name-match
+    [local-graphs remote-graphs]
+    (let [remote-names (set (keep :GraphName remote-graphs))]
+      (filter (fn [{:keys [url remote?]}]
+                (and (not remote?)
+                     (contains? remote-names (config/db-graph-name url))))
+              local-graphs)))
+
+  ;; In repos-cp, between the "Create new" row and "Local graphs" header:
+  (when (seq name-collision-graphs)
+    [:div.cp__hypha-rebind-banner ...
+     ;; one row per collision, each "Connect" button pubs
+     ;; [:rtc/graph-already-exists-resolve ...] — Patch #13's event.
+    ])
+  ```
+- **Line count**: +~70 net code lines (cond replacement in handler,
+  helper fn + banner in repos-cp) plus +9 i18n strings (3 keys × 3
+  locales).
+- **Rationale**: Two related onboarding issues that bit the
+  Phase-1.6.2 user-story trace:
+
+  1. **Demo-graph auto-create on fresh Hypha login.** Stock Logseq
+     calls `(repo-handler/new-db! config/demo-repo)` whenever
+     `(empty? repos)` is true at boot. For stock Logseq this is "first
+     run, give the user a tutorial". For Hypha that assumption is
+     wrong: a fresh browser session typically already has remote
+     graphs on the user's own server, but the local-repos list is
+     empty at boot. Auto-creating a demo-graph sticks the user into
+     tutorial content that they may mistake for theirs, then any
+     upload attempt hits the Patch #13 name-collision dialog (or, in
+     the worst case from 2026-05-30, hit the dead-end toast that
+     Patch #13 now resolves).
+
+  2. **No visual hint when a local graph collides with a remote
+     one.** Even after Patch #13, the resolve dialog only appears
+     when the user clicks "Upload" on a local-only graph whose name
+     happens to match a remote. If the user never clicks upload, the
+     collision stays invisible and a confusingly-similar local copy
+     can drift. The banner makes this explicit on the graphs list
+     and offers the same one-click rebind.
+
+  Combined effect: a fresh browser login goes straight to an empty
+  graph picker (which `frontend.hypha.init/<fetch-remote-graphs-after-login!`
+  populates within seconds), instead of a demo-graph with foreign
+  contents. Any pre-existing local copies that share a name with a
+  cloud graph get a banner row with a "Connect" button.
+
+- **Companion change (NOT a patch)**: none.
+
+- **Additive alternatives considered**:
+  - Block the demo-graph behind a stronger gate (e.g. await Hypha's
+    `<fetch-remote-graphs-after-login!` completion before deciding):
+    rejected — adds boot-time await on a network call. Letting the
+    graph picker briefly render empty is better UX than blocking
+    boot.
+  - Make the demo-graph repo Hypha-specific (e.g. a "Welcome to
+    Hypha" graph): rejected for now — out of scope for a bugfix
+    patch; can land separately as a real onboarding feature.
+  - Run the rebind flow automatically when a name collision is
+    detected at boot: rejected — strong data-mutating action; the
+    user must consent. The banner explicitly offers, the user
+    explicitly clicks.
+  - Combine the banner into the existing "Local graphs" header:
+    rejected — the collision is a Hypha-specific concept; mixing it
+    into the shared header dilutes the section semantics.
+
+- **Break signal — structural**:
+  - `handler.cljs` `(empty? repos)` branch is refactored such that
+    the demo-graph creation no longer sits at the top of the `if`.
+  - `components/repo.cljs/repos-cp` is restructured such that the
+    `local-graphs` / `own-graphs` destructure changes shape.
+  - `:GraphName` field on `:rtc/graphs` records is renamed.
+
+- **Break signal — semantic**:
+  - Upstream changes the empty-repos default to something other than
+    demo-graph (e.g. an onboarding wizard). Then the demo-skip
+    branch should defer to whatever upstream does in Hypha mode too.
+  - Upstream's `combine-local-&-remote-graphs` starts merging
+    same-name local + remote graphs into a single row (which
+    eliminates the collision). Then the banner becomes dead and can
+    be removed; rebind still happens via Patch #13's upload-time
+    flow.
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-014' src/main/frontend/handler.cljs` ⇒ `1`
+    (plus matches in `components/repo.cljs` and the three dict files).
+  - Semantic, manual at triage: the empty-repos branch in
+    `handler.cljs` must be a `cond` that gates the demo-graph creation
+    on `(not hypha-config/hypha-mode?)`; the banner in `repos-cp`
+    must call `local-graphs-with-remote-name-match` and render only
+    in Hypha mode.
+  - Regression guard: tests
+    `local-graphs-with-remote-name-match-*` in
+    `frontend.components.repo-test` (3 cases).
+
+- **On break**:
+  - Structural rename → re-anchor on the new branch shape.
+  - Semantic upstream-merged → remove the banner; the demo-skip
+    might still be useful but check whether upstream's replacement
+    handles the Hypha case.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

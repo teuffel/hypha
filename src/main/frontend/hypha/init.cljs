@@ -38,6 +38,7 @@
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
             [frontend.hypha.asset-cache :as asset-cache]
+            [frontend.hypha.auth :as hypha-auth]
             ;; Required for its side-effecting defonce: the plugin-init ns
             ;; patches `window.fetch` and installs the `window.apis` shim at
             ;; namespace-load time, which lands before frontend.handler/start!
@@ -133,6 +134,8 @@
   []
   (http/get "/auth/session" {:with-credentials? true}))
 
+
+
 (defn start!
   "Hypha-mode app-boot entry point.
 
@@ -145,6 +148,7 @@
   []
   (config/set-custom-sync-server-url! js/window.location.origin)
   (asset-cache/start!)
+  (hypha-auth/start-refresh-loop!)
   (go
     (let [resp (<! (<fetch-session))]
       (cond

@@ -768,6 +768,21 @@
 
  :graph.page/title "Page graph"
 
+ :graph.rebind/banner-action "Connect"
+ :graph.rebind/banner-desc "Connecting merges this local copy with the cloud version. No upload happens immediately; the normal sync reconciles the changes."
+ :graph.rebind/banner-title "These local graphs share a name with one of your cloud graphs"
+ :graph.rebind/connect-action "Connect to existing remote graph"
+ :graph.rebind/desc "A remote graph named \"{1}\" already exists. Connect this local copy to the remote one to merge your local changes with the cloud version."
+ :graph.rebind/error "Connect to remote graph failed: {1}"
+ :graph.rebind/footer-hint "No data will be uploaded immediately; the normal sync will merge changes once connected."
+ :graph.rebind/remote-e2ee-label "Encrypted:"
+ :graph.rebind/remote-e2ee-off "no"
+ :graph.rebind/remote-e2ee-on "yes"
+ :graph.rebind/remote-id-label "Remote ID:"
+ :graph.rebind/remote-updated-at-label "Last server update:"
+ :graph.rebind/success "Connected to remote graph \"{1}\"."
+ :graph.rebind/title "Connect to existing remote graph"
+
  :graph.switch/add-graph-action "Yes, add another graph"
  :graph.switch/db-worker-unavailable-no-fallback-warning "The database worker for graph \"{1}\" is unavailable, and no other graph is available."
  :graph.switch/db-worker-unavailable-switching-warning "The database worker for graph \"{1}\" is unavailable. Switching to graph \"{2}\"."

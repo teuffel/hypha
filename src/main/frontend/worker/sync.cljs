@@ -413,6 +413,11 @@
   [repo opts]
   (sync-upload/create-remote-graph! repo opts))
 
+;; HYPHA-PATCH-013
+(defn rebind-to-remote-graph!
+  [repo remote-graph-id remote-graph-e2ee?]
+  (sync-upload/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
+
 (def list-remote-graphs! sync-upload/list-remote-graphs!)
 
 (defn stop-upload!

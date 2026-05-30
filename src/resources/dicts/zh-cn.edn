@@ -764,6 +764,21 @@
 
  :graph.page/title "页面图谱"
 
+ :graph.rebind/banner-action "连接"
+ :graph.rebind/banner-desc "连接会把本地副本与云端版本合并。不会立即上传；通过常规同步合并修改。"
+ :graph.rebind/banner-title "这些本地图谱与你的云端图谱同名"
+ :graph.rebind/connect-action "连接到已存在的远程图谱"
+ :graph.rebind/desc "已存在名为「{1}」的远程图谱。把这个本地副本连接到远程图谱后，本地修改会与云端版本合并。"
+ :graph.rebind/error "连接到远程图谱失败：{1}"
+ :graph.rebind/footer-hint "不会立即上传数据；连接后通过常规同步合并修改。"
+ :graph.rebind/remote-e2ee-label "已加密："
+ :graph.rebind/remote-e2ee-off "否"
+ :graph.rebind/remote-e2ee-on "是"
+ :graph.rebind/remote-id-label "远程 ID："
+ :graph.rebind/remote-updated-at-label "最近服务器更新："
+ :graph.rebind/success "已连接到远程图谱「{1}」。"
+ :graph.rebind/title "连接到已存在的远程图谱"
+
  :graph.switch/add-graph-action "再添加一份图谱"
  :graph.switch/db-worker-unavailable-no-fallback-warning "图谱“{1}”的数据库 worker 不可用，且没有其他可用图谱。"
  :graph.switch/db-worker-unavailable-switching-warning "图谱“{1}”的数据库 worker 不可用。正在切换到图谱“{2}”。"

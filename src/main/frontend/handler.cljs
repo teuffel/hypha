@@ -198,8 +198,24 @@
                        url-target
                        (graph-handler/get-tab-graph)
                        (state/get-current-repo))
-                 _ (if (empty? repos)
+                 ;; HYPHA-PATCH-014: in Hypha mode, skip the demo-graph
+                 ;; auto-create when there are no local repos. Stock Logseq
+                 ;; assumes "no repos" means "first-run user, give them the
+                 ;; tutorial". In Hypha that assumption is wrong: a fresh
+                 ;; browser session typically already has remote graphs on
+                 ;; the user's own server. Auto-creating a demo-graph
+                 ;; sticks the user into a graph with tutorial contents
+                 ;; that they may mistake for theirs, and the next upload
+                 ;; attempt hits the Patch #13 name-collision dialog.
+                 ;; Letting the graph-picker render empty (briefly) is the
+                 ;; correct UX — frontend.hypha.init/start! fires
+                 ;; <fetch-remote-graphs-after-login! in parallel and
+                 ;; populates :rtc/graphs within a second or two.
+                 _ (cond
+                     (and (empty? repos) (not hypha-config/hypha-mode?))
                      (repo-handler/new-db! config/demo-repo)
+
+                     (seq repos)
                      (restore-and-setup! repo))
                  _ (when target-repo
                      (apply-url-target-route! url-target))]
