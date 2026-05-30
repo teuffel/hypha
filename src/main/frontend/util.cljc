@@ -117,6 +117,17 @@
      (def electron? (memoize electron*?))))
 
 #?(:cljs
+   (defn standalone-display-mode?
+     "True when the page runs in an installed PWA / Chrome-App-style window
+     (no browser chrome). Detected via `display-mode: standalone`. Not
+     memoized: a window can in principle transition between display modes
+     and callers expect the current value."
+     []
+     (boolean
+      (when (and js/window (exists? js/window.matchMedia))
+        (.-matches (js/window.matchMedia "(display-mode: standalone)"))))))
+
+#?(:cljs
    (defn mocked-open-dir-path
      "Mocked open DIR path for by-passing open dir in electron during testing. Nil if not given"
      []

@@ -481,7 +481,11 @@
        (when (state/feature-http-server-enabled?)
          (server/server-indicator (state/sub :electron/server)))
 
-       (when (util/electron?)
+       ;; HYPHA-PATCH-011: also show in installed-PWA / Chrome-App standalone
+       ;; windows, which have no browser back/forward buttons. Stock Logseq
+       ;; gates this on electron? alone; a Hypha self-hoster commonly opens
+       ;; the web app as an installed PWA where the Chromium chrome is gone.
+       (when (or (util/electron?) (util/standalone-display-mode?))
          (back-and-forward))
 
        (when-not (mobile-util/native-platform?)

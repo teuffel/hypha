@@ -829,6 +829,105 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #11 — Show back/forward buttons in installed-PWA windows
+
+- **ID**: HYPHA-PATCH-011
+- **Introduced**: Phase 1.6.2 follow-up (Chrome-App / installed-PWA UX),
+  2026-05-29
+- **File**: `src/main/frontend/components/header.cljs`
+  (plus an additive helper in `src/main/frontend/util.cljc`)
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL (header.cljs ~line 484)
+  (when (util/electron?)
+    (back-and-forward))
+
+  ;; HYPHA
+  (when (or (util/electron?) (util/standalone-display-mode?))
+    (back-and-forward))
+
+  ;; ADDED (util.cljc) — additive helper, no upstream behavior change:
+  (defn standalone-display-mode?
+    "True when the page runs in an installed PWA / Chrome-App-style window
+    (no browser chrome). Detected via `display-mode: standalone`."
+    []
+    (boolean
+     (when (and js/window (exists? js/window.matchMedia))
+       (.-matches (js/window.matchMedia "(display-mode: standalone)")))))
+  ```
+- **Line count**: +1 in header.cljs (plus a 4-line guidance comment),
+  +9 in util.cljc (additive helper + docstring).
+- **Rationale**: Stock Logseq gates the `back-and-forward` toolbar
+  component on `(util/electron?)` alone (header.cljs:484). The hidden
+  assumption is "a normal browser tab already has back/forward buttons
+  in the browser toolbar, so showing in-app duplicates is noise". That
+  assumption breaks for installed PWAs / Chrome-Apps, which run in a
+  standalone window **without** browser chrome — the user then has no
+  way to navigate Logseq's own URL history.
+
+  Self-hosting Hypha users commonly open the web app this way (Chrome →
+  "Install app"), so the missing buttons are a recurring UX paper-cut.
+  This patch widens the gate to also include
+  `(util/standalone-display-mode?)`, which uses the standard
+  `display-mode: standalone` media query — the same signal browsers use
+  to identify installed PWAs.
+
+  The component itself (`back-and-forward`) calls plain
+  `js/window.history.back/forward`, so no Electron-specific API is
+  involved; the original code already worked in any browser, the gate
+  was the only barrier.
+
+- **Net effect**:
+  - Normal browser tab → buttons hidden (unchanged; browser toolbar
+    suffices).
+  - Electron app → buttons shown (unchanged).
+  - Installed PWA / Chrome-App standalone window → buttons **now
+    shown**, restoring parity with the Electron app.
+
+- **Companion change (NOT a patch)**: none — the `util/standalone-display-mode?`
+  helper is purely additive and could be upstreamed without behavior
+  change.
+
+- **Additive alternatives considered**:
+  - Always show the buttons in the web: rejected — duplicates the
+    browser toolbar buttons in the common case of a regular tab.
+  - Gate on `hypha-mode?`: rejected — the missing buttons are a generic
+    PWA UX issue, not Hypha-specific. Gating on Hypha would leave stock
+    Logseq PWA users with the same paper-cut.
+  - Detect via `window.navigator.standalone` (Safari-only legacy
+    property): rejected — does not fire in Chromium-based PWAs, which is
+    Hypha's primary target.
+  - Submit as upstream Logseq fix: ideal long-term — the bug is
+    universal. When accepted upstream, this entry can be removed and
+    `standalone-display-mode?` becomes a regular helper.
+
+- **Break signal — structural**:
+  - `back-and-forward` is renamed/moved out of `header.cljs`, or its
+    callsite gate is rewritten.
+  - `util/electron?` or `util/standalone-display-mode?` is
+    renamed/removed.
+
+- **Break signal — semantic**:
+  - Upstream introduces a runtime predicate that already covers
+    "browser chrome absent" (e.g. `util/standalone?`). Then the patch
+    becomes redundant — switch the gate to that predicate.
+
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-011' src/main/frontend/components/header.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the `back-and-forward` callsite gate
+    must include `(util/standalone-display-mode?)` as an `or` branch
+    alongside `(util/electron?)`.
+
+- **On break**:
+  - Structural rename → re-anchor the gate on the new callsite or
+    predicate.
+  - Semantic upstream-merged → remove the patch and re-verify the
+    Chrome-App user story.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
