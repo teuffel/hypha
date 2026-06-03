@@ -686,7 +686,6 @@ origin (teuffel/hypha)
 ├── feature/<topic>     # WIP-Feature-Branches, mergen in develop
 ├── release/<version>   # Release-Vorbereitung, von develop → master
 ├── hotfix/<topic>      # Notfall-Fixes von master → master + develop
-├── upstream-master     # 1:1-Mirror von logseq/logseq:master (read-only)
 └── hypha-staging       # Wöchentlicher Upstream-Sync-Test-Branch
 
 upstream (logseq/logseq)
@@ -697,7 +696,6 @@ upstream (logseq/logseq)
 - `master` ist Production. Nur Release-Branches und Hotfixes mergen direkt rein.
 - `develop` ist das aktive Integrationsziel. Hier landen Features, hier landet auch die Upstream-Sync.
 - `feature/<topic>`-Branches werden via `git flow feature start <topic>` erstellt, gehen via PR oder `git flow feature finish` zurück in `develop`.
-- `upstream-master` wird wöchentlich gefetcht und force-pushed (read-only Spiegel des Upstream-Stands).
 - `hypha-staging` ist Inspektions-Branch der wöchentlichen Action. Bei Erfolg: PR gegen **`develop`** (nicht master). Bei Konflikt: Branch bleibt zur manuellen Diagnose stehen.
 - Releases laufen via `git flow release start <version>` von `develop` aus, finishen nach `master`.
 
@@ -709,7 +707,6 @@ upstream (logseq/logseq)
 
 Volle YAML in Anhang A. Logik:
 - Wöchentlich Mo 06:00 UTC (cron)
-- Mirror `upstream-master`
 - Test-Merge auf `hypha-staging` (basierend auf `develop`)
 - Patch-Anchor-Checks (Anhang B)
 - Closure-Define-Smoke-Build (replay V4)
@@ -818,10 +815,6 @@ jobs:
           git fetch upstream master
           git config user.name  "hypha-sync-bot"
           git config user.email "sync-bot@hypha.local"
-
-      - name: Mirror upstream-master
-        run: |
-          git push origin refs/remotes/upstream/master:refs/heads/upstream-master --force
 
       - name: Recreate hypha-staging
         run: |
