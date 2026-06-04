@@ -1349,6 +1349,90 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #15 — Literal "/" in page titles (DB-native namespaces via parent only)
+
+- **ID**: HYPHA-PATCH-015
+- **Introduced**: Phase 1.7 (literal-slash titles), 2026-06-04
+- **Files**:
+  - `deps/common/src/logseq/common/util/namespace.cljs`
+  - `deps/outliner/src/logseq/outliner/validate.cljs`
+  - `bin/hypha-build` (companion: sets the build define; not upstream logic)
+- **Patch form**:
+  ```clojure
+  ;; namespace.cljs — new build define + gate the central predicate.
+  (goog-define HYPHA-LITERAL-SLASH false)
+  (defonce literal-slash? HYPHA-LITERAL-SLASH)
+
+  (defn namespace-page? [page-name]
+    (and (not literal-slash?)        ; <- HYPHA gate
+         (string? page-name)
+         (string/includes? page-name namespace-char)
+         ...))
+
+  ;; validate.cljs — skip the "/" rejection in literal-slash builds.
+  (when (and (not ns-util/literal-slash?)
+             (string/includes? page-title ns-util/parent-char)
+             (not (common-date/normalize-date page-title nil)))
+    (throw ...))
+  ```
+  Build (`bin/hypha-build`) adds to the existing `--config-merge`:
+  `logseq.common.util.namespace/HYPHA-LITERAL-SLASH true`.
+- **Line count**: +~10 in namespace.cljs (define + defonce + 1 gate clause +
+  comment), +~4 in validate.cljs (gate clause + comment), +1 token per build line.
+- **Rationale**: In the DB version a page `A/B` is stored as two entities (child
+  leaf title + `:block/parent` → parent); the slash path is only a derived
+  display string (`get-title-with-parents`) and a parse convention at
+  ingest/creation. Titles like `2024/Q3`, `TCP/IP`, `N/A`
+  are not hierarchies but cannot be expressed because (a) `create` splits on
+  `namespace-page?` and (b) `validate-page-title-characters` rejects "/".
+  Hypha makes "/" literal: hierarchy is created ONLY via the explicit
+  `:block/parent` relation (the DB-native model the user chose), never by
+  splitting the title. `namespace-page?` is the single predicate that both the
+  create-split (`outliner/page.cljs:379-384`) and the `[[ref]]` prefix-expansion
+  (`graph-parser/block.cljs:430-453`, `ref->map`) consult, so gating it false
+  neutralizes both at once. Existing namespaced graphs are unaffected: their
+  titles are already leaf strings + parent relations, so they keep rendering via
+  the parent chain; only NEW title-splitting is disabled.
+- **Companion change (NOT a patch)**: `bin/hypha-build` define wiring; and the
+  MCP/CLI rebuild passes the same define. No i18n change — the
+  `:page.validation/name-no-slash` message is only suppressed at runtime in
+  Hypha builds, its text is unchanged for stock builds.
+- **Additive alternatives considered**:
+  - `//` as the namespace separator (original request): rejected — would touch
+    ~8 hot sites across 4 core deps (separator const, split helper, page split,
+    validation, render `get-title-with-parents`, ref extraction, export,
+    migration), exploding the patch inventory in the most upstream-developed
+    paths, plus `//` collides with URLs and breaks Markdown interop with stock
+    Logseq (where `/` = namespace).
+  - Runtime atom set from `frontend.hypha.init`: rejected — split/validation run
+    in the worker (db-worker / db-worker-node), and a build define is
+    deterministic with zero runtime state, mirroring `HYPHA-MODE`.
+  - Reuse `frontend.hypha.config/HYPHA-MODE`: impossible — `deps/*` must not
+    require `frontend.*`; hence a deps-local define.
+- **Break signal — structural**:
+  - `namespace-page?` is renamed/moved out of `logseq.common.util.namespace`,
+    or `validate-page-title-characters` is renamed/moved out of
+    `logseq.outliner.validate`.
+  - `bin/hypha-build`'s `--config-merge` line is restructured so the define is
+    dropped.
+- **Break signal — semantic**:
+  - Upstream changes namespacing to not route through `namespace-page?` (e.g.
+    splits on a regex inline), so the gate no longer covers all split sites.
+  - Upstream makes "/" literal itself (then the patch is redundant — drop it).
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs` ⇒ `1`
+    `rg -c 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs` ⇒ `1`
+    `rg -c 'HYPHA-LITERAL-SLASH' bin/hypha-build` ⇒ `2`
+  - Semantic, manual at triage: `namespace-page?`'s body must start with
+    `(not literal-slash?)`, and the validate slash-check must be gated by
+    `(not ns-util/literal-slash?)`.
+- **On break**:
+  - Structural → re-anchor the gate on the new predicate/validation location.
+  - Semantic upstream-merged → remove the define + gates.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

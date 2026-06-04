@@ -27,7 +27,11 @@
   "Validates characters that must not be in a page title"
   [page-title meta-m]
   (validate-page-title-no-hashtag page-title meta-m)
-  (when (and (string/includes? page-title ns-util/parent-char)
+  ;; HYPHA-PATCH (literal-slash titles): in Hypha builds "/" is a literal title
+  ;; character (ns-util/literal-slash?), so skip the slash rejection. Stock
+  ;; Logseq (flag false) keeps rejecting "/" outside of date titles.
+  (when (and (not ns-util/literal-slash?)
+             (string/includes? page-title ns-util/parent-char)
              (not (common-date/normalize-date page-title nil)))
     (throw (ex-info "Page name can't include \"/\"."
                     (merge meta-m
