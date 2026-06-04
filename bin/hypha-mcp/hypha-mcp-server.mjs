@@ -227,10 +227,11 @@ server.registerTool(
   {
     title: "Upsert Page",
     description:
-      "Create a page (or update an existing one) and optionally set its tags and properties. " +
-      "A page IS a node, so it can carry tags/properties just like a block. Target by page name " +
-      "or id (db/id from read tools). Tags/properties must already exist (upsert_tag/upsert_property). " +
-      "RTC-synced.",
+      "Create a page (or update an existing one) and optionally set its tags, properties, and " +
+      "namespace parent. A page IS a node, so it can carry tags/properties just like a block. " +
+      "Target by page name or id (db/id from read tools). Tags/properties must already exist " +
+      "(upsert_tag/upsert_property). Since '/' is literal in titles, hierarchy is created via " +
+      "parent (nests this page under it; the parent page is created if missing). RTC-synced.",
     inputSchema: {
       page: z.string().optional().describe("Page name (create, or target an existing page by name)"),
       id: z.union([z.number(), z.string()]).optional().describe("Existing page db/id (update mode)"),
@@ -238,9 +239,11 @@ server.registerTool(
       removeTags: z.array(z.string()).optional().describe("Tag names/uuids to remove"),
       propertiesEdn: z.string().optional().describe("EDN map keyed by property name, e.g. {:mcpnote \"hello\"}"),
       removeProperties: z.array(z.string()).optional().describe("Property names to remove"),
+      parent: z.string().optional().describe("Parent page name or db/id; nests this page under it"),
+      removeParent: z.boolean().optional().describe("Remove the page's parent (make it top-level)"),
     },
   },
-  async ({ page, id, tags, removeTags, propertiesEdn, removeProperties }) => {
+  async ({ page, id, tags, removeTags, propertiesEdn, removeProperties, parent, removeParent }) => {
     const hasId = id !== undefined && id !== null && String(id) !== "";
     const sel = hasId ? ["--id", String(id)] : page ? ["--page", page] : [];
     if (!sel.length) return mcpText({ ok: false, text: "upsert_page: provide page (name) or id" });
@@ -249,6 +252,35 @@ server.registerTool(
     if (removeTags?.length) args.push("--remove-tags", ednStringVector(removeTags));
     if (propertiesEdn) args.push("--update-properties", propertiesEdn);
     if (removeProperties?.length) args.push("--remove-properties", ednStringVector(removeProperties));
+    pushOpt(args, "--parent", parent);
+    if (removeParent) args.push("--remove-parent", "true");
+    return mcpText(await runCli(args));
+  },
+);
+
+server.registerTool(
+  "set_page_parent",
+  {
+    title: "Set Page Parent",
+    description:
+      "Set or remove a page's namespace parent (the DB-native way to build a hierarchy now that " +
+      "'/' is literal). Identify the page by name or id; give a parent (page name/id, created if " +
+      "missing) to nest it, or removeParent to make it top-level. RTC-synced.",
+    inputSchema: {
+      page: z.string().optional().describe("Page name to re-parent"),
+      id: z.union([z.number(), z.string()]).optional().describe("Page db/id to re-parent"),
+      parent: z.string().optional().describe("Parent page name or db/id"),
+      removeParent: z.boolean().optional().describe("Make the page top-level (no parent)"),
+    },
+  },
+  async ({ page, id, parent, removeParent }) => {
+    const hasId = id !== undefined && id !== null && String(id) !== "";
+    const sel = hasId ? ["--id", String(id)] : page ? ["--page", page] : [];
+    if (!sel.length) return mcpText({ ok: false, text: "set_page_parent: provide page (name) or id" });
+    if (!parent && !removeParent) return mcpText({ ok: false, text: "set_page_parent: provide parent or removeParent" });
+    const args = ["upsert", "page", ...sel, "--output", "json"];
+    if (removeParent) args.push("--remove-parent", "true");
+    else pushOpt(args, "--parent", parent);
     return mcpText(await runCli(args));
   },
 );
