@@ -20,6 +20,14 @@ it holds a local replica and an open WebSocket. Any write goes through the
 outliner transaction pipeline → the `:db-sync` listener → RTC push → the
 server → every connected client within seconds.
 
+**Self-bootstrapping:** on the first tool call the MCP server brings the daemon
+up itself (clears any stale lock from a reboot → auth → sync config →
+download-if-missing → sync start), so you do not need to start anything by hand.
+The daemon is detached and persists across opencode restarts; later startups
+just reuse it (warm start ~1s, cold start a few seconds, first-ever run longer
+because it downloads the graph). `hypha-sync-up.sh` remains available for manual
+pre-warming. Set `HYPHA_NO_BOOTSTRAP=1` to disable auto-bootstrap.
+
 ## Requirements
 
 - **Node >= 22.5** (the worker uses the `node:sqlite` builtin). Node 20 will not
@@ -45,12 +53,10 @@ echo 'YOUR-ACCESS-CODE' > ~/.config/hypha/access-code && chmod 600 ~/.config/hyp
 
 # 2. install this bridge's deps
 pnpm install            # in bin/hypha-mcp
-
-# 3. bring up the synced daemon (run once per session; it stays running)
-./hypha-sync-up.sh      # expect "ws-state":"open"
 ```
 
-Then register it with your MCP client. For opencode (`~/.config/opencode/opencode.json`):
+That's it — the MCP server self-bootstraps the synced daemon on first use.
+Register it with your MCP client; for opencode (`~/.config/opencode/opencode.json`):
 
 ```json
 {
@@ -59,11 +65,15 @@ Then register it with your MCP client. For opencode (`~/.config/opencode/opencod
       "type": "local",
       "command": ["/path/to/node22/bin/node", "/path/to/repo/bin/hypha-mcp/hypha-mcp-server.mjs"],
       "enabled": true,
+      "timeout": 120000,
       "environment": { "HYPHA_GRAPH": "<your-graph>" }
     }
   }
 }
 ```
+
+`timeout` is generous so the first cold tool call (which may download the graph)
+does not exceed the MCP request timeout.
 
 ## Configuration (env vars, all optional)
 
@@ -82,11 +92,18 @@ Override `HYPHA_URL`/`HYPHA_GRAPH`/`HYPHA_WS_URL` for a different Hypha instance
 
 Read: `get_page`, `list_pages`, `search_blocks`, `list_tasks`, `list_tags`,
 `list_properties`.
-Write (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
+Create/update (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
 `upsert_task`, `upsert_tag`, `set_block_tags`, `upsert_property`,
 `set_block_properties`.
+Delete (RTC-synced): `remove_block`, `remove_page`, `remove_tag`,
+`remove_property`.
 
 Notes:
+- **Editing existing blocks:** the block tools that target an existing block
+  (`upsert_block`/`upsert_task` update mode, `set_block_tags`,
+  `set_block_properties`, `remove_block`) accept either `id` (the `db/id`
+  returned by the read tools) or `uuid`. So you can read a page and edit/delete
+  its blocks directly by `id`.
 - `upsert_blocks` creates a nested block tree in one call, e.g.
   `[{"title":"Obst","children":[{"title":"Äpfel"}]},{"title":"Brot"}]`. Prefer
   it over many `upsert_block` calls for structured/hierarchical content.
