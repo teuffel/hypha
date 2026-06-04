@@ -82,10 +82,14 @@ Override `HYPHA_URL`/`HYPHA_GRAPH`/`HYPHA_WS_URL` for a different Hypha instance
 
 Read: `get_page`, `list_pages`, `search_blocks`, `list_tasks`, `list_tags`,
 `list_properties`.
-Write (RTC-synced): `upsert_page`, `upsert_block`, `upsert_task`, `upsert_tag`,
-`set_block_tags`, `upsert_property`, `set_block_properties`.
+Write (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
+`upsert_task`, `upsert_tag`, `set_block_tags`, `upsert_property`,
+`set_block_properties`.
 
 Notes:
+- `upsert_blocks` creates a nested block tree in one call, e.g.
+  `[{"title":"Obst","children":[{"title":"Äpfel"}]},{"title":"Brot"}]`. Prefer
+  it over many `upsert_block` calls for structured/hierarchical content.
 - Tags/properties must exist before associating them with a block
   (`upsert_tag` / `upsert_property` first).
 - `set_block_properties` takes an EDN map keyed by property **name** keywords,
