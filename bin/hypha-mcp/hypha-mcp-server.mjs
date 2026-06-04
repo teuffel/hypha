@@ -64,6 +64,19 @@ function pushOpt(args, flag, value) {
   if (value !== undefined && value !== null && value !== "") args.push(flag, String(value));
 }
 
+// Serialize a nested block tree ([{title, children?}]) to the EDN vector the
+// `logseq upsert block --blocks` flag expects, e.g.
+//   [{:block/title "Obst" :block/children [{:block/title "Äpfel"}]}]
+function ednBlockTree(nodes) {
+  const esc = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  const node = (n) => {
+    let s = `{:block/title ${esc(n.title)}`;
+    if (n.children && n.children.length) s += ` :block/children [${n.children.map(node).join(" ")}]`;
+    return s + "}";
+  };
+  return `[${nodes.map(node).join(" ")}]`;
+}
+
 const server = new McpServer({ name: "Hypha MCP Server", version: "0.1.0" });
 
 server.registerTool(
@@ -140,6 +153,34 @@ server.registerTool(
       await runCli([
         "upsert", "block", "--target-page", targetPage, "--content", content, "--output", "json",
       ]),
+    );
+  },
+);
+
+const blockNode = z.lazy(() =>
+  z.object({
+    title: z.string().describe("Block content (markdown)"),
+    children: z.array(blockNode).optional().describe("Nested child blocks"),
+  }),
+);
+
+server.registerTool(
+  "upsert_blocks",
+  {
+    title: "Upsert Blocks (tree)",
+    description:
+      "Create multiple blocks at once on a page, including nested children, in a single operation. " +
+      "Use this for structured content (lists, outlines, hierarchies) instead of many upsert_block calls. RTC-synced. " +
+      'Example blocks: [{"title":"Obst","children":[{"title":"Äpfel"},{"title":"Bananen"}]},{"title":"Brot"}]',
+    inputSchema: {
+      targetPage: z.string().describe("Target page name"),
+      blocks: z.array(blockNode).describe("Nested block tree to insert"),
+    },
+  },
+  async ({ targetPage, blocks }) => {
+    if (!blocks.length) return mcpText({ ok: false, text: "upsert_blocks: blocks is empty" });
+    return mcpText(
+      await runCli(["upsert", "block", "--target-page", targetPage, "--blocks", ednBlockTree(blocks), "--output", "json"]),
     );
   },
 );
