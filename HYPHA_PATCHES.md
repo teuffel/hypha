@@ -1433,6 +1433,75 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #16 — CLI `upsert page --parent/--remove-parent` (explicit namespace)
+
+- **ID**: HYPHA-PATCH-016
+- **Introduced**: Phase 1.7 (companion to Patch #15), 2026-06-04
+- **File**: `src/main/logseq/cli/command/upsert.cljs`
+- **Patch form**:
+  ```clojure
+  ;; require added
+  [logseq.db.common.order :as db-order]
+
+  ;; upsert-page-spec gains:
+  :parent {:desc "Parent page name or db/id; nests this page under it ..."
+           :complete :pages}
+  :remove-parent {:desc "Remove the page's parent (make it top-level)"
+                  :coerce :boolean}
+
+  ;; build-page-action carries :parent / :remove-parent into the action.
+
+  ;; execute-upsert-page, after the tag/property ops, sets the namespace parent
+  ;; via the existing :thread-api/transact, mirroring page-with-parent-and-order
+  ;; (parent + order); --remove-parent retracts both → top-level:
+  (when (:remove-parent action)
+    (transport/invoke cfg :thread-api/transact
+      [repo [[:db/retract page-id :block/parent] [:db/retract page-id :block/order]] {} {}]))
+  (when parent-page
+    (transport/invoke cfg :thread-api/transact
+      [repo [{:db/id page-id :block/parent (:db/id parent-page) :block/order (db-order/gen-key)}] {} {}]))
+  ```
+- **Line count**: +~30 (spec keys + action carry + executor block + require).
+- **Rationale**: With Patch #15 "/" is literal, so the old "type A/B" namespace
+  shortcut is gone. A DB-native hierarchy needs an explicit `:block/parent`. The
+  CLI had no parent primitive and no `--parent` flag, and the MCP bridge
+  (`bin/hypha-mcp`) can only reach the graph through CLI subcommands. This adds
+  `--parent` (nest under a page, created if missing) and `--remove-parent`
+  (back to top-level), reusing the **existing** `:thread-api/transact` (no new
+  thread-api, per the CLI AGENTS.md rule). It mirrors the invariants of
+  `outliner/page.cljs/page-with-parent-and-order` (parent + `db-order/gen-key`
+  order); removing retracts both, matching how plain top-level pages store
+  neither attribute.
+- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs` gains
+  a `parent`/`removeParent` arg on `upsert_page` and a `set_page_parent` tool
+  (Hypha-own tooling, not upstream code).
+- **Additive alternatives considered**:
+  - New `:thread-api/set-page-parent` endpoint: rejected — AGENTS.md says don't
+    add thread-apis unless necessary; `:thread-api/transact` already suffices.
+  - `apply-outliner-ops` move-blocks: rejected — pages aren't block-tree
+    children; namespace parent is set by direct attribute transact, not a move.
+  - MCP wrapper POSTs to db-worker-node `/v1/invoke` directly: rejected —
+    duplicates transit transport + server discovery in JS, fragile.
+- **Break signal — structural**:
+  - `upsert-page-spec`, `build-page-action`, or `execute-upsert-page` is renamed
+    / restructured, or `:thread-api/transact` changes arity.
+  - `logseq.db.common.order/gen-key` is renamed/moved.
+- **Break signal — semantic**:
+  - Upstream adds its own page-parent CLI option → reconcile / drop.
+  - The page-parent invariants change (e.g. order no longer required).
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'remove-parent' src/main/logseq/cli/command/upsert.cljs` ⇒ `>=2`
+    `rg -c 'db-order/gen-key' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
+  - Semantic, manual at triage: `execute-upsert-page` must set
+    `:block/parent` + `:block/order` via `:thread-api/transact`, and
+    `--remove-parent` must retract both.
+- **On break**:
+  - Structural → re-anchor on the new executor shape.
+  - Semantic upstream-merged → drop the flags if upstream provides equivalents.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

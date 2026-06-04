@@ -14,6 +14,7 @@
             [logseq.common.graph-dir :as graph-dir]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
+            [logseq.db.common.order :as db-order]
             [logseq.db.frontend.asset :as db-asset]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.property.type :as db-property-type]
@@ -46,6 +47,9 @@
    :remove-tags {:desc "Tags to remove (EDN vector) [update only]"}
    :remove-properties {:desc "Properties to remove (EDN vector) [update only]"}})
 
+;; HYPHA: with literal-slash titles, a namespace is created by setting an
+;; explicit parent rather than typing "A/B". --parent nests this page under the
+;; given parent page (created if missing); --remove-parent makes it top-level.
 (def ^:private upsert-page-spec
   {:id {:desc "Target page db/id (forces update mode) [update only]"
         :coerce :long}
@@ -54,7 +58,11 @@
    :update-tags {:desc "Tags to add/update (EDN vector)"}
    :update-properties {:desc "Properties to add/update (EDN map)"}
    :remove-tags {:desc "Tags to remove (EDN vector) [update only]"}
-   :remove-properties {:desc "Properties to remove (EDN vector) [update only]"}})
+   :remove-properties {:desc "Properties to remove (EDN vector) [update only]"}
+   :parent {:desc "Parent page name or db/id; nests this page under it (Hypha namespace)"
+            :complete :pages}
+   :remove-parent {:desc "Remove the page's parent (make it top-level)"
+                   :coerce :boolean}})
 
 (def ^:private upsert-task-spec
   {:id {:desc "Target node db/id (forces update mode) [update only]"
@@ -438,7 +446,9 @@
                           :remove-tags (:value remove-tags-result)
                           :remove-properties (:value remove-properties-result)}
                    (some? id) (assoc :id id)
-                   (seq page) (assoc :page page))}))))
+                   (seq page) (assoc :page page)
+                   (some-> (:parent options) str string/trim seq) (assoc :parent (string/trim (str (:parent options))))
+                   (:remove-parent options) (assoc :remove-parent true))}))))
 
 (defn ^:large-vars/cleanup-todo build-task-action
   [options repo]
@@ -1130,9 +1140,29 @@
                                                 :remove-tag-ids remove-tag-ids
                                                 :update-properties update-properties
                                                 :remove-properties remove-properties})
-              _ (when (seq ops)
-                  (transport/invoke cfg :thread-api/apply-outliner-ops
-                                    [(:repo action) ops {}]))]
+               _ (when (seq ops)
+                   (transport/invoke cfg :thread-api/apply-outliner-ops
+                                     [(:repo action) ops {}]))
+               ;; HYPHA: explicit namespace parent. Mirror page-with-parent-and-order
+               ;; (parent + order); removing restores top-level (retract both).
+               _ (when (:remove-parent action)
+                   (transport/invoke cfg :thread-api/transact
+                                     [(:repo action)
+                                      [[:db/retract page-id :block/parent]
+                                       [:db/retract page-id :block/order]]
+                                      {} {}]))
+               parent-page (when (and (:parent action) (not (:remove-parent action)))
+                             (ensure-page-entity! cfg (:repo action) (:parent action)))
+               _ (when (and parent-page (= (:db/id parent-page) page-id))
+                   (throw (ex-info "A page cannot be its own parent"
+                                   {:code :invalid-options :page (:page action)})))
+               _ (when parent-page
+                   (transport/invoke cfg :thread-api/transact
+                                     [(:repo action)
+                                      [{:db/id page-id
+                                        :block/parent (:db/id parent-page)
+                                        :block/order (db-order/gen-key)}]
+                                      {} {}]))]
         {:status :ok
          :data {:result [page-id]}})
       (p/catch (fn [error]

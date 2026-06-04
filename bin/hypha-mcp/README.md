@@ -33,9 +33,16 @@ pre-warming. Set `HYPHA_NO_BOOTSTRAP=1` to disable auto-bootstrap.
 - **Node >= 22.5** (the worker uses the `node:sqlite` builtin). Node 20 will not
   work. Set `HYPHA_NODE` to a Node 22 binary if your default `node` is older.
 - Built artifacts in the repo: `static/logseq-cli.js` and
-  `static/js/db-worker-node.js` (build with
-  `clojure -M:cljs release logseq-cli db-worker-node && node ./scripts/build-db-worker-node-bundle.mjs`,
-  then `ln -sf ../db-worker-node.js static/js/db-worker-node.js`).
+  `static/js/db-worker-node.js`. Build them **with the literal-slash define**
+  (Patch #15) so the CLI/worker match the Hypha web build:
+  ```sh
+  clojure -M:cljs release logseq-cli db-worker-node \
+    --config-merge '{:closure-defines {logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
+  node ./scripts/build-db-worker-node-bundle.mjs
+  ln -sf ../db-worker-node.js static/js/db-worker-node.js
+  ```
+  (logseq-cli and db-worker-node must be built from the same commit so their
+  revisions match, otherwise the CLI refuses to talk to the worker.)
 
 ## Secrets stay OUT of this repo
 
@@ -94,11 +101,17 @@ Read: `get_page`, `list_pages`, `search_blocks`, `list_tasks`, `list_tags`,
 `list_properties`.
 Create/update (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
 `upsert_task`, `upsert_tag`, `set_block_tags`, `upsert_property`,
-`set_block_properties`.
+`set_block_properties`, `set_page_parent`.
 Delete (RTC-synced): `remove_block`, `remove_page`, `remove_tag`,
 `remove_property`.
 
 Notes:
+- **Literal "/" + namespaces (Patch #15):** in Hypha builds "/" is a literal
+  character in page titles (e.g. `2024/Q3`), so titles are never split
+  into a hierarchy. Build a hierarchy explicitly with `set_page_parent` (or the
+  `parent` field of `upsert_page`); a child page is then referenced by its leaf
+  title or `id`/`uuid` (not by a `Parent/Child` path). `remove_parent` / a
+  `removeParent: true` makes a page top-level again.
 - **Tagging / properties on pages:** a page is a node too. `upsert_page` accepts
   `tags`/`removeTags` and `propertiesEdn`/`removeProperties` (target by page name
   or `id`), so you can tag a page and set page-level properties in one call.
