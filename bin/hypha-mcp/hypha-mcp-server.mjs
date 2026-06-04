@@ -226,11 +226,31 @@ server.registerTool(
   "upsert_page",
   {
     title: "Upsert Page",
-    description: "Create a page (or no-op if it exists). RTC-synced to all clients.",
-    inputSchema: { page: z.string().describe("Page name to create") },
+    description:
+      "Create a page (or update an existing one) and optionally set its tags and properties. " +
+      "A page IS a node, so it can carry tags/properties just like a block. Target by page name " +
+      "or id (db/id from read tools). Tags/properties must already exist (upsert_tag/upsert_property). " +
+      "RTC-synced.",
+    inputSchema: {
+      page: z.string().optional().describe("Page name (create, or target an existing page by name)"),
+      id: z.union([z.number(), z.string()]).optional().describe("Existing page db/id (update mode)"),
+      tags: z.array(z.string()).optional().describe("Tag names/uuids to add"),
+      removeTags: z.array(z.string()).optional().describe("Tag names/uuids to remove"),
+      propertiesEdn: z.string().optional().describe("EDN map keyed by property name, e.g. {:mcpnote \"hello\"}"),
+      removeProperties: z.array(z.string()).optional().describe("Property names to remove"),
+    },
   },
-  async ({ page }) =>
-    mcpText(await runCli(["upsert", "page", "--page", page, "--output", "json"])),
+  async ({ page, id, tags, removeTags, propertiesEdn, removeProperties }) => {
+    const hasId = id !== undefined && id !== null && String(id) !== "";
+    const sel = hasId ? ["--id", String(id)] : page ? ["--page", page] : [];
+    if (!sel.length) return mcpText({ ok: false, text: "upsert_page: provide page (name) or id" });
+    const args = ["upsert", "page", ...sel, "--output", "json"];
+    if (tags?.length) args.push("--update-tags", ednStringVector(tags));
+    if (removeTags?.length) args.push("--remove-tags", ednStringVector(removeTags));
+    if (propertiesEdn) args.push("--update-properties", propertiesEdn);
+    if (removeProperties?.length) args.push("--remove-properties", ednStringVector(removeProperties));
+    return mcpText(await runCli(args));
+  },
 );
 
 server.registerTool(

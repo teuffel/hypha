@@ -99,6 +99,9 @@ Delete (RTC-synced): `remove_block`, `remove_page`, `remove_tag`,
 `remove_property`.
 
 Notes:
+- **Tagging / properties on pages:** a page is a node too. `upsert_page` accepts
+  `tags`/`removeTags` and `propertiesEdn`/`removeProperties` (target by page name
+  or `id`), so you can tag a page and set page-level properties in one call.
 - **Editing existing blocks:** the block tools that target an existing block
   (`upsert_block`/`upsert_task` update mode, `set_block_tags`,
   `set_block_properties`, `remove_block`) accept either `id` (the `db/id`
