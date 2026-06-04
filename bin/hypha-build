@@ -71,11 +71,11 @@ fi
 if [[ "$MODE" == "release" ]]; then
   next_step "ClojureScript release build (app + db-worker + db-worker-node, HYPHA_MODE=true)"
   clojure -M:cljs release app db-worker db-worker-node \
-    --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true}}'
+    --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
 else
   next_step "ClojureScript compile (app + db-worker, HYPHA_MODE=true)"
   clojure -M:cljs compile app db-worker \
-    --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true}}'
+    --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
 fi
 
 # ─── A8 smoke ────────────────────────────────────────────────────────────────
