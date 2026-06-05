@@ -1502,6 +1502,71 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #17 — Reliable ISO-8601 parsing for datetime properties
+
+- **ID**: HYPHA-PATCH-017
+- **Introduced**: Phase 1.7 follow-up (task scheduled/deadline reliability), 2026-06-04
+- **File**: `src/main/logseq/cli/command/add.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL — bare js/Date string parse (locale/format dependent)
+  (defn- parse-datetime-value [value]
+    (cond
+      (number? value) {:ok? true :value value}
+      (string? value) (let [date (js/Date. value) ms (.getTime date)]
+                        (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))
+      :else {:ok? false}))
+
+  ;; HYPHA — gate on an unambiguous ISO-8601 regex before js/Date.
+  (def ^:private iso-datetime-re
+    #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(z|[+-]\d{2}:?\d{2})?)?$")
+  (defn- parse-datetime-value [value]
+    (cond
+      (number? value) {:ok? true :value value}
+      (string? value) (let [s (string/trim value)]
+                        (if-not (re-matches iso-datetime-re s)
+                          {:ok? false}
+                          (let [ms (.getTime (js/Date. s))]
+                            (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))))
+      :else {:ok? false}))
+  ```
+  Plus a clearer error message at the `:datetime` branch of
+  `coerce-property-value-basic`.
+- **Line count**: +~12 (regex def + guard + comment), 1 message line changed.
+- **Rationale**: `upsert task --scheduled/--deadline` (and any `:datetime`
+  property) fed the raw string straight to `(js/Date. value)`. `new Date()` is
+  notoriously locale/format-dependent: `"12.02.2026"` (German DD.MM.YYYY) parsed
+  as **December 2026**, and `"2026/02/12"` vs `"2026-02-12"` flipped between
+  local and UTC midnight — all **silently**, since `new Date` returns a valid
+  (wrong) date that passes the isNaN check. Users reported the due-date field as
+  "not reliably settable". This restricts input to unambiguous ISO-8601
+  (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS][.mmm][Z|±HH:MM]`, space allowed for
+  `T`) and **fails fast** with a guiding message on anything else — matching the
+  repo's "fail-fast over fallback, never mask invalid state" rule. ISO inputs
+  behave exactly as before; out-of-range ISO dates still fail via isNaN.
+- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
+  `upsert_task` scheduled/deadline tool descriptions document the ISO format.
+- **Additive alternatives considered**:
+  - Support locale formats (DD.MM.YYYY): rejected — reintroduces ambiguity
+    (`01.02` = Jan 2 or Feb 1?) for a tool also driven by AI agents/scripts.
+  - Leave as-is and document ISO-only: rejected — silent wrong dates remain.
+  - Upstream PR: ideal long-term; the bug is generic, not Hypha-specific.
+- **Break signal — structural**:
+  - `parse-datetime-value` or `coerce-property-value-basic` is renamed/moved, or
+    `:datetime` coercion stops routing through `parse-datetime-value`.
+- **Break signal — semantic**:
+  - Upstream adds its own datetime normalization → reconcile/drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'iso-datetime-re' src/main/logseq/cli/command/add.cljs` ⇒ `2`
+  - Semantic, manual at triage: `parse-datetime-value` must `re-matches`
+    `iso-datetime-re` before constructing `js/Date`.
+- **On break**:
+  - Structural → re-anchor the guard on the new coercion site.
+  - Semantic upstream-merged → drop the regex guard.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
