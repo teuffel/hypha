@@ -142,6 +142,19 @@
    :public {:desc "Set property public visibility"
             :coerce :boolean}})
 
+;; HYPHA: rename a page's title (and thus its name + references). The page is
+;; identified by --page (current name), --id (db/id) or --uuid; --to is the new
+;; title. Implemented via the :rename-page outliner op.
+(def ^:private rename-page-spec
+  {:page {:desc "Current page name"
+          :complete :pages}
+   :id {:desc "Page db/id"
+        :coerce :long}
+   :uuid {:desc "Page UUID"
+          :validate {:pred (comp parse-uuid str)
+                     :ex-msg (constantly "Option uuid must be a valid UUID string")}}
+   :to {:desc "New page title"}})
+
 (def entries
   [(core/command-entry ["upsert" "block"] :upsert-block "Upsert block" upsert-block-spec
                        {:examples ["logseq upsert block --graph my-graph --target-page Home --content \"New block\""
@@ -164,7 +177,10 @@
                                    "logseq upsert tag --graph my-graph --id 200 --name Project Renamed"]})
    (core/command-entry ["upsert" "property"] :upsert-property "Upsert property" upsert-property-spec
                        {:examples ["logseq upsert property --graph my-graph --name status --type default --cardinality one"
-                                   "logseq upsert property --graph my-graph --id 321 --hide true"]})])
+                                   "logseq upsert property --graph my-graph --id 321 --hide true"]})
+   (core/command-entry ["rename" "page"] :rename-page "Rename a page" rename-page-spec
+                       {:examples ["logseq rename page --graph my-graph --page \"Old name\" --to \"New name\""
+                                   "logseq rename page --graph my-graph --id 123 --to \"New name\""]})])
 
 (defn- normalize-tag-name
   [value]
@@ -449,6 +465,37 @@
                    (seq page) (assoc :page page)
                    (some-> (:parent options) str string/trim seq) (assoc :parent (string/trim (str (:parent options))))
                    (:remove-parent options) (assoc :remove-parent true))}))))
+
+(defn build-rename-page-action
+  [options repo]
+  (if-not (seq repo)
+    {:ok? false
+     :error {:code :missing-repo
+             :message "repo is required for rename"}}
+    (let [page (some-> (:page options) string/trim)
+          id (:id options)
+          uuid (some-> (:uuid options) string/trim)
+          to (some-> (:to options) string/trim)]
+      (cond
+        (and (not (some? id)) (not (seq page)) (not (seq uuid)))
+        {:ok? false
+         :error {:code :missing-page-name
+                 :message "one of --page, --id or --uuid is required"}}
+
+        (not (seq to))
+        {:ok? false
+         :error {:code :invalid-options
+                 :message "--to (new page title) is required"}}
+
+        :else
+        {:ok? true
+         :action (cond-> {:type :rename-page
+                          :repo repo
+                          :graph (core/repo->graph repo)
+                          :to to}
+                   (some? id) (assoc :id id)
+                   (seq page) (assoc :page page)
+                   (seq uuid) (assoc :uuid uuid))}))))
 
 (defn ^:large-vars/cleanup-todo build-task-action
   [options repo]
@@ -1082,6 +1129,40 @@
                 created-ids (vec (or (get-in result [:data :result]) []))]
           {:status :ok
            :data {:result created-ids}}))
+      (p/catch (fn [error]
+                 {:status :error
+                  :error (exception->error error)}))))
+
+(defn- resolve-existing-page!
+  "Resolve an existing (non-recycled) page by id, uuid, or name — never creates."
+  [cfg repo {:keys [id uuid page]}]
+  (cond
+    (some? id)
+    (ensure-page-by-id! cfg repo id)
+
+    (seq uuid)
+    (p/let [entity (transport/invoke cfg :thread-api/pull
+                                     [repo page-selector [:block/uuid (parse-uuid uuid)]])]
+      (if (and (:db/id entity) (not (ldb/recycled? entity)) (page-entity? entity))
+        entity
+        (throw (ex-info "page not found for uuid" {:code :page-not-found :uuid uuid}))))
+
+    :else
+    (p/let [live (add-command/find-pages-by-name cfg repo page page-selector)]
+      (cond
+        (empty? live) (throw (ex-info "page not found" {:code :page-not-found :page page}))
+        (> (count live) 1) (add-command/throw-ambiguous-page-error! page live)
+        :else (first live)))))
+
+(defn execute-rename-page
+  [action config]
+  (-> (p/let [cfg (cli-server/ensure-server! config (:repo action))
+              page (resolve-existing-page! cfg (:repo action) action)
+              page-uuid (:block/uuid page)
+              _ (transport/invoke cfg :thread-api/apply-outliner-ops
+                                  [(:repo action) [[:rename-page [page-uuid (:to action)]]] {}])]
+        {:status :ok
+         :data {:result [(:db/id page)]}})
       (p/catch (fn [error]
                  {:status :error
                   :error (exception->error error)}))))

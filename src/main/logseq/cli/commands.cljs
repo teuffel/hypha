@@ -637,6 +637,9 @@
         :upsert-page
         (upsert-command/build-page-action options repo)
 
+        :rename-page
+        (upsert-command/build-rename-page-action options repo)
+
         :upsert-task
         (upsert-command/build-task-action options repo)
 
@@ -733,6 +736,7 @@
                          :search-tag (search-command/execute-search-tag action config)
                          :upsert-block (upsert-command/execute-upsert-block action config)
                          :upsert-page (upsert-command/execute-upsert-page action config)
+                         :rename-page (upsert-command/execute-rename-page action config)
                          :upsert-task (upsert-command/execute-upsert-task action config)
                          :upsert-asset (upsert-command/execute-upsert-asset action config)
                          :upsert-tag (upsert-command/execute-upsert-tag action config)

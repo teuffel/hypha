@@ -259,6 +259,28 @@ server.registerTool(
 );
 
 server.registerTool(
+  "rename_page",
+  {
+    title: "Rename Page",
+    description:
+      "Rename a page's title (updates its name and references). Identify the page by name, id " +
+      "(db/id from read tools), or uuid; `to` is the new title (a literal '/' is kept literal). RTC-synced.",
+    inputSchema: {
+      page: z.string().optional().describe("Current page name"),
+      id: z.union([z.number(), z.string()]).optional().describe("Page db/id"),
+      uuid: z.string().optional().describe("Page uuid"),
+      to: z.string().describe("New page title"),
+    },
+  },
+  async ({ page, id, uuid, to }) => {
+    const hasId = id !== undefined && id !== null && String(id) !== "";
+    const sel = hasId ? ["--id", String(id)] : uuid ? ["--uuid", uuid] : page ? ["--page", page] : [];
+    if (!sel.length) return mcpText({ ok: false, text: "rename_page: provide page, id, or uuid" });
+    return mcpText(await runCli(["rename", "page", ...sel, "--to", to, "--output", "json"]));
+  },
+);
+
+server.registerTool(
   "set_page_parent",
   {
     title: "Set Page Parent",
