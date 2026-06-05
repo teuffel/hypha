@@ -98,7 +98,7 @@ Override `HYPHA_URL`/`HYPHA_GRAPH`/`HYPHA_WS_URL` for a different Hypha instance
 ## Tools
 
 Read: `get_page`, `list_pages`, `search_blocks`, `list_tasks`, `list_tags`,
-`list_properties`.
+`list_properties`, `get_property_history`.
 Create/update (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
 `upsert_task`, `upsert_tag`, `set_block_tags`, `upsert_property`,
 `set_block_properties`, `set_page_parent`, `rename_page`.
