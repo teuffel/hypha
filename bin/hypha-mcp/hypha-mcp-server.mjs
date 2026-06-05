@@ -222,6 +222,66 @@ server.registerTool(
     mcpText(await runCli(["search", "block", "--content", searchTerm, "--output", "json"])),
 );
 
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+server.registerTool(
+  "get_property_history",
+  {
+    title: "Get Property History",
+    description:
+      "Read the recorded value-change history of a node's properties. Requires 'Enable property " +
+      "history' to have been on for that property when the changes happened (built-in Status is " +
+      "tracked by default). Identify the node by page name, blockId (db/id from read tools), or " +
+      "blockUuid; optionally filter by property name. Returns entries oldest-first: {at, property, value}.",
+    inputSchema: {
+      page: z.string().optional().describe("Page name whose property history to read"),
+      blockId: z.union([z.number(), z.string()]).optional().describe("Node db/id (from read tools)"),
+      blockUuid: z.string().optional().describe("Node uuid"),
+      property: z.string().optional().describe("Only return entries for this property name/title"),
+    },
+  },
+  async ({ page, blockId, blockUuid, property }) => {
+    let where;
+    if (blockId !== undefined && blockId !== null && String(blockId) !== "") {
+      where = `[?h :logseq.property.history/block ${Number(blockId)}]`;
+    } else if (blockUuid) {
+      if (!UUID_RE.test(blockUuid)) return mcpText({ ok: false, text: "get_property_history: invalid blockUuid" });
+      where = `[?b :block/uuid #uuid "${blockUuid}"] [?h :logseq.property.history/block ?b]`;
+    } else if (page) {
+      const lc = page.toLowerCase().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      where = `[?b :block/name "${lc}"] [?h :logseq.property.history/block ?b]`;
+    } else {
+      return mcpText({ ok: false, text: "get_property_history: provide page, blockId, or blockUuid" });
+    }
+    const pull =
+      "(pull ?h [:db/id :block/created-at :logseq.property.history/scalar-value " +
+      "{:logseq.property.history/ref-value [:db/id :block/title :db/ident]} " +
+      "{:logseq.property.history/property [:block/title :db/ident]}])";
+    const r = await runCli(["query", "--query", `[:find [${pull} ...] :where ${where}]`, "--output", "json"]);
+    if (!r.ok) return mcpText(r);
+    try {
+      const rows = JSON.parse(r.text)?.data?.result ?? [];
+      const entries = rows
+        .map((h) => {
+          const prop = h["logseq.property.history/property"] ?? {};
+          const ref = h["logseq.property.history/ref-value"];
+          const scalar = h["logseq.property.history/scalar-value"];
+          const at = h["block/created-at"];
+          return {
+            at: typeof at === "number" ? new Date(at).toISOString() : at ?? null,
+            property: prop["block/title"] ?? prop["db/ident"] ?? null,
+            value: ref ? ref["block/title"] ?? ref["db/ident"] ?? ref["db/id"] : scalar,
+          };
+        })
+        .filter((e) => !property || (e.property && String(e.property).toLowerCase().includes(property.toLowerCase())))
+        .sort((a, b) => String(a.at ?? "").localeCompare(String(b.at ?? "")));
+      return mcpText({ ok: true, text: JSON.stringify({ count: entries.length, entries }) });
+    } catch {
+      return mcpText(r);
+    }
+  },
+);
+
 server.registerTool(
   "upsert_page",
   {
