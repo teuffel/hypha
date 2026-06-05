@@ -1740,6 +1740,70 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #21 — General property-history viewer (block context menu)
+
+- **ID**: HYPHA-PATCH-021
+- **Introduced**: Phase 1.8 (property-history read UI), 2026-06-04
+- **Files**:
+  - `src/main/frontend/components/content.cljs` (component + context-menu item + `frontend.date` require)
+  - `src/resources/dicts/en.edn`, `src/resources/dicts/zh-cn.edn` (`:block/property-history`)
+- **Patch form**:
+  ```clojure
+  ;; content.cljs — new component, renders the value-change timeline
+  (rum/defc property-history-cp [history]
+    [:div … (for [item (sort-by :block/created-at > history)]
+              … (:block/title (:logseq.property.history/property item))
+              … (or (:block/title (:logseq.property.history/ref-value item))
+                    (:logseq.property.history/scalar-value item))
+              … (date/int->local-time-2 (:block/created-at item)))])
+
+  ;; block-context-menu-content — gated menu item (only when history exists)
+  (when-let [history (seq (:logseq.property.history/_block block))]
+    (shui/dropdown-menu-item
+     {:key "Property history"
+      :on-click (fn [_e] (shui/dialog-open! (fn [] (property-history-cp history))
+                                            {:title (t :block/property-history)}))}
+     (t :block/property-history)))
+  ```
+- **Line count**: +~25 (component + menu item + require), +1 per dict.
+- **Rationale**: The property-history mechanic (Patch #20 toggle +
+  `:logseq.property.history/*` records) had no general read UI — only a
+  status-specific `status-history-cp`. This adds a general viewer: a
+  "Property history" entry in the block/page right-click menu (shown only when
+  the node actually has history, via the `:logseq.property.history/_block`
+  reverse ref — synchronous, no async fetch) that opens a dialog listing each
+  recorded change as *property : value · timestamp*, newest first. Reuses the
+  existing `:entity`-typed history refs and `icon-component/get-node-icon-cp`
+  for ref values.
+- **Companion change (NOT a patch)**: the MCP `get_property_history` tool in
+  `bin/hypha-mcp` (Hypha-own tooling) provides the same data for agents.
+- **Additive alternatives considered**:
+  - Per-property-value hover affordance: rejected for now — invasive (touches
+    every property-value render site), more patch surface.
+  - Generalize `status-history-cp` in place: rejected — it is task/status
+    specific (icons + spent-time math); a separate general component is cleaner.
+  - Fetch via `db-async/<get-block-properties-history`: unnecessary — the
+    reverse ref gives the data synchronously and also gates the menu item.
+- **Break signal — structural**:
+  - `block-context-menu-content` is renamed/moved, `shui/dialog-open!` changes
+    signature, or `:logseq.property.history/block` stops being an `:entity`
+    (ref) so the `_block` reverse ref breaks.
+- **Break signal — semantic**:
+  - Upstream ships its own property-history UI → drop ours.
+  - The history ident set changes.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'property-history-cp' src/main/frontend/components/content.cljs` ⇒ `2`
+    `rg -c ':block/property-history' src/resources/dicts/en.edn` ⇒ `1`
+  - Semantic, manual at triage: the context-menu item must be gated on
+    `(seq (:logseq.property.history/_block block))` and open
+    `property-history-cp`.
+- **On break**:
+  - Structural → re-anchor the menu item / reverse-ref read.
+  - Semantic upstream-merged → remove ours.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
