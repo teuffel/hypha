@@ -1567,6 +1567,64 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #18 — Resolve :date properties by journal-day, not by formatted title
+
+- **ID**: HYPHA-PATCH-018
+- **Introduced**: Phase 1.7 follow-up (date-property reliability), 2026-06-04
+- **File**: `src/main/logseq/cli/command/add.cljs`
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL — resolve the journal page by its formatted title via ensure-page!
+  (let [... title (date-time-util/int->journal-title journal-day formatter)
+            page  (ensure-page! config repo title)]
+    (if-let [id (:db/id page)] id (throw ... "journal page not found")))
+
+  ;; HYPHA — resolve/create by :block/journal-day
+  (defn- find-journal-page-id-by-day [config repo journal-day]
+    (p/let [results (transport/invoke config :thread-api/q
+                      [repo [{:find '[[?e ...]] :in '[$ ?day]
+                              :where '[[?e :block/journal-day ?day]]} journal-day]])]
+      (first results)))
+  ;; resolve-date-page-id: existing = (find-journal-page-id-by-day …);
+  ;; if missing, create-page with the title, then look up by day again.
+  ```
+- **Line count**: +~14 (helper + day-based lookup/create), -2 (old title path).
+- **Rationale**: `upsert … --update-properties '{:some-date-prop "2026-02-12"}'`
+  for a `:date`-typed property failed with **"journal page not found"** even when
+  the journal day existed. A journal page's `:block/name` is always the canonical
+  `"MMM do, yyyy"` form (e.g. `feb 12th, 2026`), independent of the graph's
+  `:logseq.property.journal/title-format` (e.g. the German `"EEEE, dd.MM.yyyy"`
+  → `:block/title` `Thursday, 12.02.2026`). The old resolver built the lookup
+  name from the **custom title-format** and queried `:block/name`, which never
+  matched — so it fell through to creating a page under the wrong name and
+  returned no id. Journal pages are keyed by `:block/journal-day`; resolving by
+  day is format-independent and idempotent (find-or-create), fixing both the
+  "exists but not found" case and new-day creation.
+- **Companion change (NOT a patch)**: none.
+- **Additive alternatives considered**:
+  - Build the lookup name with the canonical `"MMM do, yyyy"` format instead of
+    the custom one: works, but still string-fragile (locale/format assumptions);
+    the journal-day key is the robust identity.
+  - Look up by `:block/title` instead of `:block/name`: rejected — title is the
+    display form and not the stable key; multiple formats have existed over a
+    graph's life (older journals store canonical titles).
+  - Upstream PR: ideal long-term; the bug is generic for custom journal formats.
+- **Break signal — structural**:
+  - `resolve-date-page-id` is renamed/moved, or `:block/journal-day` stops being
+    the journal key, or `:thread-api/q` changes arg shape.
+- **Break signal — semantic**:
+  - Upstream changes journal-page identity (e.g. day no longer stored).
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs` ⇒ `2`
+  - Semantic, manual at triage: `resolve-date-page-id` must resolve via
+    `:block/journal-day`, not via a title-name lookup.
+- **On break**:
+  - Structural → re-anchor the day-based lookup on the new resolver.
+  - Semantic upstream-merged → drop the helper.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
