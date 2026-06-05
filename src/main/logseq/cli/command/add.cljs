@@ -897,6 +897,20 @@
     :else
     (p/rejected (ex-info "node must be a number, uuid or page name" {:code :invalid-node :value value}))))
 
+(defn- find-journal-page-id-by-day
+  "Journal pages are keyed by :block/journal-day (an int like 20260212). Resolve
+   by day, not by formatted title: a journal page's :block/name is always the
+   canonical \"MMM do, yyyy\" form, so a custom :logseq.property.journal/title-format
+   (e.g. \"EEEE, dd.MM.yyyy\") would never match a name-based lookup."
+  [config repo journal-day]
+  (p/let [results (transport/invoke config :thread-api/q
+                                    [repo
+                                     [{:find '[[?e ...]]
+                                       :in '[$ ?day]
+                                       :where '[[?e :block/journal-day ?day]]}
+                                      journal-day]])]
+    (first results)))
+
 (defn- resolve-date-page-id
   [config repo value]
   (when-not (string? value)
@@ -908,9 +922,15 @@
           _ (when-not journal-day
               (throw (ex-info (str "invalid date property value: " (pr-str value))
                               {:code :invalid-date :value value})))
-          title (date-time-util/int->journal-title journal-day formatter)
-          page (ensure-page! config repo title)]
-    (if-let [id (:db/id page)]
+          ;; HYPHA: resolve (or create) the journal page by day, not by the
+          ;; custom-title-format name (see find-journal-page-id-by-day).
+          existing (find-journal-page-id-by-day config repo journal-day)
+          id (or existing
+                 (p/let [title (date-time-util/int->journal-title journal-day formatter)
+                         _ (transport/invoke config :thread-api/apply-outliner-ops
+                                             [repo [[:create-page [title {}]]] {}])]
+                   (find-journal-page-id-by-day config repo journal-day)))]
+    (if id
       id
       (throw (ex-info "journal page not found" {:code :page-not-found :value value})))))
 
