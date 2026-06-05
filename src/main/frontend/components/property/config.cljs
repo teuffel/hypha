@@ -904,6 +904,15 @@
                                                         :on-toggle-checked-change #(db-property-handler/set-block-property! (:db/id property)
                                                                                                                             :logseq.property/hide?
                                                                                                                             %)}))
+                           ;; HYPHA (Patch #20): expose the existing :logseq.property/enable-history?
+                           ;; mechanic as a per-property toggle. Same shape as hide-by-default above.
+                           (when (not (contains? #{:logseq.property.class/extends :logseq.property.class/properties} (:db/ident property)))
+                             (dropdown-editor-menuitem {:icon :history :title (t :property.built-in/enable-history)
+                                                        :toggle-checked? (boolean (:logseq.property/enable-history? property))
+                                                        :disabled? config/publishing?
+                                                        :on-toggle-checked-change #(db-property-handler/set-block-property! (:db/id property)
+                                                                                                                            :logseq.property/enable-history?
+                                                                                                                            %)}))
                            (when (not (contains? #{:logseq.property.class/extends :logseq.property.class/properties} (:db/ident property)))
                              (dropdown-editor-menuitem
                               {:icon :eye-off :title (t :property/hide-empty-value)

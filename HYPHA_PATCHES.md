@@ -1682,6 +1682,64 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #20 — "Enable property history" toggle in the property config menu
+
+- **ID**: HYPHA-PATCH-020
+- **Introduced**: Phase 1.8 (property-history UI gap), 2026-06-04
+- **File**: `src/main/frontend/components/property/config.cljs`
+- **Patch form**:
+  ```clojure
+  ;; Added inside group' (next to the hide-by-default toggle, same guard):
+  (when (not (contains? #{:logseq.property.class/extends :logseq.property.class/properties} (:db/ident property)))
+    (dropdown-editor-menuitem {:icon :history :title (t :property.built-in/enable-history)
+                               :toggle-checked? (boolean (:logseq.property/enable-history? property))
+                               :disabled? config/publishing?
+                               :on-toggle-checked-change #(db-property-handler/set-block-property! (:db/id property)
+                                                                                                   :logseq.property/enable-history?
+                                                                                                   %)}))
+  ```
+- **Line count**: +9 (one menu item + a 2-line comment).
+- **Rationale**: The property-history mechanic exists end-to-end
+  (`:logseq.property/enable-history?` built-in property in
+  `deps/db/.../property.cljs:635`, worker `handle-command` recording, history
+  blocks) and the i18n key `:property.built-in/enable-history` is defined in
+  `en.edn`/`de.edn` — but **no UI ever rendered a toggle for it**, so users
+  could not enable per-property history without a manual transact. This adds the
+  missing toggle to the property config dropdown, mirroring the adjacent
+  `hide-by-default` toggle exactly (same `dropdown-editor-menuitem` +
+  `db-property-handler/set-block-property!` shape and the same
+  extends/properties guard). No new i18n key (reuses the existing one by exact
+  semantic owner + role), no migration, no new require.
+- **Companion change (NOT a patch)**: none. The i18n key already existed and was
+  merely unused; it is now referenced.
+- **Additive alternatives considered**:
+  - Set `:logseq.property/enable-history?` per property via REPL/transact only:
+    rejected — not discoverable for end users; the mechanic deserves UI parity
+    with the other per-property toggles.
+  - MCP/CLI toggle: rejected as the primary fix — the value lives on a property
+    *node* and is keyed by the built-in ident (not a user-named property), which
+    the name-keyword-based MCP `set_block_properties` can't address; the UI is
+    the natural surface (CLI could be added later).
+- **Break signal — structural**:
+  - The `group'` toggle list (hide-by-default / hide-empty-value) in
+    `config.cljs` is renamed/restructured, or `dropdown-editor-menuitem` /
+    `db-property-handler/set-block-property!` change signature.
+  - `:logseq.property/enable-history?` is renamed/removed, or the `:history`
+    tabler glyph leaves the bundled icon CSS.
+- **Break signal — semantic**:
+  - Upstream adds its own enable-history toggle → duplicate menu item; drop ours.
+  - The history mechanic changes its property ident or gating.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c ':property.built-in/enable-history' src/main/frontend/components/property/config.cljs` ⇒ `1`
+  - Semantic, manual at triage: the toggle's `:on-toggle-checked-change` must
+    `set-block-property!` `:logseq.property/enable-history?`.
+- **On break**:
+  - Structural → re-anchor next to the surviving per-property toggles.
+  - Semantic upstream-merged → remove ours if upstream ships the toggle.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
