@@ -11,6 +11,7 @@
             [frontend.components.page-menu :as page-menu]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
+            [frontend.date :as date]
             [frontend.db :as db]
             [frontend.extensions.fsrs :as fsrs]
             [frontend.handler.common.developer :as dev-common-handler]
@@ -166,6 +167,26 @@
       (t :editor/collapse-block-children)
       (ui/dropdown-shortcut :editor/collapse-block-children))]))
 
+;; HYPHA (Patch #21): general property-history viewer. The :logseq.property.history/*
+;; entries (recorded when a property has "Enable property history" on) are read via
+;; the reverse ref :logseq.property.history/_block on the node entity and rendered as
+;; a value-change timeline (property name + value + timestamp, newest first).
+(rum/defc property-history-cp
+  [history]
+  [:div.p-2.text-sm.flex.flex-col.gap-1.max-h-96.overflow-y-auto
+   (for [item (sort-by :block/created-at > history)]
+     (let [prop (:logseq.property.history/property item)
+           ref-val (:logseq.property.history/ref-value item)
+           scalar (:logseq.property.history/scalar-value item)]
+       [:div.flex.flex-row.gap-2.items-center.justify-between
+        {:key (str (:db/id item))}
+        [:div.flex.flex-row.gap-1.items-center
+         [:span.font-medium (:block/title prop)]
+         [:span.text-muted-foreground ":"]
+         (when ref-val (icon-component/get-node-icon-cp ref-val {:size 14 :color? true}))
+         [:span (str (or (:block/title ref-val) scalar))]]
+        [:div.text-muted-foreground.whitespace-nowrap (date/int->local-time-2 (:block/created-at item))]]))])
+
 (rum/defc ^:large-vars/cleanup-todo block-context-menu-content
   [_target block-id property-default-value?]
   (let [block (db/entity [:block/uuid block-id])
@@ -211,6 +232,14 @@
                        (p/let [comments-area (comments-handler/ensure-comments-area! block-id)]
                          (comments-handler/reveal-comments-area! comments-area {:focus-editor? true})))}
           (t :block.comments/add-comment))
+
+         (when-let [history (seq (:logseq.property.history/_block block))]
+           (shui/dropdown-menu-item
+            {:key "Property history"
+             :on-click (fn [_e]
+                         (shui/dialog-open! (fn [] (property-history-cp history))
+                                            {:title (t :block/property-history)}))}
+            (t :block/property-history)))
 
          (shui/dropdown-menu-sub
           (shui/dropdown-menu-sub-trigger
