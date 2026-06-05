@@ -380,8 +380,8 @@ server.registerTool(
       uuid: z.string().optional().describe("Existing task block uuid (update mode)"),
       status: z.string().optional().describe("Task status (e.g. todo, doing, done)"),
       priority: z.string().optional().describe("Task priority (e.g. low, medium, high)"),
-      scheduled: z.string().optional().describe("Scheduled datetime, ISO8601"),
-      deadline: z.string().optional().describe("Deadline datetime, ISO8601"),
+      scheduled: z.string().optional().describe("Scheduled date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
+      deadline: z.string().optional().describe("Deadline date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
     },
   },
   async ({ content, targetPage, id, uuid, status, priority, scheduled, deadline }) => {

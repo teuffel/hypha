@@ -552,15 +552,27 @@
                         {:ok? true :value parsed}))
     :else {:ok? false}))
 
+;; HYPHA: only accept unambiguous ISO-8601 to make datetime properties
+;; (e.g. task scheduled/deadline) reliable. Bare `(js/Date. s)` silently
+;; mis-parses locale formats — "12.02.2026" becomes Dec 2026, and "/" vs "-"
+;; flip the timezone — producing a wrong date with no error. We reject anything
+;; that is not `YYYY-MM-DD` optionally followed by `THH:MM[:SS][.mmm][Z|±HH:MM]`
+;; (a space is allowed instead of `T`). Out-of-range ISO dates still fail via the
+;; isNaN check below.
+(def ^:private iso-datetime-re
+  #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(z|[+-]\d{2}:?\d{2})?)?$")
+
 (defn- parse-datetime-value
   [value]
   (cond
     (number? value) {:ok? true :value value}
-    (string? value) (let [date (js/Date. value)
-                          ms (.getTime date)]
-                      (if (js/isNaN ms)
+    (string? value) (let [s (string/trim value)]
+                      (if-not (re-matches iso-datetime-re s)
                         {:ok? false}
-                        {:ok? true :value ms}))
+                        (let [ms (.getTime (js/Date. s))]
+                          (if (js/isNaN ms)
+                            {:ok? false}
+                            {:ok? true :value ms}))))
     :else {:ok? false}))
 
 (defn- parse-keyword-value
@@ -606,7 +618,7 @@
       (let [{:keys [ok? value]} (parse-datetime-value value)]
         (if ok?
           {:ok? true :value value}
-          {:ok? false :message "datetime property expects an ISO date string"}))
+          {:ok? false :message "datetime property expects ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM] (ambiguous formats like DD.MM.YYYY or YYYY/MM/DD are rejected)"}))
 
       (= type :keyword)
       (let [{:keys [ok? value]} (parse-keyword-value value)]
