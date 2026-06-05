@@ -101,7 +101,7 @@ Read: `get_page`, `list_pages`, `search_blocks`, `list_tasks`, `list_tags`,
 `list_properties`.
 Create/update (RTC-synced): `upsert_page`, `upsert_block`, `upsert_blocks`,
 `upsert_task`, `upsert_tag`, `set_block_tags`, `upsert_property`,
-`set_block_properties`, `set_page_parent`.
+`set_block_properties`, `set_page_parent`, `rename_page`.
 Delete (RTC-synced): `remove_block`, `remove_page`, `remove_tag`,
 `remove_property`.
 

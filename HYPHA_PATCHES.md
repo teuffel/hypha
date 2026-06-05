@@ -1625,6 +1625,63 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #19 — `rename page` CLI command (+ MCP rename_page)
+
+- **ID**: HYPHA-PATCH-019
+- **Introduced**: Phase 1.7 follow-up (page rename), 2026-06-04
+- **Files**:
+  - `src/main/logseq/cli/command/upsert.cljs` (spec, entry, build + execute fns)
+  - `src/main/logseq/cli/commands.cljs` (build-action + execute dispatch cases)
+- **Patch form**:
+  ```clojure
+  ;; upsert.cljs
+  (def ^:private rename-page-spec
+    {:page {...} :id {:coerce :long} :uuid {...} :to {:desc "New page title"}})
+  ;; entry: (core/command-entry ["rename" "page"] :rename-page "Rename a page" rename-page-spec ...)
+  (defn build-rename-page-action [options repo] ...)        ; validates page id|uuid|name + --to
+  (defn- resolve-existing-page! [cfg repo {:keys [id uuid page]}] ...) ; never creates
+  (defn execute-rename-page [action config]
+    ... (transport/invoke cfg :thread-api/apply-outliner-ops
+          [repo [[:rename-page [page-uuid (:to action)]]] {}]) ...)
+
+  ;; commands.cljs
+  :rename-page (upsert-command/build-rename-page-action options repo)   ; build-action case
+  :rename-page (upsert-command/execute-rename-page action config)       ; execute case
+  ```
+- **Line count**: +~70 in upsert.cljs (spec + entry + 3 fns), +4 in commands.cljs.
+- **Rationale**: The CLI/MCP could create and delete pages but not rename one.
+  Renaming a page (its `:block/title`, derived `:block/name`, and references) is
+  the `:rename-page` outliner op, already used by the frontend
+  (`handler/page/rename!`). This exposes it as `logseq rename page
+  --page|--id|--uuid … --to <new title>` (reusing `:thread-api/apply-outliner-ops`
+  — no new thread-api) and an MCP `rename_page` tool. Identification never
+  auto-creates (rename of a missing page is an error). Works with literal-"/"
+  titles (Patch #15) since the op goes through the gated validation.
+- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
+  `rename_page` tool (Hypha-own tooling).
+- **Additive alternatives considered**:
+  - Fold into `upsert page --rename-to`: rejected — the user asked for a
+    discrete command; a dedicated `rename page` reads clearer and matches
+    `remove page`/`upsert page` grouping.
+  - New thread-api: unnecessary — `apply-outliner-ops :rename-page` exists.
+- **Break signal — structural**:
+  - `:rename-page` op is renamed/removed from `deps/outliner`'s op set, or the
+    `build-action`/`execute` dispatch in `commands.cljs` is restructured so the
+    new cases are dropped, or `upsert-command/entries` no longer aggregated.
+- **Break signal — semantic**:
+  - Upstream ships its own page-rename CLI command → reconcile/drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'execute-rename-page' src/main/logseq/cli/commands.cljs` ⇒ `1`
+    `rg -c '"rename" "page"' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
+  - Semantic, manual at triage: `execute-rename-page` must call
+    `:thread-api/apply-outliner-ops` with a `[:rename-page [uuid to]]` op.
+- **On break**:
+  - Structural → re-anchor the dispatch cases / entry / op name.
+  - Semantic upstream-merged → drop the command if upstream provides it.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
