@@ -1,12 +1,21 @@
 (ns frontend.fs-test
   (:require ["fs" :as fs-node]
             ["path" :as node-path]
-            [cljs.test :refer [is]]
+            [cljs.test :refer [is deftest]]
             [frontend.fs :as fs]
             [frontend.test.helper :as test-helper :include-macros true :refer [deftest-async]]
             [frontend.test.node-fixtures :as node-fixtures]
             [frontend.test.node-helper :as test-node-helper]
             [promesa.core :as p]))
+
+(deftest get-fs-treats-blank-dir-as-global
+  ;; Regression for the "failed to get fs backend" recycle bug: on a
+  ;; non-electron DB/RTC graph get-fs was called with dir="" and threw
+  ;; synchronously (escaping any surrounding p/catch). A blank dir means a
+  ;; global/native op (see config.cljs: `Use "" while writing global files`)
+  ;; and must be treated like a nil dir instead of throwing.
+  (is (= (fs/get-fs nil) (fs/get-fs ""))
+      "blank dir resolves to the same backend as nil dir (no throw)"))
 
 (deftest-async create-if-not-exists-creates-correctly
   {:before (node-fixtures/setup-get-fs!)
