@@ -37,7 +37,7 @@
       db-assets?
       memory-backend
 
-      (nil? dir) ;; global file op, use native backend
+      (string/blank? dir) ;; global file op (nil or ""), use native backend
       (get-native-backend)
 
       (string/starts-with? dir "memory://")
