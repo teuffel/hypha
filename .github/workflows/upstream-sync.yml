@@ -216,15 +216,18 @@ jobs:
             echo "### Action-Run"
             echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > issue-body.md
-          # Create the issue first; labels are applied best-effort afterwards so
-          # a missing/renamed label can never abort the report (the issue is the
-          # whole point of this step).
-          ISSUE_URL=$(gh issue create \
-            --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
-            --assignee ${{ github.repository_owner }} \
-            --body-file issue-body.md)
+          # Use the REST API (not `gh issue create`, which goes through the
+          # GraphQL createIssue mutation that fine-grained PATs cannot call —
+          # "Resource not accessible by personal access token"). REST accepts
+          # the fine-grained PAT and sets title/body/labels/assignee in one go.
+          TITLE="Upstream sync needs attention — $(date +%Y-%m-%d)"
+          ISSUE_URL=$(gh api repos/${{ github.repository }}/issues \
+            -f title="$TITLE" \
+            -F "body=@issue-body.md" \
+            -f "labels[]=upstream-sync" \
+            -f "labels[]=needs-triage" \
+            -f "assignees[]=${{ github.repository_owner }}" \
+            --jq '.html_url')
           echo "Opened $ISSUE_URL"
-          gh issue edit "$ISSUE_URL" --add-label "upstream-sync,needs-triage" \
-            || echo "WARN: could not add labels (create the labels in repo settings)"
         env:
           GH_TOKEN: ${{ secrets.HYPHA_SYNC_PAT }}
