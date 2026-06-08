@@ -13,6 +13,11 @@ name: Upstream Sync (weekly)
 #   - hypha-server/test:headless-auth runnable (M4 introduced).
 #   - HYPHA_PATCHES.md kept current (the anchor script reads it implicitly
 #     via the checks codified inside the script).
+#   - secrets.HYPHA_SYNC_PAT: a token with `workflow` scope. The merged
+#     hypha-staging branch carries upstream's .github/workflows/ changes, and
+#     the default GITHUB_TOKEN is forbidden from pushing workflow files — so
+#     the staging push needs a PAT (classic: repo + workflow; fine-grained:
+#     Contents RW + Workflows RW + Pull requests RW).
 
 on:
   schedule:
@@ -40,6 +45,10 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
+          # PAT (workflow scope) is persisted as origin's push credential so the
+          # hypha-staging push below can carry upstream's .github/workflows/
+          # changes; the default GITHUB_TOKEN cannot push workflow files.
+          token: ${{ secrets.HYPHA_SYNC_PAT }}
 
       - name: Configure git + upstream remote
         run: |
@@ -47,10 +56,6 @@ jobs:
           git fetch upstream master
           git config user.name  "hypha-sync-bot"
           git config user.email "sync-bot@hypha.local"
-
-      - name: Mirror upstream-master
-        run: |
-          git push origin refs/remotes/upstream/master:refs/heads/upstream-master --force
 
       - name: Recreate hypha-staging
         run: |
@@ -156,6 +161,7 @@ jobs:
           gh pr create \
             --base develop \
             --head hypha-staging \
+            --assignee ${{ github.repository_owner }} \
             --title "Weekly upstream sync — $(date +%Y-%m-%d)" \
             --body "Automatic merge of upstream/master into develop.
               - Merge:                 clean
@@ -168,7 +174,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Open issue on any failure
-        if: steps.merge.outputs.result == 'conflict'
+        if: failure()
+              || steps.merge.outputs.result == 'conflict'
               || steps.anchors.outputs.result == 'fail'
               || steps.smoke.outputs.result == 'fail'
               || steps.auth_smoke.outputs.result == 'fail'
@@ -197,7 +204,7 @@ jobs:
             echo
             echo "### Last 10 upstream commits"
             echo '```'
-            git log --oneline upstream/master ^develop | head -10
+            git log --oneline upstream/master ^develop 2>/dev/null | head -10 || true
             echo '```'
             echo
             echo "### Action-Run"
@@ -206,6 +213,7 @@ jobs:
           gh issue create \
             --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
             --label "upstream-sync,needs-triage" \
+            --assignee ${{ github.repository_owner }} \
             --body-file issue-body.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
