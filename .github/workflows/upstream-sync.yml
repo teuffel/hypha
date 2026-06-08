@@ -216,10 +216,15 @@ jobs:
             echo "### Action-Run"
             echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > issue-body.md
-          gh issue create \
+          # Create the issue first; labels are applied best-effort afterwards so
+          # a missing/renamed label can never abort the report (the issue is the
+          # whole point of this step).
+          ISSUE_URL=$(gh issue create \
             --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
-            --label "upstream-sync,needs-triage" \
             --assignee ${{ github.repository_owner }} \
-            --body-file issue-body.md
+            --body-file issue-body.md)
+          echo "Opened $ISSUE_URL"
+          gh issue edit "$ISSUE_URL" --add-label "upstream-sync,needs-triage" \
+            || echo "WARN: could not add labels (create the labels in repo settings)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
