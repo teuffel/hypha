@@ -18,6 +18,12 @@ name: Upstream Sync (weekly)
 #     the default GITHUB_TOKEN is forbidden from pushing workflow files — so
 #     the staging push needs a PAT (classic: repo + workflow; fine-grained:
 #     Contents RW + Workflows RW + Pull requests RW).
+#     ROTATION: this is a fine-grained PAT with a 1-year expiry. When it
+#     expires the scheduled run fails at the checkout/push step with an auth
+#     error (NOT a merge/build failure). GitHub emails the owner before
+#     expiry; on expiry, mint a new fine-grained PAT (Contents/Workflows/
+#     Pull requests RW on teuffel/hypha) and re-set it via:
+#       gh secret set HYPHA_SYNC_PAT --repo teuffel/hypha
 
 on:
   schedule:
