@@ -177,7 +177,7 @@ jobs:
 
               Review for semantic changes before merging."
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.HYPHA_SYNC_PAT }}
 
       - name: Open issue on any failure
         if: failure()
@@ -227,4 +227,4 @@ jobs:
           gh issue edit "$ISSUE_URL" --add-label "upstream-sync,needs-triage" \
             || echo "WARN: could not add labels (create the labels in repo settings)"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.HYPHA_SYNC_PAT }}
