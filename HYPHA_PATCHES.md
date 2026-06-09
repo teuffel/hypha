@@ -237,8 +237,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - A third encryption-mode hook gets introduced; we should evaluate.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs`
-    ⇒ `1`
+    `rg -c '(rum|hsx)/defc new-db-graph-inner' src/main/frontend/components/repo.cljs`
+    ⇒ `1` (upstream migrated the component from `rum/defc` to `hsx/defc`;
+    the anchor tolerates either framework form).
   - Semantic, manual at triage: the `cloud?` and `graph-e2ee?` initial
     values must read `hypha-config/hypha-mode?`.
 - **On break**:
