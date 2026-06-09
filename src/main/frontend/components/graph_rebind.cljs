@@ -19,7 +19,7 @@
             [lambdaisland.glogi :as log]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn- format-remote-updated-at
   [updated-at]
@@ -33,7 +33,7 @@
   (when (string? graph-id)
     (subs graph-id 0 (min 8 (count graph-id)))))
 
-(rum/defc graph-already-exists-dialog
+(hsx/defc graph-already-exists-dialog
   [{:keys [repo graph-name remote-graph-id remote-graph-e2ee? remote-updated-at]}]
   (let [updated-at-str (format-remote-updated-at remote-updated-at)
         short-id (short-graph-id remote-graph-id)]
