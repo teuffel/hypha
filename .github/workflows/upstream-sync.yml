@@ -18,6 +18,12 @@ name: Upstream Sync (weekly)
 #     the default GITHUB_TOKEN is forbidden from pushing workflow files — so
 #     the staging push needs a PAT (classic: repo + workflow; fine-grained:
 #     Contents RW + Workflows RW + Pull requests RW).
+#     ROTATION: this is a fine-grained PAT with a 1-year expiry. When it
+#     expires the scheduled run fails at the checkout/push step with an auth
+#     error (NOT a merge/build failure). GitHub emails the owner before
+#     expiry; on expiry, mint a new fine-grained PAT (Contents/Workflows/
+#     Pull requests RW on teuffel/hypha) and re-set it via:
+#       gh secret set HYPHA_SYNC_PAT --repo teuffel/hypha
 
 on:
   schedule:
@@ -171,7 +177,7 @@ jobs:
 
               Review for semantic changes before merging."
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.HYPHA_SYNC_PAT }}
 
       - name: Open issue on any failure
         if: failure()
@@ -210,10 +216,18 @@ jobs:
             echo "### Action-Run"
             echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > issue-body.md
-          gh issue create \
-            --title "Upstream sync needs attention — $(date +%Y-%m-%d)" \
-            --label "upstream-sync,needs-triage" \
-            --assignee ${{ github.repository_owner }} \
-            --body-file issue-body.md
+          # Use the REST API (not `gh issue create`, which goes through the
+          # GraphQL createIssue mutation that fine-grained PATs cannot call —
+          # "Resource not accessible by personal access token"). REST accepts
+          # the fine-grained PAT and sets title/body/labels/assignee in one go.
+          TITLE="Upstream sync needs attention — $(date +%Y-%m-%d)"
+          ISSUE_URL=$(gh api repos/${{ github.repository }}/issues \
+            -f title="$TITLE" \
+            -F "body=@issue-body.md" \
+            -f "labels[]=upstream-sync" \
+            -f "labels[]=needs-triage" \
+            -f "assignees[]=${{ github.repository_owner }}" \
+            --jq '.html_url')
+          echo "Opened $ISSUE_URL"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.HYPHA_SYNC_PAT }}
