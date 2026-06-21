@@ -8,6 +8,8 @@ Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targe
 - Subdirectories with their own `AGENTS.md` (read recursively before editing): `src/main/logseq/cli/`, `clj-e2e/`, `cli-e2e/`, `libs/guides/`.
 
 ## Build, Test, and Development Commands
+- **Run build/test/lint inside the dev container** (canonical path; the host needs only Docker + Compose). `bin/dev <command>` forwards into the `Dockerfile.dev` image whose toolchain is pinned to CI (Node 24, Java 21, Clojure CLI, Babashka, pnpm). Examples: `bin/dev bb dev:lint-and-test`, `bin/dev bb dev:test -r <regex>`, `bin/dev bin/hypha-build`. The first run builds the image (~5 min) and installs deps; later runs are instant. See `Dockerfile.dev` and `docker-compose.dev.yml`.
+  - Why this matters for tests: the `:test` / `:test-no-worker` builds import `node:sqlite`, a Node 22.5+ built-in. On a host with older Node (e.g. 20.x), `pnpm cljs:run-test` / `node static/tests.js` fail at module load with `No such built-in module: node:sqlite` **before any test runs** — an environment issue, not a code failure. Run tests in the container (Node 24), not on an older-Node host.
 - `bb dev:lint-and-test` runs linters and unit tests; use it before submitting changes.
 - `bb dev:test -v <namespace/testcase-name>` runs a single unit test (example: `bb dev:test -v logseq.some-test/foo`). Each invocation recompiles `static/tests.js` first; for tight loops run `clojure -M:test watch test` once and then `node static/tests.js -v <ns/test>` (or `-r <regex>`, `-i focus`, etc. — see `docs/dev-practices.md`).
 - App E2E tests live in `clj-e2e/`; run from that directory with `bb test` (or `bb -f clj-e2e/bb.edn test` from repo root).
@@ -33,7 +35,7 @@ Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targe
 - Reuse `src/resources/dicts/en.edn` keys only on exact semantic owner + textual role match. Follow `docs/i18n-key-naming.md` for new or renamed keys. Add English source text in `en.edn`; add non-English entries only when providing real translations; keep complete sentences whole; use placeholders for plain dynamic text; run `bb lang:validate-translations`, `bb lang:lint-hardcoded`, and `bb lang:format-dicts` as needed.
 
 ## Testing Guidelines
-- Unit tests live in `src/test/` and are runnable via `bb dev:lint-and-test`.
+- Unit tests live in `src/test/` and are runnable via `bb dev:lint-and-test` (run it inside the dev container — see Build/Test commands; the test build needs Node 22.5+ for `node:sqlite`).
 - A namespace's tests live in the sibling namespace with a `-test` suffix (`frontend.db.model` → `frontend.db.model-test`).
 - See `docs/dev-practices.md` for repl-driven, autorun, database, performance, and async test helpers.
 
