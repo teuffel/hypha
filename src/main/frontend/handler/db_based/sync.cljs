@@ -204,12 +204,16 @@
     (state/<invoke-db-worker :thread-api/sync-app-state payload)))
 
 (defn <rtc-start!
-  [repo & {:keys [_stop-before-start?] :as _opts}]
+  [repo & {:keys [stop-before-start?]}]
   (p/let [_ (<wait-for-db-worker-ready!)]
     (if (should-start-rtc? repo)
       (do
-        (log/info :db-sync/start {:repo repo})
-        (p/let [_ (<sync-auth-state-to-db-worker!)]
+        (log/info :db-sync/start {:repo repo :stop-before-start? stop-before-start?})
+        ;; A manual force-resync passes :stop-before-start? true so the worker
+        ;; drops the existing client first; otherwise start! short-circuits via
+        ;; active-client-for? (WS in CONNECTING/OPEN) and never reconnects.
+        (p/let [_ (when stop-before-start? (<rtc-stop!))
+                _ (<sync-auth-state-to-db-worker!)]
           (state/<invoke-db-worker :thread-api/db-sync-start repo)))
       (do
         (log/info :db-sync/skip-start {:repo repo :reason :graph-not-in-remote-list

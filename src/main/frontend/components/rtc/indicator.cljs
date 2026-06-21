@@ -198,7 +198,12 @@
                rtc-state (assoc :rtc-state rtc-state))
              pprint/pprint
              with-out-str)]])
-     (when-not (= rtc-state :open)
+     ;; Show the manual sync trigger when the connection is down, but also when
+     ;; it looks "open" yet local changes are stuck (pending-local-ops > 0 and
+     ;; not draining). Without the second case the button is hidden exactly when
+     ;; the user needs to kick a stalled push.
+     (when (or (not= rtc-state :open)
+               (pos? (or pending-local-ops 0)))
        [:div.mt-4
         (shui/button {:variant :default
                       :size :sm
