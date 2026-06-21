@@ -25,6 +25,13 @@
 (def ^:private reconnect-jitter-ms 250)
 (def ^:private ws-stale-kill-interval-ms 60000)
 (def ^:private ws-stale-timeout-ms 600000)
+;; Watchdog for a wedged-but-open WS: when a tx/batch/ok or pull/ok is lost, the
+;; push pipeline stalls (inflight never clears or local-tx never catches up) yet
+;; nothing self-heals, because the stale detector above only fires after total
+;; silence (and unrelated server messages keep the socket "fresh"). Force a
+;; reconnect when there are pending local txs that make no progress for this long.
+(def ^:private sync-wedge-check-interval-ms 30000)
+(def ^:private sync-wedge-timeout-ms 45000)
 (def fail-fast sync-util/fail-fast)
 
 (defonce *repo->latest-remote-tx sync-apply/*repo->latest-remote-tx)
@@ -83,10 +90,17 @@
   [client users]
   (sync-presence/update-online-users! broadcast-rtc-state! client users))
 
-(defn- clear-inflight!
+(defn- clear-in-flight-sync-state!
+  "Reset protocol state for in-flight ops that are lost when the socket goes
+  away: the unacked tx batch and the pending-pull dedup marker. Resetting
+  pending-pull-since matters because request-pull! dedupes on it, so without
+  this a post-reconnect pull would be suppressed and the client could never
+  catch up (and thus never flush its pending local txs)."
   [client]
   (when-let [*inflight (:inflight client)]
-    (reset! *inflight [])))
+    (reset! *inflight []))
+  (when-let [*pending (:pending-pull-since client)]
+    (reset! *pending nil)))
 
 (defn- ws-base-url
   []
@@ -126,6 +140,13 @@
 (defn- clear-stale-ws-loop-timer!
   [client]
   (when-let [*timer (:stale-kill-timer client)]
+    (when-let [timer @*timer]
+      (js/clearInterval timer)
+      (reset! *timer nil))))
+
+(defn- clear-sync-watchdog-timer!
+  [client]
+  (when-let [*timer (:sync-watchdog-timer client)]
     (when-let [timer @*timer]
       (js/clearInterval timer)
       (reset! *timer nil))))
@@ -187,6 +208,8 @@
    :last-sync-error (atom nil)
    :reconnect (atom {:attempt 0 :timer nil})
    :stale-kill-timer (atom nil)
+   :sync-watchdog-timer (atom nil)
+   :sync-progress (atom nil)
    :last-ws-message-ts (atom (common-util/time-ms))
    :online-users (atom [])
    :ws-state (atom :closed)})
@@ -231,7 +254,8 @@
         (fn [_]
           (log/info :db-sync/ws-closed {:repo repo})
           (clear-stale-ws-loop-timer! client)
-          (clear-inflight! client)
+          (clear-sync-watchdog-timer! client)
+          (clear-in-flight-sync-state! client)
           (update-online-users! client [])
           (set-ws-state! client :closed)
           (schedule-reconnect! repo client url :close))))
@@ -268,7 +292,8 @@
                            (do
                              (log/warn :db-sync/ws-stale-closed {:repo repo :ready-state (ready-state ws)})
                              (clear-stale-ws-loop-timer! current)
-                             (clear-inflight! current)
+                             (clear-sync-watchdog-timer! current)
+                             (clear-in-flight-sync-state! current)
                              (update-online-users! current [])
                              (set-ws-state! current :closed)
                              (schedule-reconnect! repo current url :stale-closed))))))
@@ -276,9 +301,63 @@
         (reset! *timer timer))))
   client)
 
+(defn- sync-progressed?
+  "Progress means the push pipeline did something useful since the last tick:
+  local-tx advanced (a pull or tx batch was acked) or the pending count dropped."
+  [snapshot local-tx pending]
+  (or (nil? snapshot)
+      (and (number? local-tx)
+           (number? (:local-tx snapshot))
+           (> local-tx (:local-tx snapshot)))
+      (< pending (:pending snapshot))))
+
+(defn- start-sync-watchdog-loop
+  "Force a reconnect when pending local txs make no progress for too long while
+  the WS is open. Closing the socket routes through onclose, which resets the
+  in-flight sync state and schedules a reconnect that re-flushes from a clean
+  state. No-op while offline, paused, or fully synced."
+  [client ws]
+  (let [repo (:repo client)
+        graph-id (:graph-id client)
+        *snap (:sync-progress client)]
+    (clear-sync-watchdog-timer! client)
+    (when-let [*timer (:sync-watchdog-timer client)]
+      (reset! *snap nil)
+      (let [timer (js/setInterval
+                   (fn []
+                     (when-let [current @worker-state/*db-sync-client]
+                       (when (and (= repo (:repo current))
+                                  (= graph-id (:graph-id current))
+                                  (identical? ws (:ws current)))
+                         (let [pending (or (client-op/get-pending-local-tx-count repo) 0)
+                               local-tx (client-op/get-local-tx repo)
+                               now (common-util/time-ms)
+                               snapshot @*snap]
+                           (cond
+                             (or (zero? pending)
+                                 (not (worker-state/online?))
+                                 (not (ws-open? ws))
+                                 (sync-apply/upload-stopped? repo))
+                             (reset! *snap {:local-tx local-tx :pending pending :at now})
+
+                             (sync-progressed? snapshot local-tx pending)
+                             (reset! *snap {:local-tx local-tx :pending pending :at now})
+
+                             (>= (- now (:at snapshot)) sync-wedge-timeout-ms)
+                             (do
+                               (log/warn :db-sync/ws-wedge-timeout
+                                         {:repo repo :pending pending :local-tx local-tx
+                                          :wedged-ms (- now (:at snapshot))})
+                               (reset! *snap {:local-tx local-tx :pending pending :at now})
+                               (try (.close ws) (catch :default _ nil))))))))
+                   sync-wedge-check-interval-ms)]
+        (reset! *timer timer))))
+  client)
+
 (defn- stop-client!
   [client]
   (clear-stale-ws-loop-timer! client)
+  (clear-sync-watchdog-timer! client)
   (when-let [reconnect (:reconnect client)]
     (clear-reconnect-timer! reconnect))
   (when-let [ws (:ws client)]
@@ -317,7 +396,8 @@
                 :current-client-f current-client
                 :broadcast-rtc-state!-f broadcast-rtc-state!
                 :fail-fast-f fail-fast})))
-      (close-stale-ws-loop updated ws url))))
+      (close-stale-ws-loop updated ws url)
+      (start-sync-watchdog-loop updated ws))))
 
 (defn stop!
   []
