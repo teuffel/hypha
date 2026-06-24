@@ -261,6 +261,27 @@
                    :db/index true}]
                  {:fix-db? true})))
 
+(defn- fix-dangling-block-parents!
+  "Repair blocks whose :block/parent points at a since-deleted (non-existent) entity.
+   Such a dangling ref makes (:block/parent entity) materialize to nil, which then
+   makes block serialization emit `:block/parent nil` and crash the renderer mirror
+   transact (\"Cannot store nil as a value\"). Malli validation doesn't flag it (the
+   ref is a valid eid number), so repair it here: re-parent to the block's page when
+   available, otherwise drop the dangling ref."
+  [conn]
+  (let [db @conn
+        tx-data (->> (d/datoms db :aevt :block/parent)
+                     (keep (fn [d]
+                             (let [e (:e d)
+                                   parent-eid (:v d)]
+                               (when (nil? (d/entity db parent-eid)) ; target entity doesn't exist
+                                 (if-let [page-id (:db/id (:block/page (d/entity db e)))]
+                                   [:db/add e :block/parent page-id]
+                                   [:db/retract e :block/parent parent-eid]))))))]
+    (when (seq tx-data)
+      (prn :debug :fix-dangling-block-parents tx-data)
+      (ldb/transact! conn tx-data {:fix-db? true}))))
+
 (defn- validate-db-result
   [db]
   (let [{:keys [errors datom-count entities]} (db-validate/validate-db db)
@@ -292,7 +313,8 @@
     (fix-icon-wrong-type! conn)
     (db-migrate/ensure-built-in-data-exists! conn)
     (fix-non-closed-values! conn)
-    (fix-num-prefix-db-idents! conn))
+    (fix-num-prefix-db-idents! conn)
+    (fix-dangling-block-parents! conn))
 
   (let [{:keys [errors datom-count entities invalid-entity-ids]}
         (if fix
