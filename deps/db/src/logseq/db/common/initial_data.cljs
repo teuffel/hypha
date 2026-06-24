@@ -155,7 +155,12 @@
                           [k v'])))
                     e)))
         m (->> (f entity)
-               (into {}))]
+               (into {})
+               ;; A dangling ref (e.g. :block/parent pointing at a since-deleted
+               ;; block) materializes to nil. Never emit nil-valued attrs: datascript
+               ;; rejects nil values, so a serialized block carrying `:block/parent nil`
+               ;; crashes the renderer mirror transact ("Cannot store nil as a value").
+               (common-util/remove-nils-non-nested))]
     (-> m
         (with-raw-title entity)
         (assoc :db/id (:db/id entity)))))
