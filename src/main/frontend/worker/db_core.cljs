@@ -854,7 +854,11 @@
   (when-let [conn (worker-state/get-datascript-conn repo)]
     (->> (db-reference/get-linked-references @conn id)
          :ref-blocks
-         (map (fn [b] (assoc (into {} b) :db/id (:db/id b)))))))
+         ;; remove-nils-non-nested: a dangling ref (deleted target) materializes to nil
+         ;; and datascript rejects nil on the renderer mirror transact.
+         (map (fn [b] (-> (into {} b)
+                          common-util/remove-nils-non-nested
+                          (assoc :db/id (:db/id b))))))))
 
 (def-thread-api :thread-api/get-block-refs-count
   [repo id]
@@ -1040,6 +1044,9 @@
       (->> (ldb/get-block-parents @conn block-id {:depth (or depth 3)})
            (map (fn [b]
                   (-> (into {} b)
+                      ;; drop nil-valued attrs (e.g. a dangling :block/parent) so the
+                      ;; renderer mirror transact can't crash on a nil value.
+                      common-util/remove-nils-non-nested
                       (assoc :db/id (:db/id b)
                              :block/title (:block/title b)))))))))
 
