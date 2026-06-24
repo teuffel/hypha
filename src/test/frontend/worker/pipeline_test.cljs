@@ -355,6 +355,31 @@
         ;; return global fn back to previous behavior
         (ldb/register-transact-pipeline-fn! identity)))))
 
+(deftest transact-pipeline-drops-spurious-nil-block-parent-test
+  ;; Regression: during a db-sync rebase replay, a pipeline step (e.g. tag-template
+  ;; auto-insert / ensure-query for a #Query block inside an applied template) can
+  ;; re-assert an existing block map that carries a spurious `:block/parent nil`.
+  ;; `transact-pipeline` applies the computed extra-tx-data via a raw `d/with`, which
+  ;; previously crashed with "Cannot store nil as a value". The pipeline now strips
+  ;; nil-valued map entries just like `logseq.db/transact!` does for every other tx.
+  (let [conn (db-test/create-conn-with-blocks
+              [{:page {:block/title "page1"}
+                :blocks [{:block/title "parent"
+                          :build/children [{:block/title "child"}]}]}])
+        parent (db-test/find-block-by-content @conn "parent")
+        child (db-test/find-block-by-content @conn "child")
+        spurious-item {:db/id (:db/id child)
+                       :block/title "child"
+                       :block/parent nil}]
+    (with-redefs [worker-pipeline/compute-extra-tx-data (constantly [spurious-item])]
+      (let [tx-report (d/with @conn [[:db/add (:db/id child) :block/title "child edited"]])
+            result (worker-pipeline/transact-pipeline tx-report)]
+        (is (some? result)
+            "transact-pipeline tolerates a spurious nil :block/parent instead of crashing in d/with")
+        (is (= (:db/id parent)
+               (:db/id (:block/parent (d/entity (:db-after result) (:db/id child)))))
+            "the spurious nil is dropped, so the block keeps its real parent")))))
+
 (deftest import-tx-skips-property-history-recording-test
   (let [conn (db-test/create-conn-with-blocks
               {:pages-and-blocks [{:page {:block/title "page1"}

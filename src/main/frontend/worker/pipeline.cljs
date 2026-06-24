@@ -466,7 +466,7 @@
                     tx-data)]
       (distinct tx-data'))))
 
-(defn- compute-extra-tx-data
+(defn compute-extra-tx-data
   [tx-report]
   (let [{:keys [db-before db-after tx-data tx-meta]} tx-report
         db db-after
@@ -528,7 +528,12 @@
                  (:reverse? tx-meta)
                  (:transact-remote? tx-meta))
      (ensure-journal-page-protected-attrs-not-updated! tx-report)
-     (let [extra-tx-data (compute-extra-tx-data tx-report)
+     (let [;; Pipeline steps (e.g. tag-template auto-insert, ensure-query) can, during a
+           ;; db-sync rebase replay, re-assert an existing block map that carries a spurious
+           ;; `:block/parent nil`. `d/with` applies this extra-tx-data directly and would
+           ;; reject the nil ("Cannot store nil as a value"), so strip nil-valued map entries
+           ;; here just like `logseq.db/transact!` does for every other transaction.
+           extra-tx-data (common-util/fast-remove-nils (compute-extra-tx-data tx-report))
            tx-report* (if (seq extra-tx-data)
                         (let [result (d/with db-after extra-tx-data)]
                           (assoc tx-report
