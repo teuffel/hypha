@@ -732,7 +732,7 @@ DROP TRIGGER IF EXISTS blocks_au;
         (when uuid
           {:id (str uuid)
            :page (str (or (:block/uuid page) uuid))
-           :title (if (page-or-object? block) title (sanitize title))
+           :title (sanitize title)
            :vector-title (block->vector-title context block title)}))
       (catch :default e
         (prn "Error: failed to run block->index on block " (:db/id block))
