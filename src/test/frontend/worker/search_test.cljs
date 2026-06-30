@@ -535,6 +535,24 @@
           (is (= (str page-id) (:id indexed)))
           (is (= "Artificial Intelligence ai" (:title indexed))))))))
 
+(deftest block-index-sanitizes-tagged-object-titles
+  (testing "tagged objects (e.g. tasks) get accents removed in the index, like blocks and the query, so umlaut search matches"
+    (let [task-id #uuid "00000000-0000-0000-0000-000000000236"
+          page-id #uuid "00000000-0000-0000-0000-000000000237"
+          task {:db/id 1
+                :block/uuid task-id
+                :block/title "Änderungsausschuss planen"
+                :block/tags [{:db/id 2 :db/ident :logseq.class/Task}]
+                :block/page {:block/uuid page-id}}]
+      (with-redefs [ldb/page? (constantly false)
+                    ldb/object? (fn [entity] (boolean (seq (:block/tags entity))))
+                    ldb/journal? (constantly false)
+                    ldb/closed-value? (constantly false)
+                    ldb/hidden? (constantly false)
+                    ldb/get-title-with-parents (fn [entity] (:block/title entity))]
+        (let [indexed (search/block->index task)]
+          (is (= "Anderungsausschuss planen" (:title indexed))))))))
+
 (deftest block-index-does-not-generate-vector-embedding
   (testing "desktop vector embeddings are supplied by the platform embedding backend"
     (let [block-id #uuid "00000000-0000-0000-0000-000000000238"

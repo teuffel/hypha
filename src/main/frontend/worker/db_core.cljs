@@ -70,7 +70,7 @@
 (def search-db-version
   "Current search index version, stored in PRAGMA user_version.
   Bump to force a rebuild when the index format changes."
-  2)
+  3)
 (def ^:private recycle-gc-kv :logseq.kv/recycle-last-gc-at)
 
 (def ^:private search-index-build-batch-size 200)
