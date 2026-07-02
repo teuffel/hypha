@@ -1805,6 +1805,109 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #22 — Web download binds the worker runtime to the target graph
+
+- **ID**: HYPHA-PATCH-022
+- **Introduced**: Phase 1.8 follow-up (fresh-session download regression),
+  2026-07-02
+- **File**: `src/main/frontend/handler/db_based/sync.cljs`
+  (`<ensure-download-runtime-bound!`)
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL
+  (defn- <ensure-download-runtime-bound!
+    [repo]
+    (if (util/electron?)
+      (p/let [_ (persist-db/<fetch-init-data repo {:sync-download-graph? true})
+              _ (<sync-auth-state-to-db-worker!)]
+        nil)
+      (p/resolved nil)))
+
+  ;; HYPHA — web branch binds too, instead of no-op:
+  (p/let [_ (state/<invoke-db-worker :thread-api/create-or-open-db
+                                     repo {:sync-download-graph? true})]
+    nil)
+  ```
+- **Line count**: +3 logic lines (replacing `(p/resolved nil)`) plus a
+  13-line explanatory comment.
+- **Rationale**: The browser db-worker's shared-service (tab master
+  election via Web Locks, `worker/shared_service.cljs`) is created ONLY
+  when `:thread-api/create-or-open-db` goes through the worker proxy
+  (`db_core.cljs/build-proxy-object` → `<init-service!`). Stock Logseq
+  guarantees this happens at boot: with zero local repos it auto-creates
+  the demo graph, otherwise `restore-and-setup!` opens the startup repo.
+  Patch #14 deliberately skips the demo graph in Hypha mode, so a fresh
+  browser session (or one whose OPFS was evicted — the
+  `:opfs-storage-may-be-cleared` case) boots with NO service and
+  `shared-service/*master-client?` stuck at its `defonce` default
+  `false`. The first remote-graph download then executes locally in that
+  never-elected worker; `prepare-import!` calls the raw
+  `create-or-open-db` thread-api fn whose `start-db!` silently no-ops
+  behind `(when @shared-service/*master-client? ...)`, and the download
+  dies at `:stage :prepare-import` with
+  `:db-sync/missing-field {:field :datascript-conn}` — Hypha's primary
+  onboarding path (fresh device → download own graph) was broken.
+
+  The fix restores the upstream invariant "a service exists before any
+  download": route one `create-or-open-db` through the proxy for the
+  download target, which creates the service and runs master election.
+  `:sync-download-graph? true` skips initial-data seeding and migration;
+  `prepare-import!` (reset? = true) unlinks and recreates the db anyway.
+  If another tab already owns the target graph, this tab becomes slave
+  and the download invoke is forwarded to the master — better than the
+  old behavior, where two service-less tabs would both run downloads
+  against the same OPFS pool. Electron branch unchanged.
+
+- **Companion change (NOT a patch)**: none. Uses
+  `state/<invoke-db-worker` directly instead of `persist-db/<new` to
+  avoid `<new`'s trailing `<export-db` side effect.
+
+- **Additive alternatives considered**:
+  - Worker-side fallback ("no service ⇒ act as master" in `start-db!`):
+    rejected — without an election nothing guarantees exclusivity; a
+    second tab could already own the graph's OPFS pool.
+  - Gate the bind on "no graph open yet" (`(nil? (state/get-current-repo))`):
+    rejected — a stale localStorage `:git/current-repo` survives an OPFS
+    wipe, so the signal is unreliable in exactly the failing scenario;
+    the unconditional bind is idempotent for the same graph and matches
+    the Electron branch semantics.
+  - Revert Patch #14's demo-graph skip: rejected — reintroduces the
+    tutorial-content onboarding problem Patch #14 exists to fix.
+  - Submit upstream: plausible — the same hole exists upstream for any
+    flow that downloads before ever opening a graph; upstream just never
+    reaches it because of the demo-graph fallback.
+
+- **Break signal — structural**:
+  - `<ensure-download-runtime-bound!` is renamed/removed, or
+    `<rtc-download-graph!` stops calling it before
+    `:thread-api/db-sync-download-graph-by-id`.
+  - `:thread-api/create-or-open-db` stops being the proxy's
+    service-(re)init trigger in `db_core.cljs/build-proxy-object`.
+- **Break signal — semantic**:
+  - Upstream moves master election out of the create-or-open-db proxy
+    path (e.g. elects at worker boot). Then the bind becomes redundant —
+    verify the fresh-session download story, then drop the patch.
+  - `start-db!` stops gating db creation on
+    `shared-service/*master-client?`.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-022' src/main/frontend/handler/db_based/sync.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the non-electron branch of
+    `<ensure-download-runtime-bound!` must invoke
+    `:thread-api/create-or-open-db` with `{:sync-download-graph? true}`.
+  - Regression guard: tests
+    `rtc-download-graph-binds-web-runtime-before-download-test` and
+    `rtc-download-graph-delegates-to-worker-download-api-test` in
+    `frontend.handler.db-based.sync-test`.
+- **On break**:
+  - Structural → re-anchor the bind at whatever precedes the download
+    invoke.
+  - Semantic upstream-merged → remove the web branch and re-verify:
+    fresh browser profile → login → download remote graph must succeed.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)
