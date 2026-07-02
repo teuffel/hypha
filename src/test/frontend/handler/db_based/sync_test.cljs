@@ -451,6 +451,7 @@
            (-> (p/with-redefs [db-sync/http-base (fn [] "http://base")
                                user-handler/task--ensure-id&access-token (fn [resolve _reject]
                                                                            (resolve true))
+                               util/electron? (fn [] false)
                                state/<invoke-db-worker (fn [& args]
                                                          (swap! worker-calls conj args)
                                                          (p/resolved :ok))
@@ -458,8 +459,9 @@
                                state/pub-event! (fn [& _] nil)]
                  (db-sync/<rtc-download-graph! "demo-graph" "graph-1" false))
                (p/then (fn [_]
-                         (is (= 1 (count @worker-calls)))
-                         (let [[op graph graph-uuid graph-e2ee?] (first @worker-calls)]
+                         ;; HYPHA-PATCH-022: web binds the runtime first, then downloads.
+                         (is (= 2 (count @worker-calls)))
+                         (let [[op graph graph-uuid graph-e2ee?] (second @worker-calls)]
                            (is (= :thread-api/db-sync-download-graph-by-id op))
                            (is (string/ends-with? graph "demo-graph"))
                            (is (= "graph-1" graph-uuid))
@@ -541,7 +543,12 @@
                           (is false (str error))
                           (done)))))))
 
-(deftest rtc-download-graph-skips-runtime-rebind-outside-electron-test
+;; HYPHA-PATCH-022: on web, the download must bind the worker's
+;; shared-service to the target graph (via :thread-api/create-or-open-db
+;; through the proxy) BEFORE invoking the download. Without it, a session
+;; that never opened a graph has no service/master election and the
+;; download fails at :prepare-import with missing-field :datascript-conn.
+(deftest rtc-download-graph-binds-web-runtime-before-download-test
   (async done
          (let [runtime-rebind-calls (atom [])
                worker-calls (atom [])]
@@ -560,9 +567,14 @@
                                state/set-state! (fn [& _] nil)]
                  (db-sync/<rtc-download-graph! "db1" "graph-1" true))
                (p/then (fn [_]
+                         ;; Electron-only fetch-init-data path stays skipped on web.
                          (is (empty? @runtime-rebind-calls))
+                         (is (= [:thread-api/create-or-open-db
+                                 "logseq_db_db1"
+                                 {:sync-download-graph? true}]
+                                (first @worker-calls)))
                          (is (= :thread-api/db-sync-download-graph-by-id
-                                (ffirst @worker-calls)))
+                                (first (second @worker-calls))))
                          (done)))
                (p/catch (fn [error]
                           (is false (str error))
