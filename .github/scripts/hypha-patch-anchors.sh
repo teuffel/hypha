@@ -46,7 +46,7 @@ check "patch-3: logged-in? defn exists in handler/user.cljs" \
 
 # === Patch #4 ===
 check "patch-4: new-db-graph-inner component exists in components/repo.cljs" \
-      "rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
+      "rg -c '(rum|hsx)/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
       "1"
 
 # === Patch #5 ===

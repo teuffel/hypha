@@ -1,0 +1,11 @@
+{
+  "name": "@hypha/clipper",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "description": "Firefox and Thunderbird clippers that post into Hypha's capture inbox",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node build.mjs"
+  }
+}

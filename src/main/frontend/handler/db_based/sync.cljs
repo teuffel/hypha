@@ -141,7 +141,21 @@
     (p/let [_ (persist-db/<fetch-init-data repo {:sync-download-graph? true})
             _ (<sync-auth-state-to-db-worker!)]
       nil)
-    (p/resolved nil)))
+    ;; HYPHA-PATCH-022: bind the web runtime to the download target too.
+    ;; Routing :thread-api/create-or-open-db through the worker proxy
+    ;; creates the shared-service for `repo` and runs the tab master
+    ;; election BEFORE the worker-side download calls the raw
+    ;; create-or-open-db fn (start-db!), which silently no-ops on
+    ;; non-master clients. Without this, a session that never opened a
+    ;; graph (Hypha onboarding skips the demo graph per Patch #14; same
+    ;; for wiped-OPFS sessions) still has *master-client? = false and the
+    ;; download dies at :prepare-import with :db-sync/missing-field
+    ;; :datascript-conn. :sync-download-graph? true skips initial-data
+    ;; seeding + migration; prepare-import! (reset? = true) unlinks and
+    ;; recreates the db anyway.
+    (p/let [_ (state/<invoke-db-worker :thread-api/create-or-open-db
+                                       repo {:sync-download-graph? true})]
+      nil)))
 
 (defn- <ensure-user-rsa-keys-on-server!
   [{:keys [server-rsa-keys-exists?]}]
@@ -204,12 +218,16 @@
     (state/<invoke-db-worker :thread-api/sync-app-state payload)))
 
 (defn <rtc-start!
-  [repo & {:keys [_stop-before-start?] :as _opts}]
+  [repo & {:keys [stop-before-start?]}]
   (p/let [_ (<wait-for-db-worker-ready!)]
     (if (should-start-rtc? repo)
       (do
-        (log/info :db-sync/start {:repo repo})
-        (p/let [_ (<sync-auth-state-to-db-worker!)]
+        (log/info :db-sync/start {:repo repo :stop-before-start? stop-before-start?})
+        ;; A manual force-resync passes :stop-before-start? true so the worker
+        ;; drops the existing client first; otherwise start! short-circuits via
+        ;; active-client-for? (WS in CONNECTING/OPEN) and never reconnects.
+        (p/let [_ (when stop-before-start? (<rtc-stop!))
+                _ (<sync-auth-state-to-db-worker!)]
           (state/<invoke-db-worker :thread-api/db-sync-start repo)))
       (do
         (log/info :db-sync/skip-start {:repo repo :reason :graph-not-in-remote-list

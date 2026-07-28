@@ -85,6 +85,7 @@ deps/db-sync/data
 *.map
 /dist/db-worker-node.js
 /dist/build/
+/dist/cli-package/
 /dist/db-worker-node-assets.json
 /dist/*.wasm
 /dist/cljs-runtime/
@@ -105,3 +106,5 @@ clj-e2e/.clj-kondo/imports
 /hypha-server/test-results/
 /hypha-server/playwright-report/
 /hypha-server/test/playwright/.state/
+# Assembled clipper add-ons (build.mjs output)
+/hypha-clipper/dist/

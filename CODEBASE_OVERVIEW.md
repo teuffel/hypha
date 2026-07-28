@@ -101,6 +101,7 @@ Everything above describes upstream Logseq and is preserved verbatim for clean u
   - `init.cljs` — bootstraps the Hypha layer at app start.
   - `plugin_init.cljs` — runtime monkey-patch that rewrites plugin asset URLs through the Hypha CORP proxy (no upstream `LSPlugin.core` patch).
   - `asset_cache.cljs` — background LRU eviction of cached asset binaries via `navigator.storage.estimate` + IndexedDB cleanup.
+  - `capture.cljs` — quick capture from the PWA share target / bookmarklet: parses the `hypha-*` URL params and dispatches upstream's `:editor/quick-capture`.
 - `hypha-server/` — the TypeScript reverse-proxy that fronts the upstream `db-sync` node-adapter on port 3030: access-code auth + JWT/JWKS, plugin-marketplace caching, plugin-asset CORP injection, and pass-through of `/sync/`, `/graphs/`, `/assets/`, `/e2ee/` routes. Tests live in `hypha-server/test/`.
 - `docs/hypha/` — operator and architecture docs (self-hosting, operations, phase plans).
 - `bin/hypha-*` — build entry points (`bin/hypha-build`, `--release` for production).

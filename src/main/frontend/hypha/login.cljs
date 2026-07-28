@@ -19,8 +19,9 @@
             [clojure.string :as string]
             [frontend.context.i18n :refer [t]]
             [frontend.hypha.init :as hypha-init]
-            [logseq.shui.ui :as shui]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]
+            [logseq.shui.hooks :as hooks]
+            [logseq.shui.ui :as shui]))
 
 (defn- <login
   "POST /auth/login with the supplied access code. Returns the cljs-http
@@ -30,21 +31,19 @@
              {:json-params {:code code}
               :with-credentials? true}))
 
-(rum/defcs modal-inner < (rum/local "" ::code)
-                         (rum/local nil ::error)
-                         (rum/local false ::submitting?)
-  [state]
-  (let [*code (::code state)
-        *error (::error state)
-        *submitting? (::submitting? state)
+(hsx/defc modal-inner
+  []
+  (let [[code set-code!] (hooks/use-state "")
+        [error set-error!] (hooks/use-state nil)
+        [submitting? set-submitting!] (hooks/use-state false)
         submit!
         (fn submit! []
-          (when-not (or @*submitting? (string/blank? @*code))
-            (reset! *submitting? true)
-            (reset! *error nil)
+          (when-not (or submitting? (string/blank? code))
+            (set-submitting! true)
+            (set-error! nil)
             (go
-              (let [resp (<! (<login @*code))]
-                (reset! *submitting? false)
+              (let [resp (<! (<login code))]
+                (set-submitting! false)
                 (cond
                   (= 200 (:status resp))
                   (when-let [id-token (get-in resp [:body :id-token])]
@@ -52,10 +51,10 @@
                     (shui/dialog-close!))
 
                   (= 401 (:status resp))
-                  (reset! *error (t :hypha.login/invalid-code))
+                  (set-error! (t :hypha.login/invalid-code))
 
                   :else
-                  (reset! *error (t :hypha.login/network-error)))))))]
+                  (set-error! (t :hypha.login/network-error)))))))]
     [:form.cp__hypha-login.flex.flex-col.gap-3.p-2
      {:on-submit (fn [e]
                    (.preventDefault e)
@@ -63,15 +62,15 @@
      (shui/input
       {:type "password"
        :autoFocus true
-       :disabled @*submitting?
-       :value @*code
-       :on-change #(reset! *code (.. % -target -value))
+       :disabled submitting?
+       :value code
+       :on-change #(set-code! (.. % -target -value))
        :placeholder (t :hypha.login/access-code-placeholder)})
-     (when @*error
-       [:div.text-sm.text-error @*error])
+     (when error
+       [:div.text-sm.text-error error])
      (shui/button
       {:type "submit"
-       :disabled (or @*submitting? (string/blank? @*code))}
+       :disabled (or submitting? (string/blank? code))}
       (t :ui/login))]))
 
 (defn open-login-modal!

@@ -3,6 +3,7 @@
             [datascript.core :as d]
             [logseq.db :as ldb]
             [logseq.db.common.reference :as db-reference]
+            [logseq.db.frontend.schema :as db-schema]
             [shadow.resource :as rc]))
 
 (def test-transit (rc/inline "fixtures/references.transit"))
@@ -183,3 +184,25 @@
         ids (map #(:db/id (ldb/get-page @conn %)) ["foo" "bar" "baz"])]
     (is (= [3 2 3]
            (mapv #(count (db-reference/get-unlinked-references db %)) ids)))))
+
+(defn- create-alias-conn!
+  "\"Bar\" is an alias of \"Foo\"."
+  []
+  (let [conn (d/create-conn db-schema/schema)]
+    (d/transact! conn [{:db/id 1 :block/uuid (random-uuid) :block/title "Foo" :block/alias 2}
+                       {:db/id 2 :block/uuid (random-uuid) :block/title "Bar"}
+                       {:db/id 3 :block/uuid (random-uuid) :block/title "mentions foo here"}
+                       {:db/id 4 :block/uuid (random-uuid) :block/title "mentions bar here"}
+                       {:db/id 5 :block/uuid (random-uuid) :block/title "links foo" :block/refs 1}
+                       {:db/id 6 :block/uuid (random-uuid) :block/title "links bar" :block/refs 2}])
+    conn))
+
+(deftest get-unlinked-references-with-alias
+  (let [db @(create-alias-conn!)]
+    (testing "alias titles are searched, alias pages and blocks linking an alias are excluded"
+      (is (= #{"mentions foo here" "mentions bar here"}
+             (set (map :block/title (db-reference/get-unlinked-references db 1))))))
+
+    (testing "the alias page returns the same unlinked references"
+      (is (= #{"mentions foo here" "mentions bar here"}
+             (set (map :block/title (db-reference/get-unlinked-references db 2))))))))

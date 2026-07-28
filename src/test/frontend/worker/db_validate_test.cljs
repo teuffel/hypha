@@ -43,6 +43,42 @@
         (is (= page-id (:db/id (:block/parent repaired-block))))
         (is (empty? (:errors (worker-db-validate/validate-db conn))))))))
 
+(deftest validate-db-repairs-dangling-block-parent
+  ;; A :block/parent pointing at a since-deleted (non-existent) entity is a dangling
+  ;; ref that malli validation can't flag (the value is a valid eid number). It makes
+  ;; (:block/parent entity) materialize to nil and crashes block serialization, so
+  ;; validate-db must detect and repair it (re-parent to the block's page).
+  (let [conn (create-db-graph-conn)
+        page-id (get (:tempids
+                      (d/transact! conn [{:db/id "page"
+                                          :block/uuid (random-uuid)
+                                          :block/created-at 1
+                                          :block/updated-at 1
+                                          :block/name "test page"
+                                          :block/title "Test Page"
+                                          :block/tags :logseq.class/Page}]))
+                     "page")
+        block-id (get (:tempids
+                       (d/transact! conn [{:db/id "block"
+                                           :block/uuid (random-uuid)
+                                           :block/created-at 1
+                                           :block/updated-at 2
+                                           :block/page page-id
+                                           :block/parent page-id
+                                           :block/order "a0"
+                                           :block/title "child"}]))
+                      "block")]
+    ;; make :block/parent dangling (target eid does not exist)
+    (d/transact! conn [[:db/retract block-id :block/parent page-id]
+                       [:db/add block-id :block/parent 999999]])
+    (is (nil? (:block/parent (d/entity @conn block-id)))
+        "dangling :block/parent materializes to nil")
+    (with-redefs [shared-service/broadcast-to-clients! (fn [& _args] nil)]
+      (worker-db-validate/validate-db conn)
+      (let [block (d/entity @conn block-id)]
+        (is (= page-id (:db/id (:block/parent block)))
+            "dangling parent re-parented to the block's page")))))
+
 (deftest validate-db-repairs-invalid-pages-properties-and-classes
   (let [conn (create-db-graph-conn)
         journal-id (get (:tempids

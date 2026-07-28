@@ -39,6 +39,7 @@
             [frontend.handler.user :as user-handler]
             [frontend.hypha.asset-cache :as asset-cache]
             [frontend.hypha.auth :as hypha-auth]
+            [frontend.hypha.capture :as capture]
             ;; Required for its side-effecting defonce: the plugin-init ns
             ;; patches `window.fetch` and installs the `window.apis` shim at
             ;; namespace-load time, which lands before frontend.handler/start!
@@ -144,11 +145,17 @@
 
   Phase 1.6.1: also kicks off the LRU asset-cache eviction background tick
   via `asset-cache/start!`. Runs independent of login state — the cache
-  needs guarding even when the user is logged out."
+  needs guarding even when the user is logged out.
+
+  Quick capture: `capture/<start!` consumes any `hypha-*` share params on
+  the boot URL and drains the clipper inbox. It is fired here rather than
+  after login because it strips the params from the URL immediately and
+  then waits for the graph on its own."
   []
   (config/set-custom-sync-server-url! js/window.location.origin)
   (asset-cache/start!)
   (hypha-auth/start-refresh-loop!)
+  (capture/<start!)
   (go
     (let [resp (<! (<fetch-session))]
       (cond
