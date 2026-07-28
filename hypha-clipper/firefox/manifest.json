@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "name": "Hypha Clipper",
+  "version": "0.1.0",
+  "description": "Send the current page, or the selected text, to your Hypha capture inbox.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "clipper@hypha.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "notifications",
+    "storage",
+    "<all_urls>"
+  ],
+  "background": {
+    "page": "background.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_action": {
+    "default_title": "Clip to Hypha"
+  },
+  "commands": {
+    "clip-page": {
+      "suggested_key": { "default": "Ctrl+Shift+Y" },
+      "description": "Clip the current page to Hypha"
+    }
+  }
+}
