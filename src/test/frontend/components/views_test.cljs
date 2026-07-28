@@ -3,6 +3,15 @@
             [frontend.db]
             [frontend.components.views :as views]))
 
+(deftest view-feature-type->react-key-covers-both-reference-types
+  "Both reference views must re-run their query when refs of the page change,
+   e.g. when an unlinked mention gets linked."
+  (is (= :frontend.worker.react/refs (views/view-feature-type->react-key :linked-references)))
+  (is (= :frontend.worker.react/refs (views/view-feature-type->react-key :unlinked-references)))
+  (is (= :frontend.worker.react/objects (views/view-feature-type->react-key :class-objects)))
+  (is (= :frontend.worker.react/objects (views/view-feature-type->react-key :property-objects)))
+  (is (nil? (views/view-feature-type->react-key :query-result))))
+
 (deftest build-columns-should-allow-name-property-when-no-object-name
   "When with-object-name? is false, the user property 'Name' should be kept"
   (let [mock-properties [{:db/ident :user.property/name-abc
