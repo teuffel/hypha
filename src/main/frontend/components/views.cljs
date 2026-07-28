@@ -2869,14 +2869,19 @@
                                           :load-view-data load-view-data
                                           :set-view-entity! set-view-entity!))])))
 
+(defn view-feature-type->react-key
+  "Reactive query key a view of `view-feature-type` depends on."
+  [view-feature-type]
+  (case view-feature-type
+    :class-objects :frontend.worker.react/objects
+    :property-objects :frontend.worker.react/objects
+    (:linked-references :unlinked-references) :frontend.worker.react/refs
+    nil))
+
 (defn sub-view-data-changes
   [view-parent view-feature-type]
   (let [repo (state/get-current-repo)
-        k (case view-feature-type
-            :class-objects :frontend.worker.react/objects
-            :property-objects :frontend.worker.react/objects
-            :linked-references :frontend.worker.react/refs
-            nil)
+        k (view-feature-type->react-key view-feature-type)
         *version (hooks/use-memo #(atom 0) [repo k (:db/id view-parent)])
         query-ref (when (and repo view-parent k)
                     (react/q repo [k (:db/id view-parent)]
