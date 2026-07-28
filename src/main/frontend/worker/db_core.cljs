@@ -1028,13 +1028,15 @@
     (let [db @conn
           block (d/entity db id)]
       (if unlinked?
-        (let [title (string/lower-case (:block/title block))
-              result (search-blocks repo title {:limit 100})]
+        (let [ids (set (cons id (ldb/get-block-alias db id)))
+              titles (db-reference/get-page-titles db ids)
+              result (mapcat #(search-blocks repo % {:limit 100}) titles)]
           (boolean (some (fn [b]
-                           (let [block (d/entity db (:db/id b))]
-                             (and (not= id (:db/id block))
-                                  (not ((set (map :db/id (:block/refs block))) id))
-                                  (string/includes? (string/lower-case (:block/title block)) title)))) result)))
+                           (let [block (d/entity db (:db/id b))
+                                 title (string/lower-case (:block/title block))]
+                             (and (not (contains? ids (:db/id block)))
+                                  (not (some ids (map :db/id (:block/refs block))))
+                                  (some #(string/includes? title %) titles)))) result)))
         (some? (first (common-initial-data/get-block-refs db (:db/id block))))))))
 
 (def-thread-api :thread-api/get-block-parents

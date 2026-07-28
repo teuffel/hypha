@@ -150,3 +150,16 @@
                                         result)))
                              (conj result [:span content])))]
             (into [:span {:class "m-0"}] elements)))))))
+
+(defn highlight-matching-query
+  "Highlights the first query of `queries` that `content` contains, or returns
+  `content` unchanged when none matches."
+  [content queries]
+  (if-let [q (and (string? content)
+                  (first (filter (fn [query]
+                                   (and (not (string/blank? query))
+                                        (string/includes? (string/lower-case content)
+                                                          (string/lower-case query))))
+                                 queries)))]
+    (highlight-exact-query content q)
+    content))
