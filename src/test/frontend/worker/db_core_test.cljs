@@ -1741,6 +1741,53 @@
                                              [{:db/id candidate-id}])]
          (is (true? (block-refs-check! test-repo source-id {:unlinked? true}))))))))
 
+(deftest block-refs-check-unlinked-matches-alias-titles
+  (restoring-worker-state
+   (fn []
+     (let [block-refs-check! (get-thread-api :thread-api/block-refs-check)
+           conn (d/create-conn db-schema/schema)
+           source-id 300
+           alias-id 301
+           candidate-id 302]
+       (d/transact! conn [{:db/id source-id
+                           :block/uuid (random-uuid)
+                           :block/title "Foo"
+                           :block/alias alias-id}
+                          {:db/id alias-id
+                           :block/uuid (random-uuid)
+                           :block/title "Bar"}
+                          {:db/id candidate-id
+                           :block/uuid (random-uuid)
+                           :block/title "mentions bar here"}])
+       (reset! worker-state/*datascript-conns {test-repo conn})
+       (with-redefs [db-core/search-blocks (fn [_repo _q _opts]
+                                             [{:db/id candidate-id}])]
+         (is (true? (block-refs-check! test-repo source-id {:unlinked? true}))))))))
+
+(deftest block-refs-check-unlinked-ignores-alias-page-and-blocks-linking-an-alias
+  (restoring-worker-state
+   (fn []
+     (let [block-refs-check! (get-thread-api :thread-api/block-refs-check)
+           conn (d/create-conn db-schema/schema)
+           source-id 400
+           alias-id 401
+           linked-id 402]
+       (d/transact! conn [{:db/id source-id
+                           :block/uuid (random-uuid)
+                           :block/title "Foo"
+                           :block/alias alias-id}
+                          {:db/id alias-id
+                           :block/uuid (random-uuid)
+                           :block/title "Bar"}
+                          {:db/id linked-id
+                           :block/uuid (random-uuid)
+                           :block/title "links bar"
+                           :block/refs alias-id}])
+       (reset! worker-state/*datascript-conns {test-repo conn})
+       (with-redefs [db-core/search-blocks (fn [_repo _q _opts]
+                                             [{:db/id alias-id} {:db/id linked-id}])]
+         (is (false? (block-refs-check! test-repo source-id {:unlinked? true}))))))))
+
 (deftest block-refs-check-linked-branch-uses-common-get-block-refs
   (restoring-worker-state
    (fn []

@@ -292,21 +292,31 @@
      :ref-pages-count (get-ref-pages-count db id ref-blocks children-ids)
      :ref-matched-children-ids (when has-filters? children-ids)}))
 
+(defn get-page-titles
+  "Lower-cased titles of the page and all its aliases."
+  [db ids]
+  (->> ids
+       (keep #(:block/title (d/entity db %)))
+       (remove string/blank?)
+       (map string/lower-case)
+       set))
+
 (defn get-unlinked-references
   [db id]
-  (let [entity (d/entity db id)
-        title (string/lower-case (:block/title entity))]
-    (when-not (string/blank? title)
-      (let [ids (->> (d/datoms db :avet :block/title)
-                     (keep (fn [d]
-                             (when (and (not= id (:e d))
-                                        (string/includes? (string/lower-case (:v d)) title))
-                               (:e d)))))]
+  (let [ids (set (cons id (ldb/get-block-alias db id)))
+        titles (get-page-titles db ids)]
+    (when (seq titles)
+      (let [candidate-ids (->> (d/datoms db :avet :block/title)
+                               (keep (fn [d]
+                                       (when (not (contains? ids (:e d)))
+                                         (let [title (string/lower-case (:v d))]
+                                           (when (some #(string/includes? title %) titles)
+                                             (:e d)))))))]
         (keep
          (fn [eid]
            (let [e (d/entity db eid)]
-             (when-not (or (some #(= id %) (map :db/id (:block/refs e)))
+             (when-not (or (some #(contains? ids %) (map :db/id (:block/refs e)))
                            (:block/link e)
                            (ldb/built-in? e))
                e)))
-         ids)))))
+         candidate-ids)))))

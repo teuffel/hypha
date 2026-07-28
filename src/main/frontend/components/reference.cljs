@@ -90,7 +90,8 @@
            (set-has-references! result))))
      [id])
     (when (and id has-references?)
-      (let [config (assoc config :highlight-query (:block/title entity))]
+      (let [titles (keep :block/title (cons entity (concat (:block/alias entity) (:block/_alias entity))))
+            config (assoc config :highlight-query titles)]
         [:div.unlinked-references
          (views/view
           {:view-parent entity

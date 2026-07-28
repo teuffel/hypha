@@ -1747,15 +1747,6 @@
         (hiccups.core/html)
         (security/sanitize-html))))
 
-(defn- highlight-query-text
-  [content query]
-  (if (and (string? content)
-           (not (string/blank? query))
-           (string/includes? (string/lower-case content)
-                             (string/lower-case query)))
-    (search-handler/highlight-exact-query content query)
-    content))
-
 (defn- preserve-heading-whitespace
   [config s]
   (if (and (:parent-heading config)
@@ -1770,7 +1761,7 @@
     ["Plain" s]
     (preserve-heading-whitespace
      config
-     (highlight-query-text s (:highlight-query config)))
+     (search-handler/highlight-matching-query s (:highlight-query config)))
     ["Spaces" s]
     (preserve-heading-whitespace config s)
 
