@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "Hypha Clipper",
+  "version": "0.1.0",
+  "description": "Send the displayed mail to your Hypha capture inbox.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "clipper@hypha.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": [
+    "messagesRead",
+    "notifications",
+    "storage"
+  ],
+  "background": {
+    "page": "background.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "message_display_action": {
+    "default_title": "Clip to Hypha"
+  }
+}

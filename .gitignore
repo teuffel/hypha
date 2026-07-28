@@ -106,3 +106,5 @@ clj-e2e/.clj-kondo/imports
 /hypha-server/test-results/
 /hypha-server/playwright-report/
 /hypha-server/test/playwright/.state/
+# Assembled clipper add-ons (build.mjs output)
+/hypha-clipper/dist/

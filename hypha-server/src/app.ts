@@ -21,6 +21,8 @@ import { sessionRoute } from "./routes/session.js";
 import { logoutRoute } from "./routes/logout.js";
 import { jwksRoute } from "./routes/jwks.js";
 import { proxyRoute } from "./proxy.js";
+import { captureRoute } from "./routes/capture.js";
+import { manifestRoute } from "./routes/manifest.js";
 import { staticsRoute } from "./statics.js";
 import { PluginCache } from "./plugin-cache.js";
 import { pluginMarketRoute } from "./routes/plugin-market.js";
@@ -107,6 +109,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(sessionRoute, { config: opts.config, sessions });
   await app.register(logoutRoute, { sessions });
   await app.register(jwksRoute, { config: opts.config });
+  await app.register(manifestRoute);
+  await app.register(captureRoute, { config: opts.config });
 
   if (opts.syncUpstreamUrl) {
     await app.register(proxyRoute, { upstreamUrl: opts.syncUpstreamUrl });
