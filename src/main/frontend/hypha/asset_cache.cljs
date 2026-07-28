@@ -22,10 +22,11 @@
        oldest-first until usage drops to the 60% target.
 
   Evicted assets get re-downloaded on demand the next time a block
-  renders them, via the existing VA1 lazy-load path
-  (`asset-cp :did-mount` → `download-remote-asset!`). The user sees a
-  brief progress spinner, then the asset. Acceptable trade-off vs.
-  unbounded cache growth.
+  renders them, via the existing VA1 lazy-load path (`asset-cp` asks for
+  the asset, and `request-asset-download!` in
+  `worker/sync/assets.cljs` refetches it once no local copy is left).
+  The user sees a brief progress spinner, then the asset. Acceptable
+  trade-off vs. unbounded cache growth.
 
   Lives under `frontend.hypha` to avoid an upstream patch. A future
   Phase 2 may consolidate this into `worker/sync/assets.cljs` as a
