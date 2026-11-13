@@ -113,9 +113,9 @@
 
 (defn- normalize-graph-e2ee?
   [graph-e2ee?]
-  (if (nil? graph-e2ee?)
-    true
-    (true? graph-e2ee?)))
+  ;; HYPHA-PATCH-008: no explicit e2ee state means not e2ee, same as the
+  ;; worker's normalize-graph-e2ee? in worker/sync/upload.cljs.
+  (true? graph-e2ee?))
 
 (defn- active-graph-operation []
   (let [{:rtc/keys [downloading-graph-uuid uploading?]} @state/state]
