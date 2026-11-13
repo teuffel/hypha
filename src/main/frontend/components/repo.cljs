@@ -296,8 +296,8 @@
 ;; HYPHA-PATCH-014: identify local-only graphs whose name matches an
 ;; existing remote graph the user already owns. These are the graphs
 ;; that would hit Patch #13's name-collision dialog on upload; we
-;; surface a banner so the user can rebind without first trying — and
-;; failing — to upload.
+;; surface a banner so the user can take over the remote graph without
+;; first trying — and failing — to upload.
 (defn- local-graphs-with-remote-name-match
   [local-graphs remote-graphs]
   (let [remote-names (set (keep :GraphName remote-graphs))]
