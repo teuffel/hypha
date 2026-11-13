@@ -6,6 +6,7 @@
             [frontend.worker.shared-service :as shared-service]
             [frontend.worker.state :as worker-state]
             [frontend.worker.sync.assets :as sync-assets]
+            [frontend.worker.sync.client-op :as client-op]
             [logseq.db :as ldb]
             [logseq.db.frontend.schema :as db-schema]
             [promesa.core :as p]))
@@ -182,3 +183,42 @@
                    (set! js/fetch original-fetch)
                    (reset! worker-state/*db-sync-config db-sync-config)
                    (done)))))))
+
+(defn- graph-conn
+  "Conn with one asset per `assets` entry ({:uuid :uploaded?}) and the
+  given `graph-remote?` kv."
+  [graph-remote? assets]
+  (let [conn (d/create-conn db-schema/schema)]
+    (ldb/transact! conn (cond-> (mapv (fn [{:keys [uuid uploaded?]}]
+                                        (cond-> {:block/uuid uuid
+                                                 :logseq.property.asset/type "png"
+                                                 :logseq.property.asset/checksum "sha-256-value"}
+                                          uploaded?
+                                          (assoc :logseq.property.asset/remote-metadata
+                                                 {:checksum "sha-256-value" :type "png"})))
+                                      assets)
+                          graph-remote?
+                          (conj (ldb/kv :logseq.kv/graph-remote? true))))
+    conn))
+
+(deftest evictable-asset-files-only-lists-assets-the-server-holds-test
+  (let [uploaded (random-uuid)
+        pending (random-uuid)
+        never-uploaded (random-uuid)
+        local-graph-asset (random-uuid)
+        conns {"logseq_db_synced" (graph-conn true [{:uuid uploaded :uploaded? true}
+                                                    {:uuid pending :uploaded? true}
+                                                    {:uuid never-uploaded :uploaded? false}])
+               "logseq_db_local" (graph-conn false [{:uuid local-graph-asset :uploaded? true}])}
+        prev-conns @worker-state/*datascript-conns]
+    (reset! worker-state/*datascript-conns conns)
+    (try
+      (with-redefs [client-op/get-all-asset-ops (fn [repo]
+                                                  (when (= "logseq_db_synced" repo)
+                                                    [{:block/uuid pending
+                                                      :update-asset [:update-asset 1 {:block-uuid pending}]}]))]
+        (is (= [{:repo "logseq_db_synced"
+                 :file-name (str uploaded ".png")}]
+               (sync-assets/evictable-asset-files))))
+      (finally
+        (reset! worker-state/*datascript-conns prev-conns)))))

@@ -75,11 +75,23 @@ Graph-Re-Download.
 2. `navigator.storage.estimate()` → `{usage, quota}` (Browser-weite
    IDB + OPFS + Cache-API + ServiceWorker-Summe).
 3. Wenn `usage / quota < 0.8` → no-op.
-4. Sonst: enumeriere alle Asset-Files quer über alle Graph-Roots in
-   `window.pfs` (LightningFS), sortiere by `mtimeMs` ascending, lösche
-   älteste bis `usage / quota <= 0.6` (60 % target).
+4. Sonst: frage den db-worker nach den Assets, die der Server hat
+   (`:thread-api/db-sync-evictable-asset-files`: Graph mit
+   `:logseq.kv/graph-remote? true`, Asset mit
+   `:logseq.property.asset/remote-metadata`, kein pending Asset-Op),
+   stat deren lokale Kopien in `window.pfs` (LightningFS), sortiere by
+   `mtimeMs` ascending, lösche älteste bis `usage / quota <= 0.6`
+   (60 % target).
 5. Log alle Evictions zur Diagnostizierbarkeit
    (`:hypha/asset-cache-evicted`).
+
+Stand 2026-11: Bis dahin wurden alle Asset-Files aller Graph-Roots
+enumeriert. Das konnte Assets lokaler Graphen und nie hochgeladene
+Assets löschen, also die einzige Kopie. Kandidaten kommen deshalb jetzt
+aus dem Worker; Graphen, die dort nicht offen sind, bleiben unangetastet.
+Der Tick überspringt sich, solange ein Pass läuft, und pausiert 10 min,
+wenn ein Pass nichts freigeben konnte (die Quota wird meist von
+OPFS-SQLite dominiert, nicht von Assets).
 
 Trigger-Threshold 80 % gibt Headroom für laufende Asset-Uploads.
 Target 60 % gibt Headroom für mehrere Eviction-Rounds, ohne ständig
@@ -92,9 +104,9 @@ zu thrashen.
   einmal beim Boot. Idempotent (`defonce`-guarded Interval-ID).
 - **Test:** `src/test/frontend/hypha/asset_cache_test.cljs` — Unit-Test
   gegen die reine Auswahl-Logik (sort + accumulate-stop) mit einem
-  in-memory pfs-Stub. `navigator.storage.estimate()` ist nicht in Node
-  verfügbar, wird nicht getestet (die `<maybe-evict!`-Hülle bleibt
-  ohne Unit-Test, der Eviction-Algorithmus selbst ist abgedeckt).
+  in-memory pfs-Stub. `<evict-pass!` bekommt Estimate und
+  Kandidatenliste injiziert und ist damit ebenfalls abgedeckt. Die
+  Kandidatenauswahl testet `frontend.worker.sync.assets-test`.
 
 ### 2.3 Risiken
 
