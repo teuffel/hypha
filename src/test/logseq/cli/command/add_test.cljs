@@ -256,6 +256,18 @@
           result (#'add-command/coerce-property-value-basic property true)]
       (is (not (:ok? result))))))
 
+(deftest test-parse-datetime-value-accepts-iso-fractions-of-any-length
+  (testing "milliseconds"
+    (is (= {:ok? true :value (.getTime (js/Date. "2026-02-12T10:00:00.123Z"))}
+           (#'add-command/parse-datetime-value "2026-02-12T10:00:00.123Z"))))
+  (testing "microseconds, as emitted by e.g. Python's datetime.isoformat()"
+    (is (= {:ok? true :value (.getTime (js/Date. "2026-02-12T10:00:00.123Z"))}
+           (#'add-command/parse-datetime-value "2026-02-12T10:00:00.123456Z")))
+    (is (:ok? (#'add-command/parse-datetime-value "2026-02-12T10:00:00.123456+01:00"))))
+  (testing "locale formats are still rejected"
+    (is (= {:ok? false} (#'add-command/parse-datetime-value "12.02.2026")))
+    (is (= {:ok? false} (#'add-command/parse-datetime-value "2026-02-12T10:00:00.")))))
+
 (deftest test-resolve-date-page-id-rejects-invalid-date
   (async done
          (let [mock-invoke (fn [_ _ args]
