@@ -3,6 +3,7 @@
   (:require
    [datascript.core :as d]
    [frontend.common.crypt :as crypt]
+   [frontend.common.thread-api :refer [def-thread-api]]
    [frontend.worker.platform :as platform]
    [frontend.worker.shared-service :as shared-service]
    [frontend.worker.state :as worker-state]
@@ -351,6 +352,32 @@
              {:repo repo
               :asset-uuid asset-uuid
               :error error}))
+
+(defn evictable-asset-files
+  "Local asset copies that are safe to delete because the server holds
+  them: the graph is synced with a remote, the asset has remote metadata
+  and no asset op is pending for it. Only graphs open in this worker are
+  considered; the rest cannot be checked."
+  []
+  (vec
+   (for [[repo conn] @worker-state/*datascript-conns
+         :let [db @conn]
+         :when (true? (:kv/value (d/entity db :logseq.kv/graph-remote?)))
+         :let [pending-asset-uuids (set (map :block/uuid (client-op/get-all-asset-ops repo)))]
+         datom (d/datoms db :aevt :logseq.property.asset/remote-metadata)
+         :let [ent (d/entity db (:e datom))
+               asset-uuid (:block/uuid ent)
+               asset-type (:logseq.property.asset/type ent)]
+         :when (and (seq asset-type)
+                    (not (contains? pending-asset-uuids asset-uuid)))]
+     {:repo repo
+      :file-name (asset-file-name asset-uuid asset-type)})))
+
+;; Hypha asset-cache eviction (frontend.hypha.asset-cache) may only delete
+;; what the server can hand back.
+(def-thread-api :thread-api/db-sync-evictable-asset-files
+  []
+  (evictable-asset-files))
 
 (defn request-asset-download!
   [repo asset-uuid {:keys [current-client-f enqueue-asset-task-f broadcast-rtc-state!-f]}]
