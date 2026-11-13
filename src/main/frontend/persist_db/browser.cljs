@@ -183,6 +183,22 @@
   (reset! state/*db-worker-thread nil)
   (reset! state/*db-worker nil))
 
+(defn <invoke-remote
+  "Invoke thread-api `qkw` through `remote-invoke-f` (method-str and
+  args-transit-str in, promise of result-transit-str out).
+
+  `thread-api/remote-function` serializes a failed call as a resolved error
+  value. Reject with it so the caller's `p/catch` fires. promesa's `p/let`
+  would coerce a returned error into a rejection anyway; this keeps the
+  contract explicit instead of relying on that."
+  [remote-invoke-f qkw args]
+  (p/let [result-str (remote-invoke-f (str (namespace qkw) "/" (name qkw))
+                                      (ldb/write-transit-str args))
+          result (ldb/read-transit-str result-str)]
+    (if (instance? js/Error result)
+      (p/rejected result)
+      result)))
+
 (defn start-db-worker!
   []
   (when-not util/node-test?
@@ -206,10 +222,7 @@
                                 (if (= :thread-api/import-db-binary qkw)
                                   (.remoteInvokeBinary ^js wrapped-worker* method (first args) (second args))
                                   (.remoteInvokeBinary ^js wrapped-worker* method (first args))))
-                              (p/let [result (.remoteInvoke ^js wrapped-worker*
-                                                            (str (namespace qkw) "/" (name qkw))
-                                                            (ldb/write-transit-str args))]
-                                (ldb/read-transit-str result))))
+                              (<invoke-remote #(.remoteInvoke ^js wrapped-worker* %1 %2) qkw args)))
            t1 (util/time-ms)]
        (reset! state/*db-worker-thread worker)
        (Comlink/expose #js{"remoteInvoke" thread-api/remote-function} worker)
