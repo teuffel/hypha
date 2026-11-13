@@ -397,6 +397,40 @@
                           (is false (str error))
                           (done)))))))
 
+(defn- <snapshot-download-url
+  "The `url` a snapshot download answers with for `env` and request `headers`."
+  [env headers]
+  (let [self #js {:env env
+                  :conn (d/create-conn db-schema/schema)
+                  :schema-ready true
+                  :sql (empty-sql)}
+        request (js/Request. "http://127.0.0.1:8787/sync/graph-1/snapshot/download?graph-id=graph-1"
+                             #js {:method "GET" :headers headers})]
+    (p/let [resp (sync-handler/handle {:self self
+                                       :request request
+                                       :url (js/URL. (.-url request))
+                                       :route {:handler :sync/snapshot-download}})
+            text (.text resp)]
+      (:url (js->clj (js/JSON.parse text) :keywordize-keys true)))))
+
+;; HYPHA-PATCH-005
+(deftest snapshot-download-url-uses-forwarded-headers-only-when-trusted-test
+  (async done
+         (let [forwarded #js {"x-forwarded-host" "notes.example.com, 10.0.0.5:3000"
+                              "x-forwarded-proto" "https, http"}]
+           (-> (p/let [trusted (<snapshot-download-url #js {"DB_SYNC_TRUST_FORWARDED_HEADERS" "true"} forwarded)
+                       untrusted (<snapshot-download-url #js {} forwarded)
+                       trusted-without-headers (<snapshot-download-url
+                                                #js {"DB_SYNC_TRUST_FORWARDED_HEADERS" "true"} #js {})]
+                 (is (= "https://notes.example.com/sync/graph-1/snapshot/stream" trusted)
+                     "the first entry is the client-facing one")
+                 (is (= "http://127.0.0.1:8787/sync/graph-1/snapshot/stream" untrusted)
+                     "a client must not pick the origin when no proxy is configured")
+                 (is (= "http://127.0.0.1:8787/sync/graph-1/snapshot/stream" trusted-without-headers)))
+               (p/catch (fn [error]
+                          (is false (str error))))
+               (p/finally done)))))
+
 (deftest snapshot-download-omits-gzip-encoding-when-disabled-in-env-test
   (async done
          (let [sql (empty-sql)

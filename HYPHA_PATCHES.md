@@ -267,19 +267,29 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   ;; HYPHA
   (defn- snapshot-stream-url
     "... reverse-proxy-aware ..."
-    [request graph-id]
+    [^js self request graph-id]
     (let [url (js/URL. (.-url request))
-          headers (.-headers request)
-          forwarded-host (some-> headers (.get "x-forwarded-host"))
-          forwarded-proto (some-> headers (.get "x-forwarded-proto"))
-          origin (if (seq forwarded-host)
-                   (str (if (seq forwarded-proto) forwarded-proto "http")
-                        "://"
-                        forwarded-host)
+          headers (when (trust-forwarded-headers? self)
+                    (.-headers request))
+          forwarded-host (first-forwarded-value headers "x-forwarded-host")
+          forwarded-proto (first-forwarded-value headers "x-forwarded-proto")
+          origin (if forwarded-host
+                   (str (or forwarded-proto "http") "://" forwarded-host)
                    (.-origin url))]
       (str origin "/sync/" graph-id "/snapshot/stream")))
   ```
-- **Line count**: +13 (8 net lines of code, plus a 5-line docstring)
+  plus the helpers `trust-forwarded-headers?` (env flag
+  `DB_SYNC_TRUST_FORWARDED_HEADERS`) and `first-forwarded-value` (first
+  entry of a comma-separated header), and a 3-line pass-through of the
+  flag in `deps/db-sync/src/logseq/db_sync/node/graph.cljs`
+  (`env-object`).
+- **Hardened**: 2026-11 — the headers used to be honoured from any
+  request and taken whole. Now they count only when the deployment sets
+  `DB_SYNC_TRUST_FORWARDED_HEADERS` (hypha-server's db-sync runner
+  always does; a bare node adapter or Cloudflare Worker does not), and
+  with a proxy chain (`host-a, host-b`) only the first, client-facing
+  entry is used.
+- **Line count**: ~+35 (helpers, docstrings, flag pass-through)
 - **Rationale**: When db-sync runs behind hypha-server's reverse proxy,
   the request URL the adapter sees has the internal loopback host
   (`http://127.0.0.1:8787`). Using `request.url.origin` for embedded URLs
@@ -291,8 +301,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   them to reconstruct the public-facing URL.
 - **Companion change (NOT a patch)**:
   `hypha-server/src/proxy.ts` injects these headers on every proxied path
-  (rewriteRequestHeaders hook). Counts as Hypha-server-own code, not an
-  upstream patch.
+  (rewriteRequestHeaders hook), and `hypha-server/src/db-sync-runner.ts`
+  spawns the adapter with `DB_SYNC_TRUST_FORWARDED_HEADERS=true`. Counts
+  as Hypha-server-own code, not an upstream patch.
 - **Additive alternatives considered**:
   - Modify the response body in `hypha-server` proxy with a JSON-rewrite
     hook: rejected — fragile (depends on exact response shape) and
@@ -315,7 +326,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     `rg -c 'defn- snapshot-stream-url' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
     ⇒ `1`
   - Semantic, manual at triage: the function body must read
-    `x-forwarded-host` from `.headers`.
+    `x-forwarded-host` from `.headers`, gated by
+    `trust-forwarded-headers?`.
+  - Regression guard:
+    `snapshot-download-url-uses-forwarded-headers-only-when-trusted-test`
+    in `deps/db-sync/test/logseq/db_sync/worker_handler_sync_test.cljs`.
 - **On break**:
   - Structural → find the new URL-building location, re-anchor.
   - Semantic → re-apply the X-Forwarded-Host respect logic.
