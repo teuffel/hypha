@@ -29,9 +29,13 @@
 ;; push pipeline stalls (inflight never clears or local-tx never catches up) yet
 ;; nothing self-heals, because the stale detector above only fires after total
 ;; silence (and unrelated server messages keep the socket "fresh"). Force a
-;; reconnect when there are pending local txs that make no progress for this long.
+;; reconnect when there are pending local txs that make no progress for this long
+;; while a reply from the server is outstanding.
 (def ^:private sync-wedge-check-interval-ms 30000)
 (def ^:private sync-wedge-timeout-ms 45000)
+;; After this many forced reconnects without progress in between, the stall is
+;; not a lost reply: surface a sync error and stop resetting the reconnect backoff.
+(def ^:private sync-wedge-max-kills 3)
 (def fail-fast sync-util/fail-fast)
 
 (defonce *repo->latest-remote-tx sync-apply/*repo->latest-remote-tx)
@@ -210,6 +214,7 @@
    :stale-kill-timer (atom nil)
    :sync-watchdog-timer (atom nil)
    :sync-progress (atom nil)
+   :sync-wedge-kills (atom 0)
    :last-ws-message-ts (atom (common-util/time-ms))
    :online-users (atom [])
    :ws-state (atom :closed)})
@@ -311,11 +316,69 @@
            (> local-tx (:local-tx snapshot)))
       (< pending (:pending snapshot))))
 
+(defn- awaiting-server?
+  "True while a tx batch is unacked or a pull is unanswered: the two requests
+  whose lost reply wedges the pipeline. A long-running apply of a pull/ok is
+  neither, so it is never mistaken for a wedge."
+  [client]
+  (boolean (or (seq @(:inflight client))
+               (some? @(:pending-pull-since client)))))
+
+(defn- wedge-limit-reached?
+  [client]
+  (>= @(:sync-wedge-kills client) sync-wedge-max-kills))
+
+(defn- sync-watchdog-tick!
+  "One watchdog check for `client` on its open `ws` at time `now`."
+  [client ws now]
+  (let [repo (:repo client)
+        *snap (:sync-progress client)
+        *kills (:sync-wedge-kills client)
+        pending (or (client-op/get-pending-local-tx-count repo) 0)
+        local-tx (client-op/get-local-tx repo)
+        snapshot @*snap
+        fresh-snapshot {:local-tx local-tx :pending pending :at now}]
+    (cond
+      (nil? snapshot)
+      (reset! *snap fresh-snapshot)
+
+      (sync-progressed? snapshot local-tx pending)
+      (do
+        (when (wedge-limit-reached? client)
+          (sync-util/clear-last-sync-error! client))
+        (reset! *kills 0)
+        (reset! *snap fresh-snapshot))
+
+      (or (zero? pending)
+          (not (worker-state/online?))
+          (not (ws-open? ws))
+          (sync-apply/upload-stopped? repo)
+          (not (awaiting-server? client)))
+      (reset! *snap fresh-snapshot)
+
+      (>= (- now (:at snapshot)) sync-wedge-timeout-ms)
+      (let [kills (swap! *kills inc)]
+        (log/warn :db-sync/ws-wedge-timeout
+                  {:repo repo :pending pending :local-tx local-tx
+                   :wedged-ms (- now (:at snapshot))
+                   :kills kills})
+        (reset! *snap fresh-snapshot)
+        (when (wedge-limit-reached? client)
+          (sync-util/set-last-sync-error!
+           client
+           (ex-info "sync is stuck: the server does not answer pending changes"
+                    {:code :db-sync/ws-wedged
+                     :repo repo
+                     :pending pending
+                     :kills kills})))
+        (try (.close ws) (catch :default _ nil))))))
+
 (defn- start-sync-watchdog-loop
   "Force a reconnect when pending local txs make no progress for too long while
-  the WS is open. Closing the socket routes through onclose, which resets the
-  in-flight sync state and schedules a reconnect that re-flushes from a clean
-  state. No-op while offline, paused, or fully synced."
+  the WS is open and a reply from the server is outstanding. Closing the socket
+  routes through onclose, which resets the in-flight sync state and schedules a
+  reconnect that re-flushes from a clean state. No-op while offline, paused,
+  fully synced, or busy applying remote txs."
   [client ws]
   (let [repo (:repo client)
         graph-id (:graph-id client)
@@ -325,31 +388,15 @@
       (reset! *snap nil)
       (let [timer (js/setInterval
                    (fn []
-                     (when-let [current @worker-state/*db-sync-client]
-                       (when (and (= repo (:repo current))
-                                  (= graph-id (:graph-id current))
-                                  (identical? ws (:ws current)))
-                         (let [pending (or (client-op/get-pending-local-tx-count repo) 0)
-                               local-tx (client-op/get-local-tx repo)
-                               now (common-util/time-ms)
-                               snapshot @*snap]
-                           (cond
-                             (or (zero? pending)
-                                 (not (worker-state/online?))
-                                 (not (ws-open? ws))
-                                 (sync-apply/upload-stopped? repo))
-                             (reset! *snap {:local-tx local-tx :pending pending :at now})
-
-                             (sync-progressed? snapshot local-tx pending)
-                             (reset! *snap {:local-tx local-tx :pending pending :at now})
-
-                             (>= (- now (:at snapshot)) sync-wedge-timeout-ms)
-                             (do
-                               (log/warn :db-sync/ws-wedge-timeout
-                                         {:repo repo :pending pending :local-tx local-tx
-                                          :wedged-ms (- now (:at snapshot))})
-                               (reset! *snap {:local-tx local-tx :pending pending :at now})
-                               (try (.close ws) (catch :default _ nil))))))))
+                     (try
+                       (when-let [current @worker-state/*db-sync-client]
+                         (when (and (= repo (:repo current))
+                                    (= graph-id (:graph-id current))
+                                    (identical? ws (:ws current)))
+                           (sync-watchdog-tick! current ws (common-util/time-ms))))
+                       (catch :default e
+                         (log/error :db-sync/sync-watchdog-tick-failed
+                                    {:repo repo :error e}))))
                    sync-wedge-check-interval-ms)]
         (reset! *timer timer))))
   client)
@@ -385,10 +432,14 @@
       (attach-ws-handlers! repo updated ws url)
       (set! (.-onopen ws)
             (fn [_]
-              (reset-reconnect! updated)
+              ;; A socket the wedge watchdog keeps killing opens fine every
+              ;; time. Keep its backoff and its error until sync moves again.
+              (when-not (wedge-limit-reached? updated)
+                (reset-reconnect! updated))
               (touch-last-ws-message! updated)
               (set-ws-state! updated :open)
-              (sync-util/clear-last-sync-error! updated)
+              (when-not (wedge-limit-reached? updated)
+                (sync-util/clear-last-sync-error! updated))
               (send! ws {:type "hello" :client repo})
               (sync-assets/enqueue-asset-sync!
                repo updated
