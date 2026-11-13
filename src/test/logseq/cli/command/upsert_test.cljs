@@ -744,6 +744,45 @@
                      (is false (str "unexpected error: " e))))
           (p/finally done)))))
 
+(defn- <page-parent-check
+  "Run the --parent validation for page 1 against a graph given as
+  `parents` (page id -> parent id) and `same-title-ids` (what the
+  same-title-under-parent query answers). Resolves :ok or the error data."
+  [parent-id parents same-title-ids]
+  (-> (p/with-redefs [transport/invoke (fn [_ method args]
+                                         (case method
+                                           :thread-api/pull
+                                           (let [[_ _ id] args]
+                                             (p/resolved (cond-> {:db/id id :block/title "Notes"}
+                                                           (get parents id)
+                                                           (assoc :block/parent {:db/id (get parents id)}))))
+
+                                           :thread-api/q
+                                           (p/resolved same-title-ids)))]
+        (#'upsert-command/<ensure-valid-page-parent! {} "demo-repo" 1 parent-id))
+      (p/then (fn [_] :ok))
+      (p/catch (fn [e] (assoc (ex-data e) :message (ex-message e))))))
+
+(deftest test-upsert-page-parent-validation
+  (async done
+    (-> (p/let [valid (<page-parent-check 3 {3 2} [])
+                new-cycle (<page-parent-check 3 {3 2, 2 1} [])
+                existing-cycle (<page-parent-check 3 {3 2, 2 3} [])
+                duplicate (<page-parent-check 3 {} [7])]
+          (is (= :ok valid))
+          (testing "the new parent sits below the page"
+            (is (= :invalid-options (:code new-cycle)))
+            (is (= "A page cannot be nested under one of its own descendants" (:message new-cycle))))
+          (testing "a cycle that is already in the graph does not hang the check"
+            (is (= :ok existing-cycle)))
+          (testing "the parent already has a page with this title"
+            (is (= :invalid-options (:code duplicate)))
+            (is (= [7] (:candidates duplicate)))
+            (is (= "The parent already has a page named \"Notes\"" (:message duplicate)))))
+        (p/catch (fn [e]
+                   (is false (str "unexpected error: " e))))
+        (p/finally done))))
+
 (deftest test-execute-upsert-task-page-invalid-status-fails-before-mutation
   (async done
     (let [calls* (atom [])

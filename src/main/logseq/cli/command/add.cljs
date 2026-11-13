@@ -556,11 +556,12 @@
 ;; (e.g. task scheduled/deadline) reliable. Bare `(js/Date. s)` silently
 ;; mis-parses locale formats — "12.02.2026" becomes Dec 2026, and "/" vs "-"
 ;; flip the timezone — producing a wrong date with no error. We reject anything
-;; that is not `YYYY-MM-DD` optionally followed by `THH:MM[:SS][.mmm][Z|±HH:MM]`
-;; (a space is allowed instead of `T`). Out-of-range ISO dates still fail via the
+;; that is not `YYYY-MM-DD` optionally followed by `THH:MM[:SS][.fff…][Z|±HH:MM]`
+;; (a space is allowed instead of `T`). The fraction may be any length:
+;; many tools emit microseconds. Out-of-range ISO dates still fail via the
 ;; isNaN check below.
 (def ^:private iso-datetime-re
-  #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(z|[+-]\d{2}:?\d{2})?)?$")
+  #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(z|[+-]\d{2}:?\d{2})?)?$")
 
 (defn- parse-datetime-value
   [value]

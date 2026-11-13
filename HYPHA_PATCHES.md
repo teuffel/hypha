@@ -1520,7 +1520,14 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     (transport/invoke cfg :thread-api/transact
       [repo [{:db/id page-id :block/parent (:db/id parent-page) :block/order (db-order/gen-key)}] {} {}]))
   ```
-- **Line count**: +~30 (spec keys + action carry + executor block + require).
+- **Line count**: +~70 (spec keys + action carry + executor block + require +
+  parent validation).
+- **Hardened**: 2026-11 — the raw transact skipped the checks the outliner's
+  page ops make. `<ensure-valid-page-parent!` now runs before it and refuses a
+  parent that sits below the page (a `:block/parent` cycle) and a parent that
+  already has another page with the same title. It uses the existing
+  `:thread-api/pull` and `:thread-api/q` only. Regression guard:
+  `test-upsert-page-parent-validation` in `logseq.cli.command.upsert-test`.
 - **Rationale**: With Patch #15 "/" is literal, so the old "type A/B" namespace
   shortcut is gone. A DB-native hierarchy needs an explicit `:block/parent`. The
   CLI had no parent primitive and no `--parent` flag, and the MCP bridge
@@ -1578,7 +1585,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   ;; HYPHA — gate on an unambiguous ISO-8601 regex before js/Date.
   (def ^:private iso-datetime-re
-    #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(z|[+-]\d{2}:?\d{2})?)?$")
+    #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(z|[+-]\d{2}:?\d{2})?)?$")
   (defn- parse-datetime-value [value]
     (cond
       (number? value) {:ok? true :value value}
@@ -1590,7 +1597,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
       :else {:ok? false}))
   ```
   Plus a clearer error message at the `:datetime` branch of
-  `coerce-property-value-basic`.
+  `coerce-property-value-basic`. The fraction was `\.\d{1,3}` until
+  2026-11, which rejected microsecond timestamps
+  (`2026-02-12T10:00:00.123456Z`); regression guard
+  `test-parse-datetime-value-accepts-iso-fractions-of-any-length` in
+  `logseq.cli.command.add-test`.
 - **Line count**: +~12 (regex def + guard + comment), 1 message line changed.
 - **Rationale**: `upsert task --scheduled/--deadline` (and any `:datetime`
   property) fed the raw string straight to `(js/Date. value)`. `new Date()` is

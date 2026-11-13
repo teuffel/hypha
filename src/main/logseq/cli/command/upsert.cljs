@@ -1167,6 +1167,45 @@
                  {:status :error
                   :error (exception->error error)}))))
 
+;; HYPHA: --parent sets :block/parent with a raw transact, which skips the
+;; checks the outliner's page ops make. Refuse what they would refuse: a
+;; parent that sits below the page (a cycle), and a second page with the same
+;; title under one parent.
+(defn- <ensure-valid-page-parent!
+  [cfg repo page-id parent-id]
+  (p/let [_ (p/loop [ancestor-id parent-id
+                     seen #{}]
+              (cond
+                (= ancestor-id page-id)
+                (throw (ex-info "A page cannot be nested under one of its own descendants"
+                                {:code :invalid-options :page page-id :parent parent-id}))
+
+                (or (nil? ancestor-id) (contains? seen ancestor-id))
+                nil
+
+                :else
+                (p/let [ancestor (transport/invoke cfg :thread-api/pull
+                                                   [repo [:db/id {:block/parent [:db/id]}] ancestor-id])]
+                  (p/recur (get-in ancestor [:block/parent :db/id])
+                           (conj seen ancestor-id)))))
+          page (transport/invoke cfg :thread-api/pull [repo [:db/id :block/title] page-id])
+          title (:block/title page)
+          same-title-ids (transport/invoke cfg :thread-api/q
+                                           [repo
+                                            [{:find '[[?b ...]]
+                                              :in '[$ ?page ?parent ?title]
+                                              :where '[[?b :block/parent ?parent]
+                                                       [?b :block/title ?title]
+                                                       [?b :block/name]
+                                                       [(not= ?b ?page)]]}
+                                             page-id parent-id title]])]
+    (when (seq same-title-ids)
+      (throw (ex-info (str "The parent already has a page named " (pr-str title))
+                      {:code :invalid-options
+                       :page page-id
+                       :parent parent-id
+                       :candidates (vec same-title-ids)})))))
+
 (defn execute-upsert-page
   [action config]
   (-> (p/let [cfg (cli-server/ensure-server! config (:repo action))
@@ -1237,6 +1276,8 @@
                _ (when (and parent-page (= (:db/id parent-page) page-id))
                    (throw (ex-info "A page cannot be its own parent"
                                    {:code :invalid-options :page (:page action)})))
+               _ (when parent-page
+                   (<ensure-valid-page-parent! cfg (:repo action) page-id (:db/id parent-page)))
                _ (when parent-page
                    (transport/invoke cfg :thread-api/transact
                                      [(:repo action)
