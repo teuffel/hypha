@@ -5,6 +5,7 @@
             [datascript.impl.entity :as de]
             [frontend.worker.db.migrate :as db-migrate]
             [frontend.worker.shared-service :as shared-service]
+            [lambdaisland.glogi :as log]
             [logseq.db :as ldb]
             [logseq.db-sync.checksum :as sync-checksum]
             [logseq.db.frontend.class :as db-class]
@@ -279,7 +280,7 @@
                                    [:db/add e :block/parent page-id]
                                    [:db/retract e :block/parent parent-eid]))))))]
     (when (seq tx-data)
-      (prn :debug :fix-dangling-block-parents tx-data)
+      (log/info :db-validate/fix-dangling-block-parents {:count (count tx-data)})
       (ldb/transact! conn tx-data {:fix-db? true}))))
 
 (defn- validate-db-result

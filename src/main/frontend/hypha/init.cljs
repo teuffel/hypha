@@ -50,10 +50,15 @@
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
 
+(def ^:private db-worker-ready-timeout-ms 30000)
+
 (defn- <wait-for-db-worker-ready!
   "Resolve once @state/*db-worker is truthy. Mirrors the pattern in
   `frontend.handler.db-based.sync/<wait-for-db-worker-ready!` (private)
-  but kept in this Hypha namespace to avoid an upstream patch."
+  but kept in this Hypha namespace to avoid an upstream patch.
+
+  Rejects after `db-worker-ready-timeout-ms`: a worker that never comes up
+  must not leave the post-login work pending forever without a trace."
   []
   (if @state/*db-worker
     (p/resolved true)
@@ -70,7 +75,12 @@
       (when @state/*db-worker
         (remove-watch state/*db-worker watch-key)
         (p/resolve! ready true))
-      ready)))
+      (-> (p/timeout ready db-worker-ready-timeout-ms)
+          (p/catch (fn [e]
+                     (remove-watch state/*db-worker watch-key)
+                     (log/error :hypha/db-worker-not-ready
+                                {:timeout-ms db-worker-ready-timeout-ms})
+                     (throw e)))))))
 
 (defn- <push-auth-to-db-worker!
   "Push :auth/id-token + :auth/access-token into the db-worker state.
