@@ -1897,6 +1897,69 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #23 — Quick capture returns the insert promise
+
+- **ID**: HYPHA-PATCH-023
+- **Introduced**: Fork-delta review follow-up (capture inbox acked
+  clips whose insert never happened), 2026-11
+- **File**: `src/main/frontend/quick_capture.cljs` (`quick-capture`)
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL — detached timeout, the returned promise resolves before
+  ;; the block exists and never sees an insert failure
+  (p/do!
+   (editor-handler/escape-editing)
+   (when (not= page (state/get-current-page))
+     (page-handler/<create! page {:redirect? redirect-page?}))
+   (js/setTimeout #(editor-handler/api-insert-new-block! content {...})
+                  100))
+
+  ;; HYPHA — same 100 ms wait, inside the chain
+  (p/do!
+   (editor-handler/escape-editing)
+   (when (not= page (state/get-current-page))
+     (page-handler/<create! page {:redirect? redirect-page?}))
+   (p/delay 100)
+   (editor-handler/api-insert-new-block! content {...}))
+  ```
+- **Line count**: 2 logic lines changed plus a 2-line comment.
+- **Rationale**: `frontend.hypha.capture` acks a clip in hypha-server's
+  capture inbox once it is in the graph; the server then deletes it.
+  With the detached timeout the only signal available was "100-odd ms
+  have passed", so a failed or skipped insert still got acked and the
+  clip was gone. The `:editor/quick-capture` event's promise settles
+  with its handler's, so returning the insert promise is all the capture
+  code needs to wait for the insert and to see it fail.
+- **Companion change (NOT a patch)**: `frontend.hypha.capture` waits for
+  the event promise instead of a fixed delay.
+- **Additive alternatives considered**:
+  - Re-implement quick capture in `frontend.hypha.capture`: rejected —
+    duplicates template rendering, target-page rules and the journal
+    fallback.
+  - Poll the db for the inserted block: rejected — the block's content
+    is template-dependent and `:replace-empty-target?` may reuse an
+    existing block, so there is nothing reliable to look for.
+  - Submit upstream: plausible — returning the promise is harmless for
+    the Electron and mobile callers.
+- **Break signal — structural**:
+  - `quick-capture` is renamed or the insert moves out of the `p/do!`.
+- **Break signal — semantic**:
+  - Upstream reintroduces a detached timer or stops returning the
+    promise from the `:editor/quick-capture` event handler.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-023' src/main/frontend/quick_capture.cljs` ⇒ `1`
+  - Semantic, manual at triage: `quick-capture`'s non-editing branch
+    must return a promise that settles with `api-insert-new-block!`.
+  - Regression guard: `drain-inbox-does-not-ack-when-an-insert-fails`
+    in `frontend.hypha.capture-test` covers the consumer; the patched
+    line itself has no unit test (needs a live graph).
+- **On break**:
+  - Structural → re-apply at the new insert site.
+  - Semantic upstream-merged → drop the patch.
+
+---
+
 (For new patches: same shape. Mandatory fields: ID, file, patch form, line
 count, rationale, additive alternatives considered, break signal structural +
 semantic, detection, on break.)

@@ -6,9 +6,10 @@
   params. These tests pin that contract plus the URL cleanup that keeps a
   reload from capturing the same page twice.
 
-  The surrounding glue (waiting for the graph, dispatching
-  :editor/quick-capture) needs a live graph and is covered by the manual
-  smoke in docs/hypha/quick-capture.md."
+  Parking and the inbox drain are tested against an in-memory store and
+  injected HTTP/dispatch fns. The surrounding glue (waiting for the
+  graph, dispatching :editor/quick-capture) needs a live graph and is
+  covered by the manual smoke in docs/hypha/quick-capture.md."
   (:require [cljs.core.async :as async]
             [cljs.test :refer [deftest is testing]]
             [clojure.string :as string]
@@ -91,13 +92,24 @@
     (is (= {:url "https://example.com"}
            (capture/clip->capture-args {:id "abc" :title "" :url "https://example.com"})))))
 
+(defn- memory-store
+  "In-memory stand-in for `capture/local-store`. Values round-trip through
+  JSON like the real one."
+  ([] (memory-store (atom {})))
+  ([*data]
+   {:read (fn [k]
+            (some-> (get @*data k) js/JSON.parse (js->clj :keywordize-keys true)))
+    :write! (fn [k v]
+              (swap! *data assoc k (js/JSON.stringify (clj->js v))))}))
+
 (deftest-async drain-inbox-does-nothing-when-the-inbox-is-empty
   (let [acked (atom :never-called)
         dispatched (atom [])]
     (-> (capture/<drain-inbox!
          (fn [] (async-resp {:status 200 :body {:clips []}}))
          (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil)))
+         (fn [args] (swap! dispatched conj args) (p/resolved nil))
+         (memory-store))
         (p/then (fn [drained]
                   (is (= 0 drained))
                   (is (= [] @dispatched))
@@ -112,7 +124,8 @@
                              :body {:clips [{:id "c1" :url "https://example.com/1"}
                                             {:id "c2" :title "Second"}]}}))
          (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil)))
+         (fn [args] (swap! dispatched conj args) (p/resolved nil))
+         (memory-store))
         (p/then (fn [drained]
                   (is (= 2 drained))
                   (is (= [{:url "https://example.com/1"} {:title "Second"}] @dispatched)
@@ -126,9 +139,84 @@
     (-> (capture/<drain-inbox!
          (fn [] (async-resp {:status 401 :body {:error "unauthorized"}}))
          (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil)))
+         (fn [args] (swap! dispatched conj args) (p/resolved nil))
+         (memory-store))
         (p/then (fn [drained]
                   (is (= 0 drained))
                   (is (= [] @dispatched))
                   (is (= :never-called @acked)
                       "a failed fetch must leave the inbox untouched for the next boot"))))))
+
+(deftest-async drain-inbox-does-not-ack-when-an-insert-fails
+  (let [acked (atom :never-called)
+        store (memory-store)
+        fetch (fn [] (async-resp {:status 200
+                                  :body {:clips [{:id "c1" :title "First"}
+                                                 {:id "c2" :title "Second"}]}}))
+        ack (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
+        dispatched (atom [])]
+    (p/let [failed-drain (capture/<drain-inbox!
+                          fetch ack
+                          (fn [args]
+                            (if (= "Second" (:title args))
+                              (p/rejected (ex-info "insert failed" {}))
+                              (do (swap! dispatched conj args) (p/resolved nil))))
+                          store)
+            acked-after-failure @acked
+            retry-drain (capture/<drain-inbox!
+                         fetch ack
+                         (fn [args] (swap! dispatched conj args) (p/resolved nil))
+                         store)]
+      (is (= 0 failed-drain))
+      (is (= :never-called acked-after-failure)
+          "the clips are the user's only copy; nothing is acked while one is not inserted")
+      (is (= 1 retry-drain) "only the clip that failed is inserted on retry")
+      (is (= [{:title "First"} {:title "Second"}] @dispatched)
+          "the clip inserted before the failure is not inserted twice")
+      (is (= ["c1" "c2"] @acked)))))
+
+(deftest-async drain-inbox-retries-a-failed-ack-without-duplicating-clips
+  (let [ack-statuses (atom [500 200])
+        acked (atom [])
+        dispatched (atom [])
+        store (memory-store)
+        fetch (fn [] (async-resp {:status 200
+                                  :body {:clips [{:id "c1" :title "First"}]}}))
+        ack (fn [ids]
+              (let [status (first @ack-statuses)]
+                (swap! ack-statuses rest)
+                (swap! acked conj [status ids])
+                (async-resp {:status status})))
+        dispatch (fn [args] (swap! dispatched conj args) (p/resolved nil))]
+    (p/let [first-drain (capture/<drain-inbox! fetch ack dispatch store)
+            second-drain (capture/<drain-inbox! fetch ack dispatch store)]
+      (is (= 1 first-drain))
+      (is (= 0 second-drain) "the server still lists the clip, but it is already in the graph")
+      (is (= [{:title "First"}] @dispatched) "no duplicate block")
+      (is (= [[500 ["c1"]] [200 ["c1"]]] @acked) "the ack is retried until the server takes it"))))
+
+;; ---------------------------------------------------------------------------
+;; Parked share-target / bookmarklet captures
+
+(deftest-async deliver-parked-files-captures-in-order-and-empties-the-store
+  (let [data (atom {})
+        store (memory-store data)
+        dispatched (atom [])]
+    (capture/park-capture! store {:title "First" :url "https://example.com/1"})
+    (capture/park-capture! store {:content "Second"})
+    (p/let [_ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))
+            _ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))]
+      (is (= [{:title "First" :url "https://example.com/1"} {:content "Second"}] @dispatched)
+          "each capture is filed exactly once")
+      (is (= ["[]"] (vals @data))))))
+
+(deftest-async deliver-parked-keeps-a-capture-whose-insert-failed
+  (let [store (memory-store)
+        dispatched (atom [])]
+    (capture/park-capture! store {:title "First"})
+    (p/let [failure (-> (capture/<deliver-parked! store (fn [_args] (p/rejected (ex-info "no graph" {}))))
+                        (p/then (fn [_] :resolved))
+                        (p/catch (fn [_] :rejected)))
+            _ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))]
+      (is (= :rejected failure))
+      (is (= [{:title "First"}] @dispatched) "the capture survived the failed attempt"))))
