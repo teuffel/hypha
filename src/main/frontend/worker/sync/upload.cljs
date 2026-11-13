@@ -318,11 +318,11 @@
 
 ;; HYPHA-PATCH-013: enrich the graph-already-exists error with the
 ;; remote graph's id, e2ee flag, and updated-at so the frontend's
-;; resolve dialog can offer a "Rebind to existing remote graph" action
+;; resolve dialog can offer to take over the existing remote graph
 ;; instead of leaving the user stuck. Stock Logseq throws only the
 ;; graph-name; that is enough to render an error toast but not enough
-;; to rebind. The enriched fields are additive: any caller that only
-;; reads `:graph-name` keeps working.
+;; to download the remote graph. The enriched fields are additive: any
+;; caller that only reads `:graph-name` keeps working.
 (defn- fail-upload-graph-already-exists!
   [repo {:keys [graph-id graph-name remote-graph-id remote-graph-e2ee? remote-updated-at]}]
   (throw (ex-info "remote graph already exists; delete it before uploading again"
@@ -370,30 +370,6 @@
           (p/let [_ (sync-crypt/<preflight-upload-e2ee! repo graph-e2ee?)]
             (<create-remote-graph-aux! repo {:graph-e2ee? graph-e2ee?
                                              :graph-ready-for-use? graph-ready-for-use?})))))))
-
-;; HYPHA-PATCH-013: rebind a local-only graph to an existing remote graph
-;; that shares its name. The frontend calls this when the user chose
-;; "verbinden" in the name-collision dialog. No upload happens — the
-;; KV bindings are written so the next RTC start treats this graph as
-;; remote, and RTC's normal merge logic reconciles local client_ops with
-;; the server. Used to avoid the Phase-1.6.2 dead-end where a local-only
-;; graph with the same name as an existing remote graph could not be
-;; uploaded (name collision) nor rebind (no UI path).
-(defn rebind-to-remote-graph!
-  [repo remote-graph-id remote-graph-e2ee?]
-  (cond
-    (not (seq repo))
-    (fail-fast :db-sync/missing-field {:field :repo})
-
-    (not (seq remote-graph-id))
-    (fail-fast :db-sync/missing-field {:repo repo :field :remote-graph-id})
-
-    :else
-    (do
-      (set-graph-sync-metadata! repo remote-graph-id (boolean remote-graph-e2ee?))
-      (ensure-client-graph-uuid! repo remote-graph-id)
-      {:graph-id remote-graph-id
-       :graph-e2ee? (boolean remote-graph-e2ee?)})))
 
 (defn upload-graph!
   [repo]

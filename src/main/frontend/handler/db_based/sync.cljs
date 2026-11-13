@@ -136,11 +136,12 @@
                    :requested-operation requested-operation))))
 
 (defn- <ensure-download-runtime-bound!
+  "Resolves true when this call created the local db for `repo`."
   [repo]
   (if (util/electron?)
     (p/let [_ (persist-db/<fetch-init-data repo {:sync-download-graph? true})
             _ (<sync-auth-state-to-db-worker!)]
-      nil)
+      false)
     ;; HYPHA-PATCH-022: bind the web runtime to the download target too.
     ;; Routing :thread-api/create-or-open-db through the worker proxy
     ;; creates the shared-service for `repo` and runs the tab master
@@ -153,9 +154,11 @@
     ;; :datascript-conn. :sync-download-graph? true skips initial-data
     ;; seeding + migration; prepare-import! (reset? = true) unlinks and
     ;; recreates the db anyway.
-    (p/let [_ (state/<invoke-db-worker :thread-api/create-or-open-db
+    (p/let [dbs (state/<invoke-db-worker :thread-api/list-db)
+            existed? (some #(= repo (:name %)) dbs)
+            _ (state/<invoke-db-worker :thread-api/create-or-open-db
                                        repo {:sync-download-graph? true})]
-      nil)))
+      (not existed?))))
 
 (defn- <ensure-user-rsa-keys-on-server!
   [{:keys [server-rsa-keys-exists?]}]
@@ -307,10 +310,20 @@
          (-> (if (and graph-uuid base)
                (p/let [_ (js/Promise. user-handler/task--ensure-id&access-token)
                        graph (str config/db-version-prefix graph-name)
-                       _ (<ensure-download-runtime-bound! graph)
-                       _ (state/<invoke-db-worker :thread-api/db-sync-download-graph-by-id
-                                                  graph graph-uuid graph-e2ee?)]
-                 true)
+                       created-db? (<ensure-download-runtime-bound! graph)]
+                 (-> (p/let [_ (state/<invoke-db-worker :thread-api/db-sync-download-graph-by-id
+                                                        graph graph-uuid graph-e2ee?)]
+                       true)
+                     ;; HYPHA-PATCH-022: the db was created only for this
+                     ;; download. Don't leave an empty graph with the
+                     ;; remote's name behind when it fails or is cancelled.
+                     (p/catch (fn [error]
+                                (p/let [_ (when created-db?
+                                            (-> (state/<invoke-db-worker :thread-api/unsafe-unlink-db graph)
+                                                (p/catch (fn [unlink-error]
+                                                           (log/error :db-sync/download-cleanup-failed
+                                                                      {:repo graph :error unlink-error})))))]
+                                  (throw error))))))
                (p/rejected (ex-info "db-sync missing graph info"
                                     {:type :db-sync/invalid-graph
                                      :graph-uuid graph-uuid
@@ -445,8 +458,8 @@
           ;; HYPHA-PATCH-013: when the failure is a name collision
           ;; (`:db-sync/graph-already-exists`), instead of a dead-end
           ;; error toast pub the [:rtc/graph-already-exists-resolve] event
-          ;; which opens a dialog letting the user rebind this local graph
-          ;; to the remote one that owns the name.
+          ;; which opens a dialog letting the user replace this local graph
+          ;; with the remote one that owns the name.
           (p/catch (fn [e]
                      (let [data (ex-data e)]
                        (log/error :db-sync/upload-graph-failed
@@ -465,18 +478,18 @@
             (fn []
               (state/set-state! :rtc/uploading? false)))))))
 
-;; HYPHA-PATCH-013: rebind a local-only graph to an existing remote graph.
-;; Triggered from the name-collision resolve dialog. On success the
-;; standard RTC start kicks in so client_ops get merged with the server
-;; without a re-upload.
-(defn <rtc-rebind-to-remote!
-  [repo remote-graph-id remote-graph-e2ee?]
-  (p/let [_ (state/<invoke-db-worker
-             :thread-api/db-sync-rebind-to-remote
-             repo remote-graph-id (boolean remote-graph-e2ee?))
-          _ (<get-remote-graphs)
-          _ (<rtc-start! repo)]
-    true))
+;; HYPHA-PATCH-013: resolve a name collision by taking over the remote
+;; graph. Triggered from the name-collision resolve dialog. The download
+;; replaces the same-named local db with the server state.
+(defn <rtc-replace-local-with-remote!
+  [repo graph-name remote-graph-id remote-graph-e2ee?]
+  (p/do!
+   (<rtc-download-graph! graph-name remote-graph-id (boolean remote-graph-e2ee?))
+   (<get-remote-graphs)
+   (state/pub-event! [:graph/switch repo {:rtc-download? true}])
+   ;; Switching to the repo that is already current does not fire the
+   ;; graph-switch rtc trigger, so start sync explicitly.
+   (<rtc-start! repo)))
 
 (defn <rtc-create-graph-and-start-sync!
   [repo graph-e2ee?]

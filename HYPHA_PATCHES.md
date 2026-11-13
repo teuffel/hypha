@@ -1068,47 +1068,31 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
-## Patch #13 — Name-collision resolve dialog (rebind to existing remote graph)
+## Patch #13 — Name-collision resolve dialog (take over existing remote graph)
 
 - **ID**: HYPHA-PATCH-013
 - **Introduced**: Phase 1.6.2 hardening (graph-already-exists dead-end
-  recovery), 2026-05-30
+  recovery), 2026-05-30. Reworked 2026-11 from "rebind" to "take over
+  remote" (see Rationale).
 - **Files**:
   - `src/main/frontend/worker/sync/upload.cljs` (enriched
-    fail-upload-graph-already-exists! + new rebind-to-remote-graph!)
-  - `src/main/frontend/worker/sync.cljs` (re-export `rebind-to-remote-graph!`)
-  - `src/main/frontend/worker/db_core.cljs` (new
-    `:thread-api/db-sync-rebind-to-remote` endpoint)
+    fail-upload-graph-already-exists!)
   - `src/main/frontend/handler/db_based/sync.cljs` (differentiate
-    `<rtc-upload-graph!` catch + add `<rtc-rebind-to-remote!`)
+    `<rtc-upload-graph!` catch + add `<rtc-replace-local-with-remote!`)
   - `src/main/frontend/handler/events/rtc.cljs` (new
     `:rtc/graph-already-exists-resolve` event handler)
   - `src/main/frontend/components/graph_rebind.cljs` (new namespace,
     dialog component)
-  - `src/resources/dicts/{en,de,zh-cn}.edn` (new `:graph.rebind/*`
-    keys)
+  - `src/resources/dicts/{en,de,zh-cn}.edn` (`:graph.rebind/*` keys)
 - **Patch form**:
   ```clojure
   ;; worker/sync/upload.cljs: enrich the error with the remote graph's
-  ;; identity so the frontend can rebind without a second round-trip.
+  ;; identity so the frontend can download it without a second round-trip.
   (fail-upload-graph-already-exists!
    repo {:graph-name target-graph-name
          :remote-graph-id (:graph-id match)
          :remote-graph-e2ee? (:graph-e2ee? match)
          :remote-updated-at (:updated-at match)})
-
-  ;; new worker fn:
-  (defn rebind-to-remote-graph!
-    [repo remote-graph-id remote-graph-e2ee?]
-    (set-graph-sync-metadata! repo remote-graph-id (boolean remote-graph-e2ee?))
-    (ensure-client-graph-uuid! repo remote-graph-id)
-    {:graph-id remote-graph-id
-     :graph-e2ee? (boolean remote-graph-e2ee?)})
-
-  ;; thread-api endpoint:
-  (def-thread-api :thread-api/db-sync-rebind-to-remote
-    [repo remote-graph-id remote-graph-e2ee?]
-    (db-sync/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
 
   ;; handler/db_based/sync.cljs: catch differentiation
   (if (= :db-sync/graph-already-exists (:code data))
@@ -1116,38 +1100,41 @@ during weekly upstream-sync, the detection grep is the first thing run; the
                        (assoc data :repo repo)])
     ;; … existing toast path …)
 
+  ;; handler/db_based/sync.cljs: the dialog's action
+  (defn <rtc-replace-local-with-remote!
+    [repo graph-name remote-graph-id remote-graph-e2ee?]
+    (p/do!
+     (<rtc-download-graph! graph-name remote-graph-id (boolean remote-graph-e2ee?))
+     (<get-remote-graphs)
+     (state/pub-event! [:graph/switch repo {:rtc-download? true}])
+     (<rtc-start! repo)))
+
   ;; handler/events/rtc.cljs: event opens the resolve dialog
   (defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
     (shui/dialog-open! #(graph-rebind/graph-already-exists-dialog payload) …))
   ```
-- **Line count**: +~230 net code lines (worker enrichment, new public
-  fns, new thread-api endpoint, new event handler, new dialog component)
-  plus +~40 i18n strings (3 locales × ~13 keys, en + de + zh-cn).
 - **Rationale**: Before this patch, uploading a local-only graph whose
   name was already taken on the server was a hard dead end. The
   upload-pipeline threw `:db-sync/graph-already-exists`, the frontend
   rendered a toast (`graph/upload-failed`), and the user had no
-  affordance other than:
-  - deleting the remote graph (would lose data on the other devices),
-  - deleting the local graph (would lose the changes that triggered
-    the upload in the first place),
-  - or finding a hidden console workaround to write KV bindings by
-    hand.
-
-  This is exactly the path Patch #12's user story walked into on
-  2026-05-30: a Hypha session expired silently, the local graph's
-  `:logseq.kv/graph-uuid` got cleared (or never wrote in the first
-  place), the cloud icon turned non-green, and clicking "Upload" hit
-  the dead-end toast.
+  affordance other than deleting the remote graph or deleting the
+  local graph by hand.
 
   This patch routes the name-collision error to a one-action resolve
-  dialog: "Connect to existing remote graph". The action calls a new
-  worker endpoint that writes the KV bindings to the remote graph's
-  UUID (no upload, no delete) and starts RTC. RTC's normal merge logic
-  then reconciles the local `client_ops` queue with the server. The
-  dialog shows the remote graph's short ID, last server-update
-  timestamp, and e2ee flag so the user can visually confirm they
+  dialog. "Connect" downloads the remote graph through the regular
+  download path, which replaces the same-named local db
+  (`prepare-import!` with `reset? = true`), then switches to the graph
+  and starts RTC. Local data that was never synced is lost; the dialog
+  says so. The dialog shows the remote graph's short ID, last
+  server-update timestamp, and e2ee flag so the user can confirm they
   picked the right one.
+
+  The first version of this patch wrote only the KV identity bindings
+  ("rebind") and relied on RTC to merge. That never synced: `local-tx`
+  stayed `nil` for a graph that was never uploaded, so the first
+  `hello` message threw `Invalid local tx` while the UI showed
+  "Connected". The rebind worker fn and its
+  `:thread-api/db-sync-rebind-to-remote` endpoint were removed.
 
   Rename-and-upload (third option floated in the design) is
   intentionally out of scope: it touches graph-identity rename code
@@ -1163,8 +1150,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     distinguish "the user wants to keep their local-only changes" from
     "the user accidentally created a duplicate". The resolve dialog is
     the conscious user choice.
-  - Auto-rebind silently on name match: rejected — strong
-    data-mutating action; the user must consent.
+  - Replace the local graph silently on name match: rejected —
+    destructive action; the user must consent.
   - Throw a richer code (`:db-sync/name-collision-rebindable`) instead
     of enriching the existing one: rejected — keeps the API surface
     smaller and downstream code that pattern-matches on the existing
@@ -1176,37 +1163,30 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Break signal — structural**:
   - `fail-upload-graph-already-exists!` is renamed or its signature
     changes such that the enriched fields don't reach the frontend.
-  - `:thread-api/db-sync-rebind-to-remote` is renamed.
   - `:rtc/graph-already-exists-resolve` event key is renamed or its
     payload shape changes.
-  - `rebind-to-remote-graph!` is moved/renamed in `worker/sync.cljs`'s
-    re-export layer.
+  - `<rtc-download-graph!` changes its signature.
 
 - **Break signal — semantic**:
   - Upstream adds its own name-collision resolution flow. Then the
     Hypha catch-differentiation can fold into upstream's path and this
-    patch's frontend half becomes redundant — verify the user can
-    still rebind without a regression.
-  - `set-graph-sync-metadata!` is restructured such that calling it
-    from outside an upload context no longer sets the bindings
-    correctly (e.g. additional side-effects are added that depend on
-    upload state).
+    patch's frontend half becomes redundant.
+  - The download path stops replacing an existing same-named local db
+    (`prepare-import!` no longer called with `reset? = true`).
 
 - **Detection**:
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-013' src/main/frontend/worker/sync/upload.cljs` ⇒ `1`
     (plus matches in `handler/db_based/sync.cljs`,
-    `handler/events/rtc.cljs`, `components/graph_rebind.cljs`,
-    `worker/db_core.cljs`, `worker/sync.cljs`, and the three dict
-    files via `:graph.rebind/*`).
+    `handler/events/rtc.cljs`, `components/graph_rebind.cljs`, and the
+    three dict files via `:graph.rebind/*`).
   - Semantic, manual at triage: the catch in `<rtc-upload-graph!` must
-    branch on `:db-sync/graph-already-exists`; the worker endpoint
-    must call `rebind-to-remote-graph!`; the dialog must offer the
-    rebind action (one of two buttons).
-  - Regression guard: tests `create-remote-graph-rejects-matching-remote-graph-test`
-    (enriched-error assertions) and `rebind-to-remote-graph-writes-kv-bindings-test`
-    + `rebind-to-remote-graph-fails-fast-on-empty-remote-graph-id-test`
-    in `frontend.worker.sync.upload-test`.
+    branch on `:db-sync/graph-already-exists`; the dialog's action must
+    call `<rtc-replace-local-with-remote!`.
+  - Regression guard: `create-remote-graph-rejects-matching-remote-graph-test`
+    (enriched-error assertions) in `frontend.worker.sync.upload-test`
+    and `rtc-replace-local-with-remote-downloads-then-starts-sync-test`
+    in `frontend.handler.db-based.sync-test`.
 
 - **On break**:
   - Structural rename → re-anchor the patch on the renamed entry point.
@@ -1285,7 +1265,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
      happens to match a remote. If the user never clicks upload, the
      collision stays invisible and a confusingly-similar local copy
      can drift. The banner makes this explicit on the graphs list
-     and offers the same one-click rebind.
+     and offers the same one-click resolve.
 
   Combined effect: a fresh browser login goes straight to an empty
   graph picker (which `frontend.hypha.init/<fetch-remote-graphs-after-login!`
@@ -1304,7 +1284,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Make the demo-graph repo Hypha-specific (e.g. a "Welcome to
     Hypha" graph): rejected for now — out of scope for a bugfix
     patch; can land separately as a real onboarding feature.
-  - Run the rebind flow automatically when a name collision is
+  - Run the resolve flow automatically when a name collision is
     detected at boot: rejected — strong data-mutating action; the
     user must consent. The banner explicitly offers, the user
     explicitly clicks.
@@ -1326,7 +1306,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Upstream's `combine-local-&-remote-graphs` starts merging
     same-name local + remote graphs into a single row (which
     eliminates the collision). Then the banner becomes dead and can
-    be removed; rebind still happens via Patch #13's upload-time
+    be removed; the resolve still happens via Patch #13's upload-time
     flow.
 
 - **Detection**:
