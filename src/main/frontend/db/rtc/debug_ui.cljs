@@ -147,9 +147,9 @@
           {:size :sm
            :on-click (fn [_]
                        (when-let [token (state/get-auth-id-token)]
-                         (p/let [r (state/<invoke-db-worker :thread-api/init-user-rsa-key-pair token (user/user-uuid))]
-                           (when (instance? ExceptionInfo r)
-                             (log/error :init-user-rsa-key-pair r)))))}
+                         (-> (state/<invoke-db-worker :thread-api/init-user-rsa-key-pair token (user/user-uuid))
+                             (p/catch (fn [e]
+                                        (log/error :init-user-rsa-key-pair e))))))}
           (shui/tabler-icon "upload") "init upload user rsa-key-pair")]
         [:div.pb-1
          [:pre.select-text

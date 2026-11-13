@@ -824,6 +824,41 @@
                        (set! remote/stop! original-stop!)
                        (done)))))))
 
+(defn- <settled
+  [promise]
+  (let [settled (p/deferred)]
+    (-> promise
+        (p/then (fn [v] (p/resolve! settled {:resolved v})))
+        (p/catch (fn [e] (p/resolve! settled {:rejected (ex-message e) :data (ex-data e)}) nil)))
+    settled))
+
+(deftest browser-invoke-remote-rejects-on-worker-error-test
+  (async done
+    (let [original-apis @thread-api/*thread-apis
+          remote-invoke (fn [method-str args-transit-str]
+                          (thread-api/remote-function method-str args-transit-str))]
+      (vswap! thread-api/*thread-apis assoc
+              :thread-api/test-ok (fn [x] (p/resolved {:echo x}))
+              :thread-api/test-ex-info (fn [x]
+                                         (p/rejected (ex-info "graph name collision"
+                                                              {:code :db-sync/graph-name-collision
+                                                               :arg x})))
+              :thread-api/test-js-error (fn []
+                                          (p/rejected (js/TypeError. "boom"))))
+      (-> (p/let [ok (<settled (browser/<invoke-remote remote-invoke :thread-api/test-ok [1]))
+                  ex-info-error (<settled (browser/<invoke-remote remote-invoke :thread-api/test-ex-info [2]))
+                  js-error (<settled (browser/<invoke-remote remote-invoke :thread-api/test-js-error []))]
+            (is (= {:resolved {:echo 1}} ok))
+            (is (= {:rejected "graph name collision"
+                    :data {:code :db-sync/graph-name-collision :arg 2}}
+                   ex-info-error))
+            (is (= {:rejected "boom" :data nil} js-error)))
+          (p/catch (fn [e]
+                     (is false (str "unexpected error: " e))))
+          (p/finally (fn []
+                       (vreset! thread-api/*thread-apis original-apis)
+                       (done)))))))
+
 (deftest browser-fetch-initial-data-pushes-graph-markdown-mirror-setting-test
   (async done
     (let [worker-calls (atom [])
