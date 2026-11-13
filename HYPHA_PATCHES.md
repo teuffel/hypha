@@ -509,12 +509,20 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   ;; HYPHA
   (defn- normalize-graph-e2ee?
     [graph-e2ee?]
-    (if (nil? graph-e2ee?)
-      (not (seq (:http-base @worker-state/*db-sync-config)))
-      (true? graph-e2ee?)))
+    (true? graph-e2ee?))
   ```
-- **Line count**: +8 (1 line of logic plus a 7-line explanatory comment).
-  `crypt.cljs/graph-e2ee?` is left untouched at its upstream definition.
+  The frontend twin `normalize-graph-e2ee?` in
+  `src/main/frontend/handler/db_based/sync.cljs` has the same form.
+- **Simplified**: 2026-11 — until then the nil default read
+  `(not (seq (:http-base @worker-state/*db-sync-config)))`, meant as
+  "self-hosted ⇒ false, Logseq.com ⇒ true". `:http-base` is always set
+  (it defaults to the Logseq.com API base), so that was always `false`.
+  Hypha never runs without a hypha-server, so the patch now says so
+  directly. The frontend twin still defaulted nil to `true` and was
+  aligned.
+- **Line count**: -3 logic lines plus a 6-line explanatory comment, in
+  both files. `crypt.cljs/graph-e2ee?` is left untouched at its upstream
+  definition.
 - **Rationale**: Stock Logseq's `graph-e2ee?` returns `nil` for graphs
   with no explicit `:logseq.kv/graph-rtc-e2ee?` setting. Every consumer
   in `worker/sync/{upload,assets,apply_txs,handle_message}.cljs` treats
@@ -536,14 +544,10 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   - **Older graphs created before M9.3**: same nil default, same failure.
 
-  This patch makes the upload path's `normalize-graph-e2ee?` hypha-aware:
-  when the worker's `db-sync-config` has a custom `:http-base` (=
-  self-hosted Hypha, set by `persist_db/browser.cljs` from
-  `frontend.config/set-custom-sync-server-url!`), unset state defaults to
-  **false** (no e2ee). When `:http-base` is empty (= stock Logseq pointing
-  at Logseq.com), unset state keeps the safer default **true**. This is
-  identical in shape to M9.3's UI default reversal, just propagated through
-  the upload-path fallback. `graph-e2ee?` itself remains the upstream pure
+  This patch makes the upload path's `normalize-graph-e2ee?` default
+  unset state to **false** (no e2ee). This is identical in shape to
+  M9.3's UI default reversal, just propagated through the upload-path
+  fallback. `graph-e2ee?` itself remains the upstream pure
   passthrough; the truthiness consumers (`<ensure-graph-aes-key`,
   `<grant-graph-access!`, assets, apply-txs, handle-message) already treat
   its `nil` as falsy (skip e2ee), so only the upload preflight needed the
@@ -556,7 +560,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Older graphs: nil → false → upload skips e2ee → user can opt back
     in via Settings if desired.
 
-  Net effect on Logseq.com: unchanged (no custom server → keeps true).
+  Net effect on Logseq.com: a Hypha build pointed at Logseq.com would
+  upload unset graphs without e2ee. Not a supported setup.
 
 - **Companion change (NOT a patch)**: none. This is a single-file
   worker-internal change.
@@ -586,7 +591,6 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `normalize-graph-e2ee?` is renamed, moved out of
     `worker/sync/upload.cljs`, or stops gating the `<preflight-upload-e2ee!`
     call.
-  - `worker-state/*db-sync-config` is renamed or restructured.
 
 - **Break signal — semantic**:
   - Upstream Logseq changes `normalize-graph-e2ee?` so nil no longer maps
@@ -600,9 +604,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/upload.cljs`
     ⇒ `1`
-  - Semantic, manual at triage: the `(nil? graph-e2ee?)` branch must read
-    `:http-base` from `worker-state/*db-sync-config`, and the polarity
-    must be `(not (seq ...))` — present-http-base implies default-false.
+  - Semantic, manual at triage: `normalize-graph-e2ee?` must map nil to
+    false, in the worker and in the frontend handler.
   - Regression guard: upstream's `graph-e2ee-preserves-nil-kv-value-test`
     and `graph-e2ee-preserves-false-kv-value-test` in
     `crypt_test.cljs` must stay green (they assert `graph-e2ee?` purity).
@@ -940,8 +943,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     call in `start!`)
   - `src/main/frontend/handler/user.cljs` (added `<refresh-id-token-hypha`
     branch in `<refresh-id-token&access-token`)
-  - `src/main/frontend/worker/sync/auth.cljs` (added Hypha branch in
-    `<refresh-id&access-token` via ui-request)
+  - `src/main/frontend/worker/sync/auth.cljs` (`<refresh-id&access-token`
+    refreshes via ui-request; the OAuth body is removed, see below)
   - `src/main/frontend/handler/worker.cljs` (added `:hypha-refresh-id-token`
     ui-action)
 - **Patch form**:
@@ -950,7 +953,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   (defn <refresh-hypha-id-token!
     "Re-mint id-token via /auth/session."
     ([] (<refresh-hypha-id-token! <fetch-session-default))
-    ([fetch-fn] ...))    ;; resolves to fresh JWT or nil on session loss
+    ([fetch-fn] ...))    ;; resolves to fresh JWT, nil on session loss
+                         ;; (401/403), rejects on anything else
 
   (defn start-refresh-loop! [])  ;; 5-min tick, refresh when TTL < 15min
 
@@ -959,18 +963,44 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     (<refresh-id-token-hypha)
     <existing-OAuth-path>)
 
-  ;; frontend.worker.sync.auth/<refresh-id&access-token now branches:
-  (if (hypha-mode?)  ;; detect via (seq (:http-base @*db-sync-config))
-    (<refresh-id&access-token-hypha)  ;; ui-request → main thread
-    <existing-OAuth-path>)
+  ;; frontend.worker.sync.auth/<refresh-id&access-token is the Hypha
+  ;; path only (ui-request → main thread); upstream's OAuth body and
+  ;; `oauth-token-url` are deleted:
+  (defn <refresh-id&access-token []
+    (p/let [resp (ui-request/<request :hypha-refresh-id-token nil ...)
+            id-token (:id-token resp)]
+      (when-not (seq id-token) (throw ...))
+      {:id-token id-token :access-token nil}))
 
   ;; frontend.handler.worker case-clause:
   :hypha-refresh-id-token
   (p/let [id-token (hypha-auth/<refresh-hypha-id-token!)]
     {:id-token id-token})
   ```
-- **Line count**: +~155 net code lines (helper ns, four branch points,
-  plus a 5-line config comment), -0 from upstream paths.
+- **Line count**: +~155 net code lines (helper ns, three branch points,
+  plus a 5-line config comment), -~40 upstream lines in
+  `worker/sync/auth.cljs` (OAuth refresh body, `oauth-token-url`) and
+  the two upstream tests that covered them
+  (`resolve-ws-token-refreshes-when-token-expired-test`,
+  `resolve-ws-token-does-not-fallback-to-main-thread-when-feature-flag-disabled-test`),
+  replaced by `resolve-ws-token-refreshes-through-main-thread-when-token-expired-test`
+  and `resolve-ws-token-rejects-when-main-thread-has-no-session-test`.
+- **Reworked**: 2026-11 —
+  - The worker used to pick the Hypha path with a `hypha-mode?` helper
+    that tested `(seq (:http-base @*db-sync-config))`. `:http-base` is
+    always set (it defaults to the Logseq.com API base), so the helper
+    was always true and upstream's OAuth body was unreachable. Hypha
+    never runs without a hypha-server, so the helper and the OAuth body
+    were removed instead of fixing the signal. **Upstream changes to
+    `<refresh-id&access-token` in `worker/sync/auth.cljs` now conflict;
+    resolve by keeping ours.**
+  - `<refresh-id-token-hypha` took from a promise in a `go` block
+    (`(<! (p/then …))`), which throws: core.async has no `ReadPort` for
+    `js/Promise`. It goes through `p->c` now.
+  - Only 401/403 from `/auth/session` count as a lost session. Offline
+    (`:status 0`) and 5xx reject in `<refresh-hypha-id-token!`, and
+    `frontend.hypha.init` retries the boot-time session restore instead
+    of prompting for the access code.
 - **Rationale**: Stock Logseq uses Cognito OAuth: a refresh-token plus
   /oauth2/token mints a fresh id-token whenever the current one nears
   expiry. Hypha has no refresh-token (Patch #3); the only persistent
@@ -1004,9 +1034,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   JWT and the server-side session both expired simultaneously. The loop
   refreshes while the cookie is still valid, keeping both sides aligned.
 
-  Session loss (e.g. cookie expired, manual logout server-side) returns
-  nil from `<refresh-hypha-id-token!`; the main-thread frontend then
-  surfaces `[:user/login]` to show the access-code modal.
+  Session loss (e.g. cookie expired, manual logout server-side: 401/403)
+  returns nil from `<refresh-hypha-id-token!`; the main-thread frontend
+  then surfaces `[:user/login]` to show the access-code modal.
 
 - **Companion change (NOT a patch)**: none. `/auth/session` is already
   Hypha-server's standard auth endpoint.
@@ -1034,17 +1064,14 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `frontend.handler.user/<refresh-id-token&access-token` is renamed,
     deleted, or its OAuth body is restructured such that the Hypha
     branch no longer sits at the top.
-  - `frontend.worker.sync.auth/<refresh-id&access-token` is similarly
-    refactored.
+  - `frontend.worker.sync.auth/<refresh-id&access-token` is renamed or
+    `<resolve-ws-token` stops calling it.
   - The `:hypha-refresh-id-token` ui-action key is renamed.
 
 - **Break signal — semantic**:
   - Upstream introduces its own cookie-session refresh path. Then both
     Hypha branches can fold into the upstream code and this patch
     becomes redundant — remove and re-verify the long-tab user story.
-  - `worker-state/*db-sync-config` is restructured such that
-    `:http-base` is no longer the Hypha-mode detection signal in the
-    worker.
 
 - **Detection**:
   - Structural, automatic:
@@ -1053,12 +1080,14 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     `handler/worker.cljs`).
   - Semantic, manual at triage: `<refresh-id-token&access-token` must
     branch on `hypha-config/hypha-mode?` to a Hypha-only function;
-    `<refresh-id&access-token` in the worker must branch on
-    `(hypha-mode?)` (the worker-side helper, which checks
-    `:http-base`) to a ui-request path.
+    `<refresh-id&access-token` in the worker must go through the
+    `:hypha-refresh-id-token` ui-request and never call `js/fetch`.
   - Regression guard: tests `refresh-hypha-id-token-*` in
-    `frontend.hypha.auth-test` (3 cases: 200+id-token, non-200, 200
-    without id-token).
+    `frontend.hypha.auth-test` (200+id-token, 401/403, and
+    offline/5xx/200-without-id-token),
+    `hypha-refresh-surfaces-login-only-on-session-loss-test` in
+    `frontend.handler.user-test`, and the two `resolve-ws-token-*` tests
+    named above in `frontend.worker.db-sync-test`.
 
 - **On break**:
   - Structural rename → re-anchor the branch on the new entry-point name.
