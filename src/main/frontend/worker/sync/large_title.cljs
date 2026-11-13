@@ -43,12 +43,22 @@
        (string? (:asset-uuid value))
        (string? (:asset-type value))))
 
+(defn- large-title-object-datoms
+  "Every large-title-object datom in `db`.
+
+  HYPHA-PATCH-006: read through :aevt, not :avet. Both callers walk all
+  datoms of the attribute, so the value index buys nothing, and :avet
+  misses the datoms of graphs that held them before the attribute was
+  marked :db/index true (a schema change does not reindex)."
+  [db]
+  (d/datoms db :aevt large-title-object-attr))
+
 (defn- find-large-title-object-eid
   [db obj]
   (some (fn [datom]
           (when (= obj (:v datom))
             (:e datom)))
-        (d/datoms db :avet large-title-object-attr)))
+        (large-title-object-datoms db)))
 
 (defn- resolve-large-title-item-eid
   [db {:keys [e obj]}]
@@ -256,5 +266,5 @@
   (when-let [conn (get-conn-f repo)]
     (let [tx-data (mapv (fn [datom]
                           [:db/add (:e datom) large-title-object-attr (:v datom)])
-                        (d/datoms @conn :avet large-title-object-attr))]
+                        (large-title-object-datoms @conn))]
       (rehydrate-large-titles!-f repo {:tx-data tx-data :graph-id graph-id}))))

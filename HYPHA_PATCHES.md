@@ -331,6 +331,28 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Files**:
   - `deps/db/src/logseq/db/frontend/schema.cljs`
   - `deps/db/src/logseq/db/frontend/malli_schema.cljs`
+  - `src/main/frontend/worker/sync/large_title.cljs` (since 2026-11, see
+    "Extended" below)
+- **Extended**: 2026-11 — marking the attribute `:db/index true` does not
+  reindex. A graph that already held large-title-object datoms keeps them
+  out of `:avet`, so `find-large-title-object-eid` and
+  `rehydrate-large-titles-from-db!` found nothing there. Both walk every
+  datom of the attribute anyway, so they now read `:aevt` through
+  `large-title-object-datoms`:
+  ```clojure
+  ;; ORIGINAL (two call sites)
+  (d/datoms db :avet large-title-object-attr)
+  ;; HYPHA
+  (d/datoms db :aevt large-title-object-attr)
+  ```
+  This was chosen over a versioned migration that re-transacts the
+  datoms: a Hypha-only entry in
+  `frontend.worker.db.migrate/schema-version->updates` would take the
+  minor version upstream uses next, and graphs already on it would skip
+  upstream's migration. Regression guard:
+  `large-title-lookups-find-datoms-that-predate-the-index-test` in
+  `frontend.worker.sync.large-title-test`. The schema entry stays, so an
+  upstream `:avet` read of the attribute cannot throw.
 - **Patch form** (two-piece, semantically one patch — both files must move
   in lockstep to keep the db-sync adapter's symmetry check happy):
 
