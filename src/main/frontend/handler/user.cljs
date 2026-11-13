@@ -5,6 +5,7 @@
             [cljs-time.coerce :as tc]
             [cljs-time.core :as t]
             [cljs.core.async :as async :refer [<! go timeout]]
+            [clojure.core.async.interop :refer [p->c]]
             [clojure.set :as set]
             [clojure.string :as string]
             [electron.ipc :as ipc]
@@ -207,10 +208,12 @@
 
   Re-mints the JWT via /auth/session (cookie auth) instead of OAuth
   refresh-token. On session loss, surface the login UI so the user sees
-  the access-code prompt instead of an endless 401 background loop."
+  the access-code prompt instead of an endless 401 background loop.
+  A failed refresh (offline, 5xx) arrives as an error value, not nil, and
+  is left to the refresh loop."
   []
   (go
-    (let [id-token (<! (p/then (hypha-auth/<refresh-hypha-id-token!) identity))]
+    (let [id-token (<! (p->c (hypha-auth/<refresh-hypha-id-token!)))]
       (when (nil? id-token)
         (state/pub-event! [:user/login])))))
 

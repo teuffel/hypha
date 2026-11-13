@@ -1,7 +1,9 @@
 (ns frontend.handler.user-test
-  (:require [cljs.test :refer [deftest is testing]]
+  (:require [cljs.core.async :as async]
+            [cljs.test :refer [async deftest is testing]]
             [electron.ipc :as ipc]
             [frontend.handler.user :as user-handler]
+            [frontend.hypha.auth :as hypha-auth]
             [frontend.state :as state]
             [frontend.util :as util]
             [promesa.core :as p]))
@@ -120,3 +122,34 @@
               (is (zero? @invoke-calls*)))))
         (finally
           (reset! state/*db-worker old-worker))))))
+
+(deftest hypha-refresh-surfaces-login-only-on-session-loss-test
+  (async done
+    (let [events* (atom [])
+          outcomes* (atom [(p/resolved nil)
+                           (p/resolved "jwt")
+                           (p/rejected (ex-info "hypha id-token refresh failed"
+                                                {:code :hypha-refresh-failed :status 0}))])
+          original-refresh hypha-auth/<refresh-hypha-id-token!
+          original-pub-event! state/pub-event!
+          <refresh-and-collect! (fn []
+                                  (async/go
+                                    (async/<! (#'user-handler/<refresh-id-token-hypha))
+                                    (let [events @events*]
+                                      (reset! events* [])
+                                      events)))]
+      (set! hypha-auth/<refresh-hypha-id-token! (fn []
+                                                  (let [outcome (first @outcomes*)]
+                                                    (swap! outcomes* rest)
+                                                    outcome)))
+      (set! state/pub-event! (fn [event] (swap! events* conj event) nil))
+      (async/go
+        (let [session-lost (async/<! (<refresh-and-collect!))
+              refreshed (async/<! (<refresh-and-collect!))
+              offline (async/<! (<refresh-and-collect!))]
+          (set! hypha-auth/<refresh-hypha-id-token! original-refresh)
+          (set! state/pub-event! original-pub-event!)
+          (is (= [[:user/login]] session-lost))
+          (is (= [] refreshed))
+          (is (= [] offline) "a failed refresh is not a session loss")
+          (done))))))

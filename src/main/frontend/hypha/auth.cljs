@@ -57,9 +57,13 @@
 (defn <refresh-hypha-id-token!
   "Re-mint the id-token via /auth/session. Returns a promesa promise that
   resolves to the fresh id-token string on success, or nil when the
-  session is no longer valid (cookie expired/cleared). On nil the caller
-  is responsible for surfacing the login UI; we do not pub-event here so
-  background callers can decide quietly.
+  session is no longer valid (401/403: cookie expired/cleared). On nil the
+  caller is responsible for surfacing the login UI; we do not pub-event
+  here so background callers can decide quietly.
+
+  Any other outcome (offline `:status 0`, 5xx, malformed body) says
+  nothing about the session, so the promise rejects and the refresh loop
+  retries on its next tick.
 
   Optional `fetch-fn` overrides the /auth/session call (tests only)."
   ([]
@@ -67,18 +71,27 @@
   ([fetch-fn]
    (let [deferred (p/deferred)]
      (go
-       (let [resp (<! (fetch-fn))]
+       (let [resp (<! (fetch-fn))
+             status (:status resp)
+             id-token (get-in resp [:body :id-token])]
          (cond
-           (and (= 200 (:status resp))
-                (some? (get-in resp [:body :id-token])))
-           (let [id-token (get-in resp [:body :id-token])]
+           (and (= 200 status) (some? id-token))
+           (do
              (state/set-auth-id-token id-token)
              (p/resolve! deferred id-token))
 
+           (contains? #{401 403} status)
+           (do
+             (log/info :hypha/refresh-session-lost {:status status})
+             (p/resolve! deferred nil))
+
            :else
            (do
-             (log/info :hypha/refresh-failed {:status (:status resp)})
-             (p/resolve! deferred nil)))))
+             (log/warn :hypha/refresh-failed {:status status
+                                              :error-text (:error-text resp)})
+             (p/reject! deferred (ex-info "hypha id-token refresh failed"
+                                          {:code :hypha-refresh-failed
+                                           :status status}))))))
      deferred)))
 
 ;; Tick the refresh check every 5 minutes; refresh when remaining TTL is
