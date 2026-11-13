@@ -135,7 +135,31 @@
   []
   (http/get "/auth/session" {:with-credentials? true}))
 
+(def ^:private session-retry-ms 30000)
 
+(defn- restore-session!
+  "Restore the session from the HttpOnly cookie on app boot.
+
+  Only 401/403 mean the session is gone and surface the login UI. Offline
+  (`:status 0`) and 5xx say nothing about the session, so they are retried
+  instead of prompting for the access code."
+  []
+  (go
+    (let [resp (<! (<fetch-session))
+          status (:status resp)]
+      (cond
+        (= 200 status)
+        (when-let [id-token (get-in resp [:body :id-token])]
+          (set-hypha-id-token! id-token))
+
+        (contains? #{401 403} status)
+        (state/pub-event! [:user/login])
+
+        :else
+        (do
+          (log/warn :hypha/session-restore-failed {:status status
+                                                   :error-text (:error-text resp)})
+          (js/setTimeout restore-session! session-retry-ms))))))
 
 (defn start!
   "Hypha-mode app-boot entry point.
@@ -156,13 +180,5 @@
   (asset-cache/start!)
   (hypha-auth/start-refresh-loop!)
   (capture/<start!)
-  (go
-    (let [resp (<! (<fetch-session))]
-      (cond
-        (= 200 (:status resp))
-        (when-let [id-token (get-in resp [:body :id-token])]
-          (set-hypha-id-token! id-token))
-
-        :else
-        (state/pub-event! [:user/login]))))
+  (restore-session!)
   nil)
