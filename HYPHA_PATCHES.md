@@ -741,12 +741,16 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Patch form**:
   ```clojure
   ;; ADDED — secret material for the locally-persisted e2ee password.
-  (defn- password-persistence-secret
+  (defn- <password-persistence-secret
     [refresh-token]
-    (if (seq refresh-token)
-      refresh-token
-      (when (browser-runtime? (platform/current))
-        (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))))
+    (let [platform' (platform/current)]
+      (cond
+        (seq refresh-token) (p/resolved refresh-token)
+        (browser-runtime? platform') (<device-secret platform')
+        :else (p/resolved nil))))
+
+  ;; <device-secret: 32 random bytes (hex), created on first use and kept
+  ;; in the platform secret store under "hypha-e2ee-device-secret".
 
   (defn- ensure-password-persistence-secret!
     [secret]
@@ -756,12 +760,20 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   ;; <save-e2ee-password / <read-e2ee-password-text /
   ;; <decrypt-e2ee-password-text / <read-e2ee-password / <decrypt-in-headless
-  ;; now resolve the refresh-token to `secret` via password-persistence-secret
+  ;; now resolve the refresh-token to `secret` via <password-persistence-secret
   ;; and use it for encrypt/decrypt instead of the raw refresh-token.
   ```
-- **Line count**: +~20 (helper pair + comment; call sites swap
+- **Line count**: +~35 (helpers + comment; call sites swap
   `refresh-token` → `secret`). `ensure-refresh-token!` is kept for the
   node auth-file path only.
+- **Reworked**: 2026-11 — the browser fallback used to be the JWT `sub`
+  (user-id). That is not a secret: it is in every token and known to the
+  server, so the stored password was only obfuscated. The fallback is
+  now a random secret generated once per browser profile. A password
+  persisted under the old user-id key no longer decrypts; the headless
+  attempt fails and the interactive path asks for the e2ee password once
+  and saves it under the device secret. No compatibility read of the old
+  format.
 - **Rationale**: Stock Logseq persists the e2ee password encrypted with
   the OAuth **refresh-token** as the symmetric key (so the password
   survives reboots without re-entry). Hypha's auth model has **no
@@ -777,12 +789,12 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   generate path that needs to persist a password.
 
   This patch resolves the persistence secret through
-  `password-persistence-secret`: the refresh-token when present (stock
-  Logseq, CLI), else — **only in browser runtime** — the stable JWT
-  `sub` (user-id). The user-id is identical across reboots and devices,
-  so the saved password re-decrypts correctly. The user still chooses
-  and enters the password; only the symmetric key wrapping the *stored*
-  password changes from refresh-token to user-id.
+  `<password-persistence-secret`: the refresh-token when present (stock
+  Logseq, CLI), else — **only in browser runtime** — a random secret
+  stored in this browser profile. It survives reboots, so the saved
+  password re-decrypts correctly. The user still chooses and enters the
+  password; only the symmetric key wrapping the *stored* password
+  changes from refresh-token to device secret.
 
   Net effect:
   - Hypha browser: password save/read works; entered once per device,
@@ -791,12 +803,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Node/CLI without refresh-token: `browser-runtime?` is false → no
     fallback → still fails as before (auth-file is the source of truth).
 
-- **Security note**: In Hypha the *local reusability* of the persisted
-  password rests on the non-secret user-id, not on a secret. The
-  password itself remains the secret protecting the RSA private key.
-  Acceptable under Hypha's single-user, trusts-own-server model (same
-  rationale as Patch #4's e2ee-off default); it would be a weakening for
-  a don't-trust-the-server threat model.
+- **Security note**: The device secret sits in the same origin storage
+  (IndexedDB) as the encrypted password. It keeps the stored password
+  from being decrypted with public information (the user-id), but not
+  from code or a person with access to this browser profile's storage.
+  The password itself remains the secret protecting the RSA private key.
 
 - **Companion change (NOT a patch)**: none. Single-file worker-internal
   change. The paired UI copy clarification
@@ -820,11 +831,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     can be removed.
 
 - **Break signal — structural**:
-  - `password-persistence-secret` or `ensure-password-persistence-secret!`
+  - `<password-persistence-secret` or `ensure-password-persistence-secret!`
     is renamed/removed, or a save/read path reverts to using the raw
     `refresh-token` for encrypt/decrypt.
-  - `sync-util/auth-token`, `browser-runtime?`, or `worker-util/parse-jwt`
-    is renamed/moved.
+  - `browser-runtime?`, `platform/read-secret-text` or
+    `platform/save-secret-text!` is renamed/moved.
 
 - **Break signal — semantic**:
   - Upstream makes refresh-token optional for password persistence (e.g.
@@ -838,15 +849,16 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-010' src/main/frontend/worker/sync/crypt.cljs`
     ⇒ `1`
-  - Semantic, manual at triage: `password-persistence-secret` must gate
-    the user-id fallback on `browser-runtime?`, and the save/read paths
+  - Semantic, manual at triage: `<password-persistence-secret` must gate
+    the device-secret fallback on `browser-runtime?`, and the save/read paths
     must encrypt/decrypt with the resolved `secret`, not the raw
     refresh-token.
   - Regression guard: `save-e2ee-password-missing-refresh-token-in-auth-file-test`
     and `decrypt-private-key-headless-ignores-config-e2ee-password-test`
-    (node-path, must still fail) plus the two
-    `*-falls-back-to-user-id-in-browser-without-refresh-token-test`
-    cases (browser-path, must succeed) in `crypt_test.cljs`.
+    (node-path, must still fail) plus
+    `save-e2ee-password-uses-new-device-secret-in-browser-without-refresh-token-test`
+    and `read-e2ee-password-uses-device-secret-in-browser-without-refresh-token-test`
+    (browser-path, must succeed) in `crypt_test.cljs`.
 
 - **On break**:
   - Structural → re-anchor on the new save/read secret-resolution shape.

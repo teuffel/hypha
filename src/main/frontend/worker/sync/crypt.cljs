@@ -81,18 +81,37 @@
 ;; HYPHA-PATCH-010: symmetric key material for the locally-persisted e2ee
 ;; password. Stock Logseq encrypts the saved password with the OAuth
 ;; refresh-token. Hypha self-hosted has no refresh-token (HttpOnly cookie
-;; session only), so it falls back to the stable JWT `sub` (user-id). The
-;; user-id is stable per user across reboots, so the persisted password
-;; can be re-decrypted without a refresh-token. See HYPHA_PATCHES.md #10.
-(defn- password-persistence-secret
+;; session only), so it falls back to a random secret that is generated
+;; once per browser profile and never leaves it. See HYPHA_PATCHES.md #10.
+(defonce ^:private device-secret-key "hypha-e2ee-device-secret")
+
+(defn- <device-secret
+  [platform']
+  (p/let [existing (platform/read-secret-text platform' device-secret-key)]
+    (if (seq existing)
+      existing
+      (let [secret (->> (js/crypto.getRandomValues (js/Uint8Array. 32))
+                        array-seq
+                        (map #(.padStart (.toString % 16) 2 "0"))
+                        (apply str))]
+        (p/let [_ (platform/save-secret-text! platform' device-secret-key secret)]
+          secret)))))
+
+(defn- <password-persistence-secret
   [refresh-token]
-  (if (seq refresh-token)
-    refresh-token
-    ;; Restricted to browser runtime: node/CLI uses the auth-file
-    ;; refresh-token and must keep failing without it. Only the Hypha
-    ;; browser session (cookie auth, no refresh-token) takes the fallback.
-    (when (browser-runtime? (platform/current))
-      (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))))
+  (let [platform' (platform/current)]
+    (cond
+      (seq refresh-token)
+      (p/resolved refresh-token)
+
+      ;; Restricted to browser runtime: node/CLI uses the auth-file
+      ;; refresh-token and must keep failing without it. Only the Hypha
+      ;; browser session (cookie auth, no refresh-token) takes the fallback.
+      (browser-runtime? platform')
+      (<device-secret platform')
+
+      :else
+      (p/resolved nil))))
 
 (defn- ensure-password-persistence-secret!
   [secret]
@@ -136,7 +155,7 @@
           refresh-token (if (browser-runtime? platform')
                           (:auth/refresh-token @worker-state/*state)
                           (<read-refresh-token-from-auth-file platform'))
-          secret (password-persistence-secret refresh-token)
+          secret (<password-persistence-secret refresh-token)
           _ (ensure-password-persistence-secret! secret)
           result (crypt/<encrypt-text-by-text-password secret password)
           text (ldb/write-transit-str result)
@@ -194,9 +213,9 @@
 
 (defn- <read-e2ee-password
   [refresh-token]
-  (let [secret (password-persistence-secret refresh-token)]
-    (p/let [text (<read-e2ee-password-text secret)]
-      (<decrypt-e2ee-password-text secret text))))
+  (p/let [secret (<password-persistence-secret refresh-token)
+          text (<read-e2ee-password-text secret)]
+    (<decrypt-e2ee-password-text secret text)))
 
 (defn- <clear-e2ee-password!
   []
@@ -468,16 +487,16 @@
 
         <decrypt-in-headless
         (fn [encrypted-private-key]
-          (let [secret (password-persistence-secret (:auth/refresh-token @worker-state/*state))]
-            (p/let [text (<read-e2ee-password-text secret)]
-              (if (seq text)
-                (p/let [password (<decrypt-e2ee-password-text secret text)]
-                  (when-not (seq password)
-                    (fail-missing-e2ee-password! {:reason :headless-empty-password
-                                                  :hint "Provide --e2ee-password to persist it."}))
-                  (crypt/<decrypt-private-key password encrypted-private-key))
-                (p/rejected (missing-e2ee-password-ex {:reason :missing-persisted-password
-                                                       :hint "Provide --e2ee-password to persist it."}))))))]
+          (p/let [secret (<password-persistence-secret (:auth/refresh-token @worker-state/*state))
+                  text (<read-e2ee-password-text secret)]
+            (if (seq text)
+              (p/let [password (<decrypt-e2ee-password-text secret text)]
+                (when-not (seq password)
+                  (fail-missing-e2ee-password! {:reason :headless-empty-password
+                                                :hint "Provide --e2ee-password to persist it."}))
+                (crypt/<decrypt-private-key password encrypted-private-key))
+              (p/rejected (missing-e2ee-password-ex {:reason :missing-persisted-password
+                                                     :hint "Provide --e2ee-password to persist it."})))))]
     (p/let [encrypted-private-key (ldb/read-transit-str encrypted-private-key-str)]
       (-> (<decrypt-in-headless encrypted-private-key)
           (p/catch (fn [headless-error]
