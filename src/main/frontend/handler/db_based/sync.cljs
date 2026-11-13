@@ -314,7 +314,7 @@
                  (-> (p/let [_ (state/<invoke-db-worker :thread-api/db-sync-download-graph-by-id
                                                         graph graph-uuid graph-e2ee?)]
                        true)
-                     ;; HYPHA-PATCH-022: the db was created only for this
+                     ;; The web bind above created the db only for this
                      ;; download. Don't leave an empty graph with the
                      ;; remote's name behind when it fails or is cancelled.
                      (p/catch (fn [error]

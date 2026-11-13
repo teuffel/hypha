@@ -1803,13 +1803,21 @@ during weekly upstream-sync, the detection grep is the first thing run; the
         nil)
       (p/resolved nil)))
 
-  ;; HYPHA — web branch binds too, instead of no-op:
-  (p/let [_ (state/<invoke-db-worker :thread-api/create-or-open-db
+  ;; HYPHA — web branch binds too, instead of no-op, and reports whether
+  ;; the bind created the db:
+  (p/let [dbs (state/<invoke-db-worker :thread-api/list-db)
+          existed? (some #(= repo (:name %)) dbs)
+          _ (state/<invoke-db-worker :thread-api/create-or-open-db
                                      repo {:sync-download-graph? true})]
-    nil)
+    (not existed?))
   ```
-- **Line count**: +3 logic lines (replacing `(p/resolved nil)`) plus a
-  13-line explanatory comment.
+  `<rtc-download-graph!` unlinks the db again
+  (`:thread-api/unsafe-unlink-db`) when the bind created it and the
+  download then fails or is cancelled. Otherwise an empty graph with the
+  remote's name stays behind (added 2026-11).
+- **Line count**: +5 logic lines (replacing `(p/resolved nil)`) plus a
+  13-line explanatory comment, and +9 lines for the cleanup in
+  `<rtc-download-graph!`.
 - **Rationale**: The browser db-worker's shared-service (tab master
   election via Web Locks, `worker/shared_service.cljs`) is created ONLY
   when `:thread-api/create-or-open-db` goes through the worker proxy
@@ -1877,9 +1885,10 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     `<ensure-download-runtime-bound!` must invoke
     `:thread-api/create-or-open-db` with `{:sync-download-graph? true}`.
   - Regression guard: tests
-    `rtc-download-graph-binds-web-runtime-before-download-test` and
-    `rtc-download-graph-delegates-to-worker-download-api-test` in
-    `frontend.handler.db-based.sync-test`.
+    `rtc-download-graph-binds-web-runtime-before-download-test`,
+    `rtc-download-graph-delegates-to-worker-download-api-test` and
+    `rtc-download-graph-unlinks-db-it-created-when-download-fails-test`
+    in `frontend.handler.db-based.sync-test`.
 - **On break**:
   - Structural → re-anchor the bind at whatever precedes the download
     invoke.
