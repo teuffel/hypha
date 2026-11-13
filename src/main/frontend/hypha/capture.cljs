@@ -23,6 +23,8 @@
   (:require [cljs-http.client :as http]
             [cljs.core.async :refer [<! go]]
             [clojure.string :as string]
+            [frontend.context.i18n :refer [t]]
+            [frontend.handler.notification :as notification]
             [frontend.state :as state]
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
@@ -80,21 +82,61 @@
 
 (def ^:private ready-poll-interval-ms 250)
 (def ^:private ready-timeout-ms 60000)
+(def ^:private late-ready-poll-interval-ms 2000)
 
 (defn- <wait-for-graph!
   "Resolve true once `graph-ready?`, or false if it stays false for
-  `ready-timeout-ms`. The timeout keeps a captured URL from leaking into a
-  session that never opens a graph (fresh login, no graph downloaded yet)."
-  []
-  (let [deadline (+ (js/Date.now) ready-timeout-ms)
+  `timeout-ms`. Without `timeout-ms` it waits until a graph is ready."
+  [poll-interval-ms timeout-ms]
+  (let [deadline (when timeout-ms (+ (js/Date.now) timeout-ms))
         result (p/deferred)]
     (letfn [(poll []
               (cond
                 (graph-ready?) (p/resolve! result true)
-                (> (js/Date.now) deadline) (p/resolve! result false)
-                :else (js/setTimeout poll ready-poll-interval-ms)))]
+                (and deadline (> (js/Date.now) deadline)) (p/resolve! result false)
+                :else (js/setTimeout poll poll-interval-ms)))]
       (poll))
     result))
+
+;; ---------------------------------------------------------------------------
+;; Local bookkeeping. A capture must survive until its block is in the
+;; graph, and a clip must not be inserted twice when its ack got lost. Both
+;; need state that outlives the tab.
+
+(def ^:private parked-key "hypha/capture-parked")
+(def ^:private inserted-clip-ids-key "hypha/capture-inserted-clip-ids")
+
+(def ^:no-doc local-store
+  "localStorage as the `{:read :write!}` pair the fns below take. Tests
+  pass an in-memory one."
+  {:read (fn [k]
+           (some-> (.getItem js/localStorage k)
+                   js/JSON.parse
+                   (js->clj :keywordize-keys true)))
+   :write! (fn [k v]
+             (.setItem js/localStorage k (js/JSON.stringify (clj->js v))))})
+
+(defn- read-vec
+  [store k]
+  (vec ((:read store) k)))
+
+(defn park-capture!
+  "Persist a share-target/bookmarklet capture until `<deliver-parked!` has
+  filed it. Its URL params are stripped right away, so this is the only
+  copy."
+  [store args]
+  ((:write! store) parked-key (conj (read-vec store parked-key) args)))
+
+(defn <deliver-parked!
+  "File every parked capture, oldest first. A capture leaves the store
+  only after `<dispatch` resolved for it, so a failed insert is retried on
+  the next boot."
+  [store <dispatch]
+  (p/loop []
+    (when-let [args (first (read-vec store parked-key))]
+      (p/let [_ (<dispatch args)]
+        ((:write! store) parked-key (vec (rest (read-vec store parked-key))))
+        (p/recur)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Capture inbox — clips posted by the Firefox / Thunderbird extensions.
@@ -134,45 +176,57 @@
   (http/post "/capture/ack" {:json-params {:ids ids}
                              :oauth-token (state/get-auth-id-token)}))
 
-;; `frontend.quick-capture` schedules its block insert on a 100 ms timeout
-;; that it does not return, so two dispatches in a row would race for the
-;; same page. Waiting this out between clips serialises them.
-(def ^:private inter-clip-delay-ms 300)
-
 (defn ^:no-doc <dispatch-clip-default
-  "Hand one set of capture args to upstream quick capture."
+  "Hand one set of capture args to upstream quick capture. Resolves once
+  the block is inserted and rejects when the insert fails: the event's
+  promise settles with the handler's."
   [args]
-  (state/pub-event! [:editor/quick-capture (clj->js args)])
-  (p/delay inter-clip-delay-ms))
+  (state/pub-event! [:editor/quick-capture (clj->js args)]))
 
 (defn <drain-inbox!
-  "Insert every pending clip, then ack them. Resolves the number drained.
+  "Insert every pending clip, then ack them. Resolves the number of clips
+  inserted.
 
-  Ack happens only after dispatch, so a browser that dies mid-drain
-  replays clips on the next boot instead of losing them. Any failure
-  leaves the inbox untouched and resolves 0 — the clips are the user's
-  only copy, so retrying next boot beats surfacing an error here.
+  A clip is acked only after its block was inserted, so a browser that
+  dies mid-drain replays clips on the next boot instead of losing them.
+  Inserted clip ids are remembered until the server confirmed the ack
+  with a 200, so a failed ack (401, 5xx, offline) is retried on the next
+  drain without inserting the clips again.
 
-  The three-arg form injects the HTTP calls and the dispatch for tests."
+  Any failure resolves 0 — the clips are the user's only copy, so
+  retrying next boot beats surfacing an error here.
+
+  The four-arg form injects the HTTP calls, the dispatch and the store
+  for tests."
   ([]
-   (<drain-inbox! <fetch-pending-default <ack-clips-default <dispatch-clip-default))
-  ([<fetch <ack <dispatch]
-   (-> (<chan->promise (<fetch))
-       (p/then (fn [resp]
-                 (if (not= 200 (:status resp))
-                   (do (log/info :hypha/capture-inbox-fetch-failed
-                                 {:status (:status resp)})
-                       0)
-                   (let [clips (get-in resp [:body :clips])]
-                     (if (empty? clips)
-                       0
-                       (-> (reduce (fn [chain clip]
-                                     (p/then chain
-                                             (fn [_] (<dispatch (clip->capture-args clip)))))
-                                   (p/resolved nil)
-                                   clips)
-                           (p/then (fn [_] (<chan->promise (<ack (mapv :id clips)))))
-                           (p/then (fn [_] (count clips)))))))))
+   (<drain-inbox! <fetch-pending-default <ack-clips-default <dispatch-clip-default local-store))
+  ([<fetch <ack <dispatch store]
+   (-> (p/let [resp (<chan->promise (<fetch))]
+         (if (not= 200 (:status resp))
+           (do (log/info :hypha/capture-inbox-fetch-failed
+                         {:status (:status resp)})
+               0)
+           (let [clips (get-in resp [:body :clips])
+                 clip-ids (mapv :id clips)
+                 ;; Ids the server no longer lists are done; drop them.
+                 inserted-ids (filterv (set clip-ids) (read-vec store inserted-clip-ids-key))
+                 new-clips (remove (comp (set inserted-ids) :id) clips)]
+             ((:write! store) inserted-clip-ids-key inserted-ids)
+             (if (empty? clips)
+               0
+               (p/let [_ (reduce (fn [chain clip]
+                                   (p/let [_ chain
+                                           _ (<dispatch (clip->capture-args clip))]
+                                     ((:write! store) inserted-clip-ids-key
+                                                      (conj (read-vec store inserted-clip-ids-key) (:id clip)))))
+                                 (p/resolved nil)
+                                 new-clips)
+                       ack-resp (<chan->promise (<ack clip-ids))]
+                 (if (= 200 (:status ack-resp))
+                   ((:write! store) inserted-clip-ids-key [])
+                   (log/warn :hypha/capture-inbox-ack-failed
+                             {:status (:status ack-resp)}))
+                 (count new-clips))))))
        (p/catch (fn [e]
                   (log/error :hypha/capture-inbox-drain-failed {:error e})
                   0)))))
@@ -182,23 +236,28 @@
   and drain the clipper inbox.
 
   URL params are stripped immediately — before the graph is even ready —
-  so a reload cannot replay the capture. Both paths then share one wait
-  for the graph, because both insert blocks.
+  so a reload cannot replay the capture. The capture is parked in
+  localStorage instead and filed once a graph is ready, in this session
+  or a later one. Both paths share one wait for the graph, because both
+  insert blocks.
 
   On an ordinary boot there are no URL params and the inbox is empty, so
   this costs one request once the graph is up."
   []
   (let [args (parse-capture-params js/window.location.search)]
     (when args
+      (park-capture! local-store args)
       (.replaceState js/window.history nil ""
                      (strip-capture-params js/window.location.href)))
-    (-> (<wait-for-graph!)
-        (p/then (fn [ready?]
-                  (if ready?
-                    (p/do (when args (<dispatch-clip-default args))
-                          (<drain-inbox!))
-                    ;; No graph within the timeout. Only worth reporting
-                    ;; when something was actually waiting to be filed.
-                    (when args
-                      (log/warn :hypha/capture-dropped
-                                {:reason "no graph ready before timeout"}))))))))
+    (p/let [ready? (<wait-for-graph! ready-poll-interval-ms ready-timeout-ms)
+            _ (when-not ready?
+                ;; Fresh login or a graph that is still downloading. Tell
+                ;; the user their capture is not lost, then keep waiting.
+                (when (seq (read-vec local-store parked-key))
+                  (log/warn :hypha/capture-parked {:reason "no graph ready before timeout"})
+                  (notification/show! (t :hypha.capture/waiting-for-graph) :warning))
+                (<wait-for-graph! late-ready-poll-interval-ms nil))
+            _ (-> (<deliver-parked! local-store <dispatch-clip-default)
+                  (p/catch (fn [e]
+                             (log/error :hypha/capture-deliver-parked-failed {:error e}))))]
+      (<drain-inbox!))))

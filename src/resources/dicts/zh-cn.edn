@@ -880,6 +880,8 @@
  :help.shortcuts/title "完整快捷键"
  :help.shortcuts/triggers "触发"
 
+ :hypha.capture/waiting-for-graph "捕获内容已保存，打开图谱后会自动添加。"
+
  :hypha.login/access-code-placeholder "访问码"
  :hypha.login/invalid-code "访问码无效"
  :hypha.login/network-error "无法连接到服务器，请重试。"

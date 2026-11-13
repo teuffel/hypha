@@ -97,8 +97,10 @@
          (when (not= page (state/get-current-page))
            (page-handler/<create! page {:redirect? redirect-page?}))
         ;; Or else this will clear the newly inserted content
-         (js/setTimeout #(editor-handler/api-insert-new-block! content {:page page
-                                                                        :edit-block? true
-                                                                        :replace-empty-target? true})
-                        100))))
+         ;; HYPHA-PATCH-023: wait inside the promise chain instead of a
+         ;; detached timeout, so the returned promise settles with the insert.
+         (p/delay 100)
+         (editor-handler/api-insert-new-block! content {:page page
+                                                        :edit-block? true
+                                                        :replace-empty-target? true}))))
     (notification/show! (t :journal/parse-date-to-name-error) :error)))

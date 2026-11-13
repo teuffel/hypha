@@ -62,9 +62,11 @@ therefore follow the stock config in your graph:
                           :redirect-page? false}
 ```
 
-If no graph is open within 60 seconds of the capture (for example a fresh
-login that still has to download the graph), the capture is dropped and a
-warning is logged to the console rather than silently misfiled.
+The capture is parked in the browser's localStorage until its block is
+in the graph. If no graph is open within 60 seconds (for example a fresh
+login that still has to download the graph), Hypha shows a notice that
+the capture is saved and files it once a graph is open, in this session
+or the next one.
 
 ## Verifying it works
 
@@ -107,7 +109,9 @@ POST /capture/ack     { ids: [...] }            → 200 { remaining }
 Auth is a JWT in `Authorization: Bearer`, obtained by POSTing the access
 code to `/auth/login` — the same credential and endpoint the web app uses.
 Clips are acked only *after* the blocks are inserted, so a browser that dies
-mid-drain replays them instead of losing them.
+mid-drain replays them instead of losing them. Hypha remembers which clips
+it already inserted until the server confirmed the ack, so a failed ack is
+retried on the next drain without inserting the clips twice.
 
 Setup and usage: [`hypha-clipper/README.md`](../../hypha-clipper/README.md).
 
