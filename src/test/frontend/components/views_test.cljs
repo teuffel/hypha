@@ -12,6 +12,13 @@
   (is (= :frontend.worker.react/objects (views/view-feature-type->react-key :property-objects)))
   (is (nil? (views/view-feature-type->react-key :query-result))))
 
+(deftest effective-data-changes-version-pauses-while-collapsed
+  "A collapsed view keeps the version it last loaded for, so ref changes do
+   not re-run its query; expanding it picks up the current version once."
+  (is (= 3 (views/effective-data-changes-version true 3 7)))
+  (is (= 7 (views/effective-data-changes-version false 3 7)))
+  (is (= 7 (views/effective-data-changes-version false 7 7))))
+
 (deftest build-columns-should-allow-name-property-when-no-object-name
   "When with-object-name? is false, the user property 'Name' should be kept"
   (let [mock-properties [{:db/ident :user.property/name-abc

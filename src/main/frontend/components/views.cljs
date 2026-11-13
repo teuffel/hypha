@@ -2889,11 +2889,38 @@
                              nil))]
     (db-hooks/use-query query-ref)))
 
+(defn effective-data-changes-version
+  "Data-changes version a view loads for. While the view is collapsed it
+  stays at `applied-version`, so changes do not re-run the view's query
+  until the view is expanded."
+  [collapsed? applied-version current-version]
+  (if collapsed? applied-version current-version))
+
 (hsx/defc sub-view
   [view-entity option]
   (let [view (or (db/sub-block (:db/id view-entity)) view-entity)
-        data-changes-version (sub-view-data-changes (:view-parent option) (:view-feature-type option))]
-    (view-aux view (assoc option :data-changes-version data-changes-version))))
+        current-version (sub-view-data-changes (:view-parent option) (:view-feature-type option))
+        ;; Unlinked references are a full title scan and start collapsed.
+        ;; Any edit to a block that links the page bumps the version, so
+        ;; only follow it while the section is open.
+        pause-when-collapsed? (= :unlinked-references (:view-feature-type option))
+        [collapsed? set-collapsed!] (hooks/use-state
+                                     (true? (get-in option [:foldable-options :default-collapsed?])))
+        *applied-version (hooks/use-ref current-version)
+        data-changes-version (effective-data-changes-version
+                              (and pause-when-collapsed? collapsed?)
+                              (hooks/deref *applied-version)
+                              current-version)
+        track-collapsed! (hooks/use-callback
+                          (fn [*collapsed]
+                            (set-collapsed! @*collapsed)
+                            (add-watch *collapsed ::sub-view
+                                       (fn [_ _ _ collapsed?] (set-collapsed! collapsed?))))
+                          [])]
+    (hooks/set-ref! *applied-version data-changes-version)
+    (view-aux view (cond-> (assoc option :data-changes-version data-changes-version)
+                     pause-when-collapsed?
+                     (assoc-in [:foldable-options :init-collapsed] track-collapsed!)))))
 
 (hsx/defc view
   [{:keys [view-parent view-feature-type] view-entity* :view-entity :as option}]
