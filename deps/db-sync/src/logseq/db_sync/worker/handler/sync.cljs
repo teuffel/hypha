@@ -130,26 +130,47 @@
 ;;   (let [url (js/URL. (.-url request))]
 ;;     (str (.-origin url) "/assets/" graph-id "/" snapshot-id ".snapshot")))
 
+(defn- trust-forwarded-headers?
+  "X-Forwarded-* only mean something behind a reverse proxy that sets them.
+  The deployment opts in (hypha-server does when it spawns the node
+  adapter); otherwise any client could pick the origin embedded in
+  responses."
+  [^js self]
+  (let [v (some-> self .-env (aget "DB_SYNC_TRUST_FORWARDED_HEADERS"))]
+    (or (true? v)
+        (and (string? v)
+             (contains? #{"true" "1" "on" "yes"} (string/lower-case v))))))
+
+(defn- first-forwarded-value
+  "First entry of a possibly comma-separated X-Forwarded-* header: with a
+  chain of proxies that is the one closest to the client."
+  [headers header-name]
+  (some-> headers
+          (.get header-name)
+          (string/split #",")
+          first
+          string/trim
+          not-empty))
+
 (defn- snapshot-stream-url
   "Build the public URL the browser should fetch for the snapshot stream.
 
-  Respects X-Forwarded-Host and X-Forwarded-Proto if present (set by a
-  reverse proxy like Hypha's fastify-http-proxy). Falls back to the
-  request URL's own origin when no forwarded headers exist (direct
-  Cloudflare Worker or no-proxy node deployment).
+  Respects X-Forwarded-Host and X-Forwarded-Proto when the deployment
+  trusts them (set by a reverse proxy like Hypha's fastify-http-proxy).
+  Falls back to the request URL's own origin otherwise (direct Cloudflare
+  Worker or no-proxy node deployment).
 
   Without forwarded-header awareness, a node-adapter behind a reverse
   proxy would return URLs pointing at its internal loopback
   (e.g. http://127.0.0.1:8787) which the browser cannot reach."
-  [request graph-id]
+  [^js self request graph-id]
   (let [url (js/URL. (.-url request))
-        headers (.-headers request)
-        forwarded-host (some-> headers (.get "x-forwarded-host"))
-        forwarded-proto (some-> headers (.get "x-forwarded-proto"))
-        origin (if (seq forwarded-host)
-                 (str (if (seq forwarded-proto) forwarded-proto "http")
-                      "://"
-                      forwarded-host)
+        headers (when (trust-forwarded-headers? self)
+                  (.-headers request))
+        forwarded-host (first-forwarded-value headers "x-forwarded-host")
+        forwarded-proto (first-forwarded-value headers "x-forwarded-proto")
+        origin (if forwarded-host
+                 (str (or forwarded-proto "http") "://" forwarded-host)
                  (.-origin url))]
     (str origin "/sync/" graph-id "/snapshot/stream")))
 
@@ -488,7 +509,7 @@
         (if-not ready-for-sync?
           (http/error-response "graph not ready" 409)
           (let [key (str "stream/" graph-id ".snapshot")
-                url (snapshot-stream-url request graph-id)
+                url (snapshot-stream-url self request graph-id)
                 content-encoding (when (and (snapshot-stream-gzip-enabled? self)
                                             (exists? js/CompressionStream))
                                    snapshot-content-encoding)]

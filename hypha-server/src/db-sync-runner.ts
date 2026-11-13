@@ -13,6 +13,11 @@
  *   HYPHA_JWT_ISSUER    → COGNITO_ISSUER
  *   HYPHA_JWT_AUDIENCE  → COGNITO_CLIENT_ID
  *   (derived JWKS URL)  → COGNITO_JWKS_URL
+ *   (always)            → DB_SYNC_TRUST_FORWARDED_HEADERS=true
+ *
+ * The adapter only listens on loopback behind our proxy (proxy.ts), which
+ * sets X-Forwarded-Host/-Proto on every request. The adapter ignores those
+ * headers unless told to trust them.
  *
  * The node-adapter signals readiness with a stdout line:
  *   "Logseq sync listening on port <N>"
@@ -84,6 +89,7 @@ export class DbSyncRunner {
       COGNITO_ISSUER: this.opts.jwtIssuer,
       COGNITO_CLIENT_ID: this.opts.jwtAudience,
       COGNITO_JWKS_URL: this.opts.jwksUrl,
+      DB_SYNC_TRUST_FORWARDED_HEADERS: "true",
     };
 
     this.child = spawn(nodeBin, [this.opts.adapterPath], {
