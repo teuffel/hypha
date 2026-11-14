@@ -136,10 +136,13 @@ fi
 # ─── db-sync node-adapter ────────────────────────────────────────────────────
 
 next_step "Building db-sync node-adapter (deps/db-sync)"
+# --ignore-workspace: the root pnpm-workspace.yaml would otherwise make pnpm
+# install the root workspace and leave deps/db-sync and hypha-server without
+# node_modules (Dockerfile.hypha copies both).
 if [[ ! -d deps/db-sync/node_modules ]]; then
-  pnpm --dir deps/db-sync install
+  pnpm --dir deps/db-sync install --ignore-workspace
 else
-  pnpm --dir deps/db-sync install --frozen-lockfile
+  pnpm --dir deps/db-sync install --frozen-lockfile --ignore-workspace
 fi
 pnpm --dir deps/db-sync run build:node-adapter
 if [[ ! -f deps/db-sync/worker/dist/node-adapter.js ]]; then
@@ -152,9 +155,9 @@ echo "   OK"
 
 next_step "Building hypha-server (TypeScript)"
 if [[ ! -f hypha-server/pnpm-lock.yaml ]]; then
-  pnpm --dir hypha-server install
+  pnpm --dir hypha-server install --ignore-workspace
 else
-  pnpm --dir hypha-server install --frozen-lockfile
+  pnpm --dir hypha-server install --frozen-lockfile --ignore-workspace
 fi
 pnpm --dir hypha-server build
 
