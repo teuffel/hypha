@@ -142,10 +142,12 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   if (opts.pluginUpstream && pluginCache) {
     await app.register(pluginMarketRoute, {
       cache: pluginCache,
+      sessions,
       upstreamBase: opts.pluginUpstream.marketBase,
     });
     await app.register(pluginCdnRoute, {
       cache: pluginCache,
+      sessions,
       upstreamBase: opts.pluginUpstream.cdnBase,
       assetsUpstreamBase: opts.pluginUpstream.assetsBase,
     });

@@ -136,6 +136,14 @@ async function buildPluginApp(
       cacheMaxEntries,
     },
   });
+  // The plugin routes need a session; log in once and send the cookie with
+  // every inject unless the test passes its own headers.
+  const login = await app.inject({ method: "POST", url: "/auth/login", payload: { code: "ignored" } });
+  const session = login.cookies.find((c) => c.name === "hypha-session");
+  assert.ok(session, "test login must set the session cookie");
+  const inject = app.inject.bind(app) as (opts: Record<string, unknown>) => ReturnType<typeof app.inject>;
+  (app as unknown as { inject: typeof inject }).inject = (opts) =>
+    inject({ ...opts, headers: (opts.headers as object | undefined) ?? { cookie: `hypha-session=${session.value}` } });
   return app;
 }
 
@@ -233,6 +241,34 @@ test("/plugin-market/packages/* — rejects path traversal with 400 invalid_path
     await app.close();
     await market.close();
     await cdn.close();
+  }
+});
+
+// The proxied plugin HTML/JS is served from the Hypha origin; without a
+// session nobody (and no cross-site navigation) may load it.
+test("plugin proxies — require a session, no upstream call without one", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    for (const url of [
+      "/plugin-market/plugins.json",
+      "/plugin-market/packages/x/icon.png",
+      "/plugin-cdn/r2/org/plugin",
+      "/plugin-cdn/assets/org/plugin/1.0.0/index.html",
+    ]) {
+      for (const headers of [{}, { cookie: "hypha-session=not-a-session" }]) {
+        const res = await app.inject({ method: "GET", url, headers });
+        assert.equal(res.statusCode, 401, `${url} ${JSON.stringify(headers)}`);
+      }
+    }
+    assert.equal(market.calls.length + cdn.calls.length + assets.calls.length, 0);
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
   }
 });
 
