@@ -59,6 +59,12 @@ export interface DbSyncRunnerOptions {
   startupTimeoutMs?: number;
   /** Override for Node.js binary used to spawn the child. */
   nodeBinary?: string;
+  /**
+   * Called when the adapter exits after it became ready, other than through
+   * stop(). Without it the server stays up with sync dead and /health still
+   * answering ok, so a container restart policy never fires.
+   */
+  onUnexpectedExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
 const READY_LINE = /Logseq sync listening on port (\d+)/;
@@ -66,6 +72,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 
 export class DbSyncRunner {
   private child: ChildProcess | null = null;
+  private stopping = false;
   private readonly opts: DbSyncRunnerOptions;
 
   constructor(opts: DbSyncRunnerOptions) {
@@ -123,7 +130,16 @@ export class DbSyncRunner {
 
       const onStdoutLine = (line: string) => {
         if (READY_LINE.test(line)) {
-          settle(() => resolve());
+          settle(() => {
+            child.once("exit", (code, signal) => {
+              if (this.stopping) return;
+              logger.error(
+                `db-sync-runner: node-adapter exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+              );
+              this.opts.onUnexpectedExit?.(code, signal);
+            });
+            resolve();
+          });
         }
       };
       const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -164,6 +180,7 @@ export class DbSyncRunner {
       return;
     }
     const child = this.child;
+    this.stopping = true;
     return new Promise<void>((resolve) => {
       const escalate = setTimeout(() => {
         if (child.exitCode === null) {
