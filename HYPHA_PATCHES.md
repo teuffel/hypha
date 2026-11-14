@@ -1124,7 +1124,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs` ⇒ `2`
+    (refresh branch and, since 2026-11, the server-side logout in `logout`)
     (plus matches in `hypha/auth.cljs`, `worker/sync/auth.cljs`,
     `handler/worker.cljs`).
   - Semantic, manual at triage: `<refresh-id-token&access-token` must
@@ -1480,8 +1481,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Upstream makes "/" literal itself (then the patch is redundant — drop it).
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs` ⇒ `1`
-    `rg -c 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs` ⇒ `1`
+    `rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs` ⇒ `3`
+    `rg -cF 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs` ⇒ `2`
     `rg -c 'HYPHA-LITERAL-SLASH' bin/hypha-build` ⇒ `2`
   - Semantic, manual at triage: `namespace-page?`'s body must start with
     `(not literal-slash?)`, and the validate slash-check must be gated by
@@ -1686,7 +1687,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Upstream changes journal-page identity (e.g. day no longer stored).
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs` ⇒ `2`
+    `rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs` ⇒ `4`
   - Semantic, manual at triage: `resolve-date-page-id` must resolve via
     `:block/journal-day`, not via a title-name lookup.
 - **On break**:
@@ -2046,6 +2047,45 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **On break**:
   - Structural → re-apply at the new insert site.
   - Semantic upstream-merged → drop the patch.
+
+---
+
+## Patch #24 — RTC auto-start survives a failed start
+
+- **ID**: HYPHA-PATCH-024
+- **Introduced**: Fork-delta review round 2, 2026-11
+- **File**: `src/main/frontend/handler/db_based/rtc_background_tasks.cljs`
+  (`::auto-start-rtc-if-possible`)
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL
+  (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))
+
+  ;; HYPHA
+  (try
+    (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))
+    (catch Cancelled e (throw e))
+    (catch :default e
+      (log/error :rtc-start-failed {:start-reason start-reason :repo repo :error e})))
+  ```
+- **Line count**: +8 (try/catch, import, comment).
+- **Rationale**: `<rtc-start!` rejects when the token is expired and the
+  refresh fails (offline at wake-up, session lost). The rejection ended the
+  missionary background task for the rest of the tab session, and that task
+  is the only thing that starts sync on later logins, graph switches,
+  visibility and network-online events. Sync then silently never started
+  again until a reload.
+- **Additive alternatives considered**: restart the task from
+  `run-background-task`'s fail handler: rejected, it is shared by every
+  background task.
+- **Break signal — structural**: the task is renamed or rewritten.
+  Upstream has since replaced it with an `add-watch` on a trigger atom that
+  runs `p/do!` per event, which does not have this problem: on the next
+  upstream merge, drop this patch and take upstream's version.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-024' src/main/frontend/handler/db_based/rtc_background_tasks.cljs` ⇒ `1`
+- **On break**: take upstream's rewrite.
 
 ---
 
