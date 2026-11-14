@@ -17,6 +17,7 @@
             [frontend.flows :as flows]
             [frontend.handler.notification :as notification]
             [frontend.hypha.auth :as hypha-auth]
+            [frontend.hypha.capture :as hypha-capture]
             [frontend.hypha.config :as hypha-config]
             [frontend.state :as state]
             [frontend.util :as util]
@@ -338,7 +339,9 @@
     (hypha-auth/<logout!))
   (clear-e2ee-password!)
   (clear-tokens)
-  (.clear js/localStorage)
+  (if hypha-config/hypha-mode?
+    (hypha-capture/clear-local-storage-keeping-captures!)
+    (.clear js/localStorage))
   (state/clear-user-info!)
   (state/pub-event! [:user/logout])
   (reset! flows/*current-login-user :logout))

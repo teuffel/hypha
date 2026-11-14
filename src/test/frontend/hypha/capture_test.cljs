@@ -280,6 +280,30 @@
         (p/finally (fn [_ _]
                      (set! state/pub-event! original-pub-event!))))))
 
+(deftest clear-local-storage-keeps-captures-test
+  (let [had? (.call (.-hasOwnProperty (.-prototype js/Object)) js/globalThis "localStorage")
+        previous (.-localStorage js/globalThis)
+        data (atom {"hypha/capture-parked" "[{\"title\":\"t\"}]"
+                    "hypha/capture-inserted-clip-ids" "[\"c1\"]"
+                    "git/current-repo" "logseq_db_x"})]
+    (js/Object.defineProperty js/globalThis "localStorage"
+                              #js {:value #js {:getItem (fn [k] (get @data k))
+                                               :setItem (fn [k v] (swap! data assoc k v))
+                                               :clear (fn [] (reset! data {}))}
+                                   :configurable true
+                                   :writable true})
+    (try
+      (capture/clear-local-storage-keeping-captures!)
+      (is (= {"hypha/capture-parked" "[{\"title\":\"t\"}]"
+              "hypha/capture-inserted-clip-ids" "[\"c1\"]"}
+             @data)
+          "logout clears everything except captures that are not in the graph yet")
+      (finally
+        (if had?
+          (js/Object.defineProperty js/globalThis "localStorage"
+                                    #js {:value previous :configurable true :writable true})
+          (js/Reflect.deleteProperty js/globalThis "localStorage"))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Parked share-target / bookmarklet captures
 
