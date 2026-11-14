@@ -328,6 +328,11 @@
   [client]
   (>= @(:sync-wedge-kills client) sync-wedge-max-kills))
 
+(defn- clear-wedge-error!
+  [client]
+  (when (= :db-sync/ws-wedged (some-> (:last-sync-error client) deref :code))
+    (sync-util/clear-last-sync-error! client)))
+
 (defn- sync-watchdog-tick!
   "One watchdog check for `client` on its open `ws` at time `now`."
   [client ws now]
@@ -342,21 +347,23 @@
       (nil? snapshot)
       (reset! *snap fresh-snapshot)
 
-      (sync-progressed? snapshot local-tx pending)
+      ;; Moving again, or fully pushed: whatever wedged before is over.
+      (or (sync-progressed? snapshot local-tx pending)
+          (zero? pending))
       (do
-        (when (wedge-limit-reached? client)
-          (sync-util/clear-last-sync-error! client))
+        (clear-wedge-error! client)
         (reset! *kills 0)
         (reset! *snap fresh-snapshot))
 
-      (or (zero? pending)
-          (not (worker-state/online?))
+      (or (not (worker-state/online?))
           (not (ws-open? ws))
-          (sync-apply/upload-stopped? repo)
-          (not (awaiting-server? client)))
+          (sync-apply/upload-stopped? repo))
       (reset! *snap fresh-snapshot)
 
-      (>= (- now (:at snapshot)) sync-wedge-timeout-ms)
+      (< (- now (:at snapshot)) sync-wedge-timeout-ms)
+      nil
+
+      (awaiting-server? client)
       (let [kills (swap! *kills inc)]
         (log/warn :db-sync/ws-wedge-timeout
                   {:repo repo :pending pending :local-tx local-tx
@@ -371,21 +378,35 @@
                      :repo repo
                      :pending pending
                      :kills kills})))
-        (try (.close ws) (catch :default _ nil))))))
+        (try (.close ws) (catch :default _ nil)))
+
+      ;; Nothing is outstanding, yet the pending txs did not move: the last
+      ;; flush failed before it sent anything (e.g. a large-title upload or
+      ;; the e2ee key fetch). Nothing re-triggers it before the next local
+      ;; edit or remote change, so try again. During a long apply this is a
+      ;; no-op, because flush-pending! waits for local-tx to catch up.
+      :else
+      (do
+        (log/info :db-sync/sync-watchdog-reflush {:repo repo :pending pending})
+        (reset! *snap fresh-snapshot)
+        (sync-apply/enqueue-flush-pending! repo client)))))
 
 (defn- start-sync-watchdog-loop
   "Force a reconnect when pending local txs make no progress for too long while
   the WS is open and a reply from the server is outstanding. Closing the socket
   routes through onclose, which resets the in-flight sync state and schedules a
-  reconnect that re-flushes from a clean state. No-op while offline, paused,
-  fully synced, or busy applying remote txs."
+  reconnect that re-flushes from a clean state. Re-flush without a reconnect
+  when nothing is outstanding. No-op while offline, paused or fully synced."
   [client ws]
   (let [repo (:repo client)
         graph-id (:graph-id client)
         *snap (:sync-progress client)]
     (clear-sync-watchdog-timer! client)
     (when-let [*timer (:sync-watchdog-timer client)]
-      (reset! *snap nil)
+      ;; Keep what the last connection reached, so that a recovery that
+      ;; completes before the first tick on this connection (the usual case
+      ;; after a forced reconnect) still counts as progress.
+      (swap! *snap #(some-> % (assoc :at (common-util/time-ms))))
       (let [timer (js/setInterval
                    (fn []
                      (try
