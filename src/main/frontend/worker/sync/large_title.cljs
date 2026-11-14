@@ -162,7 +162,7 @@
                 fail-fast-f]}]
   (when-let [conn* (or conn (get-conn-f repo))]
     (let [graph-id* (or graph-id (get-graph-id repo))
-          items (if (seq tx-data)
+          items (if (some? tx-data)
                   (->> tx-data
                        (keep (fn [item]
                                (when (and (vector? item)
@@ -172,13 +172,12 @@
                                  {:e (nth item 1)
                                   :obj (nth item 3)})))
                        (distinct))
-                  (->> (d/datoms @conn* :eavt)
+                  (->> (large-title-object-datoms @conn*)
                        (keep (fn [datom]
-                               (when (= large-title-object-attr (:a datom))
-                                 (let [obj (:v datom)]
-                                   (when (large-title-object? obj)
-                                     {:e (:e datom)
-                                      :obj obj})))))
+                               (let [obj (:v datom)]
+                                 (when (large-title-object? obj)
+                                   {:e (:e datom)
+                                    :obj obj}))))
                        (distinct)))]
       (when (seq items)
         (p/let [aes-key* (or aes-key
@@ -267,4 +266,5 @@
     (let [tx-data (mapv (fn [datom]
                           [:db/add (:e datom) large-title-object-attr (:v datom)])
                         (large-title-object-datoms @conn))]
-      (rehydrate-large-titles!-f repo {:tx-data tx-data :graph-id graph-id}))))
+      (when (seq tx-data)
+        (rehydrate-large-titles!-f repo {:tx-data tx-data :graph-id graph-id})))))

@@ -23,9 +23,8 @@
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
 
-(defn- parse-jwt-exp-ms
-  "Extract the exp claim (seconds) from a JWT payload and convert to ms.
-  Returns nil on any parse failure or missing claim."
+(defn- parse-jwt-payload
+  "The JWT payload as a keywordized map, or nil when `token` is not a JWT."
   [token]
   (when (string? token)
     (try
@@ -39,13 +38,18 @@
                               ""))
                 json-str (js/atob (-> padded
                                       (.replace (js/RegExp. "-" "g") "+")
-                                      (.replace (js/RegExp. "_" "g") "/")))
-                payload (js->clj (js/JSON.parse json-str) :keywordize-keys true)
-                exp (:exp payload)]
-            (when (number? exp)
-              (* exp 1000)))))
+                                      (.replace (js/RegExp. "_" "g") "/")))]
+            (js->clj (js/JSON.parse json-str) :keywordize-keys true))))
       (catch :default _
         nil))))
+
+(defn- parse-jwt-exp-ms
+  "Extract the exp claim (seconds) from a JWT payload and convert to ms.
+  Returns nil on any parse failure or missing claim."
+  [token]
+  (let [exp (:exp (parse-jwt-payload token))]
+    (when (number? exp)
+      (* exp 1000))))
 
 (defn ^:no-doc <fetch-session-default
   "Production /auth/session call. Wrapped so callers can pass a stub
@@ -77,7 +81,10 @@
          (cond
            (and (= 200 status) (some? id-token))
            (do
-             (state/set-auth-id-token id-token)
+             ;; The user id keys the graph session. Without it the token
+             ;; itself is the id, and every re-mint looks like a user switch
+             ;; that drops the remote graph list.
+             (state/set-auth-id-token id-token (:sub (parse-jwt-payload id-token)))
              (p/resolve! deferred id-token))
 
            (contains? #{401 403} status)

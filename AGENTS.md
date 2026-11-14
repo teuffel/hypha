@@ -1,11 +1,11 @@
 # Repository Guidelines
 
-Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targets defined in `shadow-cljs.edn`: browser apps (`:app`, `:mobile`, `:publishing`), web worker (`:db-worker`), and node scripts (`:db-worker-node`, `:logseq-cli`, `:electron`, `:test`, `:test-no-worker`). `CODEBASE_OVERVIEW.md` and `docs/dev-practices.md` are the canonical orientation docs.
+Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targets defined in `shadow-cljs.edn`: browser apps (`:app`, `:mobile`, `:publishing`), web worker (`:db-worker`), and node scripts (`:db-worker-node`, `:electron`, `:test`, `:test-no-worker`). `CODEBASE_OVERVIEW.md` and `docs/dev-practices.md` are the canonical orientation docs.
 
 ## Codebase Layout (non-obvious)
 - `deps/` holds independent Clojure local-root libraries (`common`, `db`, `db-sync`, `graph-parser`, `outliner`, `publishing`, `publish`, `cli`, `shui`). Each has its own `deps.edn`, `.clj-kondo/`, and sometimes `package.json` / `bb.edn`. Edit the dep that owns the namespace and run that dep's tooling — not the root one.
 - `src/main/frontend/worker/**` and `src/main/frontend/worker_common/**` must NOT require frontend namespaces (except `frontend.worker.*` / `frontend.common.*`); the reverse is also forbidden (one tiny allowlist for `frontend.worker.file.reset`). `bb lint:worker-and-frontend-separate` enforces both directions — a stray `:require` that pulls React into the worker breaks it hard. Shared code goes through `deps/` or `frontend.common.*`.
-- Subdirectories with their own `AGENTS.md` (read recursively before editing): `src/main/logseq/cli/`, `clj-e2e/`, `cli-e2e/`, `libs/guides/`.
+- Subdirectories with their own `AGENTS.md` (read recursively before editing): `cli/` (OCaml CLI), `src/main/logseq/cli/`, `clj-e2e/`, `cli-e2e/`, `libs/guides/`.
 
 ## Build, Test, and Development Commands
 - **Run build/test/lint inside the dev container** (canonical path; the host needs only Docker + Compose). `bin/dev <command>` forwards into the `Dockerfile.dev` image whose toolchain is pinned to CI (Node 24, Java 21, Clojure CLI, Babashka, pnpm). Examples: `bin/dev bb dev:lint-and-test`, `bin/dev bb dev:test -r <regex>`, `bin/dev bin/hypha-build`. The first run builds the image (~5 min) and installs deps; later runs are instant. See `Dockerfile.dev` and `docker-compose.dev.yml`.
@@ -37,6 +37,7 @@ Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targe
 ## Testing Guidelines
 - Unit tests live in `src/test/` and are runnable via `bb dev:lint-and-test` (run it inside the dev container — see Build/Test commands; the test build needs Node 22.5+ for `node:sqlite`).
 - A namespace's tests live in the sibling namespace with a `-test` suffix (`frontend.db.model` → `frontend.db.model-test`).
+- For CLJS tests, avoid recompiling when source files have not changed since the last successful `cljs:test`; run against the existing compiled test artifact instead.
 - See `docs/dev-practices.md` for repl-driven, autorun, database, performance, and async test helpers.
 
 ## *IMPORTANT*: Always respect directory-specific AGENTS.md based on file path
@@ -45,14 +46,18 @@ Logseq is a ClojureScript codebase compiled by `shadow-cljs` into multiple targe
 ## Commit & Pull Request Guidelines
 - Commit subjects are short and imperative, often with a scoped prefix matching existing history: `fix:`, `feat:` / `feature:`, `enhance:` / `enhance(rtc):`, `chore:`, `dev:`, `test:`.
 - PRs should describe the behavior change, link relevant issues, and note any test coverage added or skipped.
+- Never include the word "Codex" or any agent name in commit subjects, commit bodies, trailers, branch names, PR titles, or PR descriptions.
+- PR titles must describe the code change only.
+- Before creating or updating commits or PRs, verify that the generated metadata does not contain "Codex" or any agent name in any casing.
 
 ## Agent-Specific Notes
 - Repo-local skills live under `.agents/skills/`; load the matching `SKILL.md` before editing files or proposing changes.
 - **i18n (mandatory)**: Always load `.agents/skills/logseq-i18n/SKILL.md` before any change that adds, edits, or removes user-facing UI text, regardless of whether other skills also apply.
 - Review notes in `prompts/review.md` codify recurring Clojure(Script) mistakes (`empty?` vs `empty`, `conn` vs `db`, `memoize` leaks, log helpers, `:block/title` vs deprecated `:block/content`, etc.); check them when preparing changes.
-- DB-sync feature guide for AI agents: `docs/agent-guide/db-sync/db-sync-guide.md`.
-- DB-sync protocol reference: `docs/agent-guide/db-sync/protocol.md`.
+- Runtime, sync, CLI, rendering, search, and Graph View engineering guidance is consolidated in `docs/agent-guide/implemented/architecture/2026-08-24-logseq-runtime-and-engineering-guide.md`; current source and tests remain authoritative.
 - For db-sync D1 schema changes, add or update a Cloudflare worker SQL migration under `deps/db-sync/worker/migrations/`; do not rely on ad hoc runtime-only schema migration code.
 - New properties go in `logseq.db.frontend.property/built-in-properties` AND require a paired entry in `frontend.worker.db.migrate/schema-version->updates` (e.g. `["65.10" {:properties [:block/journal-day]}]`). Skipping the migration silently breaks existing graphs.
 - Avoid creating new classes or properties unless required.
 - When deleting properties in a db migration, add those properties to `logseq.db-sync.tx-sanitize/migration-deleted-attrs` so server-side tx sanitization drops them from incoming syncs.
+- Use spec-dev-tool to manage agent decision documents; run `spec-dev-tool --help` and follow its AGENT WORKFLOW.
+- When asked to find simplifications, run `spec-dev-tool guide find-simplifications` from inside this Git worktree and follow the emitted workflow.

@@ -2,7 +2,9 @@
   "Transact outliner ops"
   (:require [clojure.string :as string]
             [datascript.core :as d]
+            [logseq.common.defkeywords :refer [defkeywords]]
             [logseq.common.util :as common-util]
+            [logseq.common.util.date-time :as date-time-util]
             [logseq.db :as ldb]
             [logseq.db.sqlite.export :as sqlite-export]
             [logseq.outliner.core :as outliner-core]
@@ -10,9 +12,11 @@
             [logseq.outliner.page :as outliner-page]
             [logseq.outliner.property :as outliner-property]
             [logseq.outliner.recycle :as outliner-recycle]
-            [logseq.outliner.transaction :as outliner-tx]
             [malli.core :as m]
             [logseq.outliner.op.construct :as op-construct]))
+
+(defkeywords
+  ::missing-parent-original {:doc "The linked-reference parent supplied to an outdent no longer exists."})
 
 (def ^:private ^:large-vars/data-var op-schema
   [:multi {:dispatch first}
@@ -45,6 +49,10 @@
     [:catn
      [:op :keyword]
      [:args [:tuple ::block-ids :boolean ::option]]]]
+   [:collapse-expand-blocks
+    [:catn
+     [:op :keyword]
+     [:args [:tuple ::blocks ::option]]]]
 
    ;; properties
    [:upsert-property
@@ -131,6 +139,11 @@
      [:op :keyword]
      [:args [:tuple ::uuid ::option]]]]
 
+   [:restore-recycled
+    [:catn
+     [:op :keyword]
+     [:args [:tuple ::uuid]]]]
+
    [:recycle-delete-permanently
     [:catn
      [:op :keyword]
@@ -165,6 +178,11 @@
 
 (def ^:private ops-validator (m/validator ops-schema))
 
+(defn validate-ops!
+  "Validates canonical operation shapes before any graph changes."
+  [ops]
+  (assert (ops-validator ops) ops))
+
 (defn- reaction-user-id
   [reaction]
   (:db/id (:logseq.property/created-by-ref reaction)))
@@ -198,17 +216,23 @@
           true)))))
 
 (defn- import-edn-data
-  [conn *result export-map {:keys [tx-meta] :as import-options}]
-  (let [{:keys [init-tx block-props-tx misc-tx error] :as _txs}
-        (try (sqlite-export/build-import export-map @conn (dissoc import-options :tx-meta))
+  [conn *result export-map {:keys [tx-meta validate-scope] :as import-options}]
+  (let [{:keys [error] :as txs}
+        (try (sqlite-export/build-import export-map @conn (dissoc import-options :tx-meta :validate-scope))
              (catch :default e
                (js/console.error "Import EDN error: " e)
-               {:error "An unexpected error occurred building the import. See the javascript console for details."}))]
-    ;; (cljs.pprint/pprint _txs)
-    (if error
-      (reset! *result {:error error})
+               {:error "An unexpected error occurred building the import. See the javascript console for details."}))
+        validation (when-not error
+                     (sqlite-export/validate-import-txs
+                      txs
+                      @conn
+                      (cond-> {:edn-label "Imported EDN"}
+                        validate-scope (assoc :validate-scope validate-scope))))]
+    ;; (cljs.pprint/pprint txs)
+    (if (or error (:error validation))
+      (reset! *result {:error (or error (:error validation))})
       (try
-        (ldb/transact! conn (vec (concat init-tx block-props-tx misc-tx))
+        (ldb/transact! conn (:tx-data validation)
                        (merge {::sqlite-export/imported-data? true} tx-meta))
         (catch :default e
           (js/console.error "Unexpected Import EDN error:" e)
@@ -234,11 +258,24 @@
                      (assoc (into {} block) :db/id (:db/id block)))
                    (rest template-blocks)))))))
 
+(defn- journal-title
+  [db journal-day]
+  (date-time-util/int->journal-title
+   journal-day
+   (:logseq.property.journal/title-format (d/entity db :logseq.class/Journal))))
+
+(defn- ensure-template-journal-pages!
+  [conn blocks]
+  (doseq [journal-day (outliner-template/dynamic-template-journal-days blocks)]
+    (when-not (ldb/get-journal-page-by-day @conn journal-day)
+      (outliner-page/create! conn (journal-title @conn journal-day) {:journal? true}))))
+
 (defn- apply-template-op!
   [conn *result [template-id target-block-id opts]]
   (when-let [target (d/entity @conn [:block/uuid target-block-id])]
     (let [blocks (or (some-> (:template-blocks opts) seq vec)
                      (template-children-blocks @conn [:block/uuid template-id]))
+          _ (ensure-template-journal-pages! conn blocks)
           blocks (outliner-template/resolve-dynamic-template-blocks @conn target blocks)]
       (when (seq blocks)
         (let [sibling? (:sibling? opts)
@@ -257,6 +294,16 @@
                                                           :insert-template? true
                                                           :outliner-op :insert-template-blocks))]
           (reset! *result result))))))
+
+(defn- resolve-indent-outdent-opts
+  [db opts]
+  (if-let [parent-original-uuid (get-in opts [:parent-original :block/uuid])]
+    (let [parent-original (or (d/entity db [:block/uuid parent-original-uuid])
+                              (throw (ex-info "Missing outdent parent original"
+                                              {:type ::missing-parent-original
+                                               :block/uuid parent-original-uuid})))]
+      (assoc opts :parent-original parent-original))
+    opts))
 
 (defn- ^:large-vars/cleanup-todo apply-op!
   [conn opts' *result [op args]]
@@ -291,9 +338,14 @@
 
     :indent-outdent-blocks
     (let [[block-ids indent? opts] args
-          blocks (keep #(d/entity @conn [:block/uuid %]) block-ids)]
+          blocks (keep #(d/entity @conn [:block/uuid %]) block-ids)
+          opts (resolve-indent-outdent-opts @conn opts)]
       (when (seq blocks)
         (outliner-core/indent-outdent-blocks! conn blocks indent? opts)))
+
+    :collapse-expand-blocks
+    (let [[blocks opts] args]
+      (ldb/transact! conn blocks opts))
 
     ;; properties
     :upsert-property
@@ -363,33 +415,74 @@
     (let [[page-uuid opts] args]
       (reset! *result (outliner-page/delete! conn page-uuid (merge opts opts'))))
 
+    :restore-recycled
+    (let [[root-uuid] args]
+      (reset! *result (outliner-recycle/restore! conn root-uuid)))
+
     :recycle-delete-permanently
     (let [[root-uuid] args]
-      (outliner-recycle/permanently-delete! conn root-uuid))
+      (reset! *result (outliner-recycle/permanently-delete! conn root-uuid)))
 
     :toggle-reaction
     (reset! *result (apply toggle-reaction! conn args))
     nil))
 
-(defn apply-ops!
+(defn- import-edn-op?
+  [[op _args]]
+  (= :batch-import-edn op))
+
+(defn operation-options
+  "Builds common batch metadata while preserving caller execution options.
+
+  | Option | Meaning |
+  | --- | --- |
+  | `:outliner-op` | Transaction label; defaults to the operation for a single-operation batch. |
+  | `:db-sync/tx-id` | Transaction UUID; generated when absent. |
+  | `:additional-tx` | Additional datoms to apply once after the operations. |
+  | `:current-block` | Execution context excluded from committed metadata. |
+
+  Other caller options are forwarded. Connection, local-transaction and import
+  metadata are derived here for both canonical and raw-content batches."
   [conn ops opts]
-  (assert (ops-validator ops) ops)
-  (let [semantic-ops (filter (fn [op] (get op-construct/semantic-outliner-ops (first op))) ops)
-        single-op-outliner-op (when (= 1 (count ops))
-                                (first (first ops)))
-        opts' (cond-> (assoc opts
+  (let [default-outliner-op (when (= 1 (count ops)) (ffirst ops))
+        options (cond-> (assoc opts
                              :transact-opts {:conn conn}
                              :local-tx? true
-                             :outliner-ops semantic-ops
                              :db-sync/tx-id (or (:db-sync/tx-id opts) (random-uuid)))
-                (and single-op-outliner-op
+                (and default-outliner-op
                      (nil? (:outliner-op opts)))
-                (assoc :outliner-op single-op-outliner-op))
+                (assoc :outliner-op default-outliner-op)
+
+                (some import-edn-op? ops)
+                (assoc ::sqlite-export/imported-data? true))]
+    options))
+
+(defn apply-ops!
+  [conn ops opts]
+  (validate-ops! ops)
+  (let [semantic-ops (atom [])
+        opts' (operation-options conn ops opts)
         *result (atom nil)]
 
-    (outliner-tx/transact!
-      opts'
-      (doseq [op-entry ops]
-        (apply-op! conn opts' *result op-entry)))
+    (ldb/batch-transact-with-temp-conn!
+     conn (dissoc opts' :additional-tx :transact-opts :current-block)
+     (fn [temp-conn _tx-data]
+       (doseq [[op args :as op-entry] ops]
+         (let [result (apply-op! temp-conn opts' *result op-entry)
+               [_ [blocks target-id insert-opts]] (first (get-in result [:tx-meta :outliner-ops]))
+               op-entry (case op
+                          :upsert-property (let [[_ schema property-opts] args]
+                                             [:upsert-property [(:db/ident result) schema property-opts]])
+                          :create-page (let [[title page-opts] args]
+                                         [:create-page [title (assoc page-opts :uuid (second result))]])
+                          :insert-blocks (when result [:insert-blocks [blocks target-id insert-opts]])
+                          :apply-template (when result [:apply-template [(first args) target-id
+                                                                         (assoc insert-opts :template-blocks blocks)]])
+                          op-entry)]
+           (when (and op-entry (contains? op-construct/semantic-outliner-ops op))
+             (swap! semantic-ops conj op-entry))))
+       (when (seq (:additional-tx opts'))
+         (ldb/transact! temp-conn (:additional-tx opts') {})))
+     :transform-tx-meta #(assoc % :outliner-ops @semantic-ops))
 
     @*result))

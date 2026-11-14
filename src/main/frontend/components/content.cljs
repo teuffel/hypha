@@ -1,5 +1,6 @@
 (ns frontend.components.content
-  (:require [clojure.string :as string]
+  (:require ["react" :as react]
+            [clojure.string :as string]
             [electron.ipc :as ipc]
             [frontend.commands :as commands]
             [frontend.components.block.comments-model :as comments-model]
@@ -10,17 +11,21 @@
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
-            [frontend.db :as db]
+            [frontend.db.hooks :as db-hooks]
+            [frontend.db.async :as db-async]
             [frontend.extensions.fsrs :as fsrs]
+            [frontend.fs :as fs]
             [frontend.handler.common.developer :as dev-common-handler]
             [frontend.handler.comments :as comments-handler]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.editor.format :as editor-format]
             [frontend.handler.graph :as graph-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.property :as property-handler]
             [frontend.handler.property.util :as pu]
             [frontend.handler.reaction :as reaction-handler]
             [frontend.modules.shortcut.data-helper :as shortcut-dh]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
@@ -28,6 +33,7 @@
             [frontend.util.url :as url-util]
             [goog.dom :as gdom]
             [goog.object :as gobj]
+            [logseq.common.config :as common-config]
             [logseq.common.path :as path]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
@@ -39,9 +45,17 @@
 
 (hsx/defc ^:large-vars/cleanup-todo custom-context-menu-content
   []
-  (let [[set-icon-sub-menu-open? set-icon-sub-menu-open] (hooks/use-state false)
+  (let [selection-block-ids (state/get-selection-block-ids)
+        [selected-blocks set-selected-blocks!] (hooks/use-state nil)
+        [set-icon-sub-menu-open? set-icon-sub-menu-open] (hooks/use-state false)
         comment-targets (comments-model/comment-target-blocks
-                         (keep #(db/entity [:block/uuid %]) (state/get-selection-block-ids)))]
+                         selected-blocks)]
+    (hooks/use-effect!
+     (fn []
+       (p/let [results (db-async/<get-blocks (state/get-current-repo) selection-block-ids)]
+         (set-selected-blocks! (vec (keep :block results))))
+       nil)
+     [selection-block-ids])
     [:<>
      (ui/menu-background-color #(property-handler/batch-set-block-property! (state/get-selection-block-ids)
                                                                             :logseq.property/background-color
@@ -54,10 +68,12 @@
 
      (shui/dropdown-menu-sub
       {:open set-icon-sub-menu-open?
-       :onOpenChange (fn [v]
-                       (when (not= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
-                         (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
-                         (set-icon-sub-menu-open v)))}
+       :onOpenChange (fn [v event-details]
+                       (if (= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
+                         (some-> event-details (.cancel))
+                         (do
+                           (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
+                           (set-icon-sub-menu-open v))))}
       (shui/dropdown-menu-sub-trigger
        (t :context-menu/set-icon))
       (shui/dropdown-menu-sub-content
@@ -167,9 +183,21 @@
       (ui/dropdown-shortcut :editor/collapse-block-children))]))
 
 ;; HYPHA (Patch #21): general property-history viewer. The :logseq.property.history/*
-;; entries (recorded when a property has "Enable property history" on) are read via
-;; the reverse ref :logseq.property.history/_block on the node entity and rendered as
-;; a value-change timeline (property name + value + timestamp, newest first).
+;; entries (recorded when a property has "Enable property history" on) are queried
+;; from the worker for the node and rendered as a value-change timeline (property
+;; name + value + timestamp, newest first). The menu's block is a plain worker map,
+;; so the reverse ref :logseq.property.history/_block is not available on it.
+(defn- <get-property-history
+  [repo block-id]
+  (db-async/<q repo {:transact-db? false}
+               '[:find [(pull ?h [:db/id :block/created-at
+                                  :logseq.property.history/scalar-value
+                                  {:logseq.property.history/property [:db/id :block/title]}
+                                  {:logseq.property.history/ref-value [*]}]) ...]
+                 :in $ ?block-id
+                 :where [?h :logseq.property.history/block ?block-id]]
+               block-id))
+
 (hsx/defc property-history-cp
   [history]
   [:div.p-2.text-sm.flex.flex-col.gap-1.max-h-96.overflow-y-auto
@@ -188,12 +216,25 @@
 
 (hsx/defc ^:large-vars/cleanup-todo block-context-menu-content
   [_target block-id property-default-value?]
-  (let [block (db/entity [:block/uuid block-id])
-        simple-commands (state/use-sub [:plugin/simple-commands])
-        developer-mode? (state/use-sub [:ui/developer-mode?])
+  (let [[block set-block!] (hooks/use-state nil)
+        [property-history set-property-history!] (hooks/use-state nil)
+        simple-commands (rfx/use-sub [:plugin/simple-commands])
+        developer-mode? (rfx/use-sub [:ui/developer-mode?])
         [set-icon-sub-menu-open? set-icon-sub-menu-open] (hooks/use-state false)
-        [heading set-heading!] (hooks/use-state (or (pu/lookup block :logseq.property/heading) false))
+        [heading set-heading!] (hooks/use-state false)
         [current-color set-current-color!] (hooks/use-state (pu/lookup block :logseq.property/background-color))]
+    (hooks/use-effect!
+     (fn []
+       (p/let [repo (state/get-current-repo)
+               block (db-async/<get-block repo block-id {:children? false})
+               history (when-let [id (:db/id block)]
+                         (<get-property-history repo id))]
+         (set-block! block)
+         (set-property-history! history)
+         (set-heading! (or (pu/lookup block :logseq.property/heading) false))
+         (set-current-color! (pu/lookup block :logseq.property/background-color)))
+       nil)
+     [block-id])
     (when block
       [:<>
        (ui/menu-background-color current-color
@@ -223,7 +264,7 @@
          (shui/dropdown-menu-item
           {:key "Open in sidebar"
            :on-click (fn [_e]
-                       (editor-handler/open-block-in-sidebar! block-id))}
+                       (editor-format/open-block-in-sidebar! block-id))}
           (t :sidebar.right/open)
           (ui/dropdown-shortcut "shift+click"))
 
@@ -234,7 +275,7 @@
                          (comments-handler/reveal-comments-area! comments-area {:focus-editor? true})))}
           (t :block.comments/add-comment))
 
-         (when-let [history (seq (:logseq.property.history/_block block))]
+         (when-let [history (seq property-history)]
            (shui/dropdown-menu-item
             {:key "Property history"
              :on-click (fn [_e]
@@ -264,10 +305,12 @@
 
          (shui/dropdown-menu-sub
           {:open set-icon-sub-menu-open?
-           :onOpenChange (fn [v]
-                           (when (not= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
-                             (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
-                             (set-icon-sub-menu-open v)))}
+           :onOpenChange (fn [v event-details]
+                           (if (= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
+                             (some-> event-details (.cancel))
+                             (do
+                               (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
+                               (set-icon-sub-menu-open v))))}
           (shui/dropdown-menu-sub-trigger
            (t :context-menu/set-icon))
           (shui/dropdown-menu-sub-content
@@ -302,11 +345,13 @@
            (shui/dropdown-menu-item
             {:key "Copy block URL"
              :on-click (fn [_e]
-                         (let [tap-f (fn [block-id]
-                                       (url-util/get-logseq-web-block-url config/app-website
-                                                                         (graph-handler/current-graph-id)
-                                                                         block-id))]
-                           (editor-handler/copy-block-ref! block-id tap-f)))}
+                         (if-let [url (url-util/entity-url-for-copy config/app-website
+                                                                    (graph-handler/current-graph-id)
+                                                                    (state/get-current-repo)
+                                                                    (str block-id)
+                                                                    :block)]
+                           (editor-handler/copy-block-ref! block-id (fn [_] url))
+                           (notification/show! (t :block/copy-url-unavailable-warning) :warning)))}
             (t :block/copy-url)))
 
          (when (and (util/electron?) (ldb/asset? block))
@@ -314,9 +359,28 @@
             {:key "Show asset in folder"
              :on-click (fn [_e]
                          (let [assets-dir (config/get-current-repo-assets-root)
-                               ext (name (:logseq.property.asset/type block))
-                               file-path (path/path-join assets-dir (str (:block/uuid block) "." ext))]
-                           (ipc/ipc "openFileInFolder" file-path)))}
+                               repo-dir (config/get-repo-dir (state/get-current-repo))
+                               ext (:logseq.property.asset/type block)
+                               ext-url (:logseq.property.asset/external-url block)
+                               file-path (cond
+                                           ;; Plugin-sourced asset stored under assets/storages/<plugin-id>/...
+                                           (and (not (string/blank? ext-url))
+                                                (common-config/local-relative-asset? ext-url))
+                                           (path/path-join repo-dir (string/replace ext-url #"^[./]+" ""))
+
+                                           ;; External file outside the graph:
+                                           ;; absolute path or file:///assets:// URL
+                                           (and (not (string/blank? ext-url))
+                                                (path/absolute? ext-url))
+                                           (path/file-url-or-path->path ext-url)
+
+                                           :else
+                                           (path/path-join assets-dir (str (:block/uuid block) (when ext (str "." (name ext))))))]
+                           (-> (fs/file-exists? file-path)
+                               (p/then (fn [exists?]
+                                         (if exists?
+                                           (ipc/ipc "openFileInFolder" file-path)
+                                           (notification/show! (t :asset/missing-file file-path) :warning)))))))}
             (t :asset/show-file-in-folder)))
 
          (shui/dropdown-menu-item
@@ -395,13 +459,12 @@
                 :on-click (fn []
                             (dev-common-handler/show-entity-data [:block/uuid block-id]))}
                (shortcut-dh/shortcut-desc-by-id :dev/show-block-data))
-              (shui/dropdown-menu-item
-               {:key :dev/show-block-ast
-                :on-click (fn []
-                            (let [block (db/entity [:block/uuid block-id])]
-                              (dev-common-handler/show-content-ast (:block/title block)
-                                                                   (get block :block/format :markdown))))}
-               (shortcut-dh/shortcut-desc-by-id :dev/show-block-ast))))])])))
+	              (shui/dropdown-menu-item
+	               {:key :dev/show-block-ast
+	                :on-click (fn []
+	                            (dev-common-handler/show-content-ast (:block/title block)
+	                                                                 (get block :block/format :markdown)))}
+	               (shortcut-dh/shortcut-desc-by-id :dev/show-block-ast))))])])))
 
 (hsx/defc block-ref-custom-context-menu-content
   [block block-ref-id]
@@ -433,19 +496,28 @@
        :on-click (fn [] (editor-handler/replace-ref-with-embed! block block-ref-id))}
       (t :reference/replace-with-embed))]))
 
+(hsx/defc page-title-custom-context-menu-items
+  [page popup-id]
+  (let [favorited? (db-hooks/use-resource
+                    [:favorite-status (:block/uuid page)])
+        page-menu-options (page-menu/page-menu page favorited?)]
+    [:<>
+     (for [[idx {:keys [title options]}] (map-indexed vector page-menu-options)]
+       (let [on-click (:on-click options)
+             key (or (:key options) (str "page-menu-" idx))]
+         (react/cloneElement
+          (shui/dropdown-menu-item
+           (assoc options
+                  :on-click (fn [e]
+                              (when-not (false? (when on-click (on-click e)))
+                                (shui/popup-hide! popup-id))))
+           title)
+          #js {:key (str key)})))]))
+
 (hsx/defc page-title-custom-context-menu-content
   [page popup-id]
   (when page
-    (let [page-menu-options (page-menu/page-menu page)]
-      [:<>
-       (for [{:keys [title options]} page-menu-options]
-         (let [on-click (:on-click options)]
-           (shui/dropdown-menu-item
-            (assoc options
-                   :on-click (fn [e]
-                               (when-not (false? (when on-click (on-click e)))
-                                 (shui/popup-hide! popup-id))))
-            title)))])))
+    (page-title-custom-context-menu-items page popup-id)))
 
 ;; TODO: content could be changed
 ;; Also, keyboard bindings should only be activated after
@@ -459,7 +531,7 @@
 
 (hsx/defc non-hiccup-content
   [id content on-click on-hide config format]
-  (let [edit? (state/use-sub-editing? id)]
+  (let [edit? (boolean (get (rfx/use-sub [:editor/editing?]) id))]
     (if edit?
       (editor/box {:on-hide on-hide
                    :format format}
@@ -468,7 +540,7 @@
       (let [on-click (fn [e]
                        (when-not (util/link? (gobj/get e "target"))
                          (util/stop e)
-                         (editor-handler/reset-cursor-range! (gdom/getElement (str id)))
+                         (editor-format/reset-cursor-range! (gdom/getElement (str id)))
                          (state/set-edit-content! id content)
                          (when on-click
                            (on-click e))))]
