@@ -1204,7 +1204,7 @@
                       {:code :invalid-options
                        :page page-id
                        :parent parent-id
-                       :candidates (vec same-title-ids)})))))
+                       :candidates (mapv (fn [id] {:id id :name title}) same-title-ids)})))))
 
 (defn execute-upsert-page
   [action config]

@@ -777,7 +777,8 @@
             (is (= :ok existing-cycle)))
           (testing "the parent already has a page with this title"
             (is (= :invalid-options (:code duplicate)))
-            (is (= [7] (:candidates duplicate)))
+            (is (= [{:id 7 :name "Notes"}] (:candidates duplicate))
+                "same shape as every other candidates error, so --output human can print it")
             (is (= "The parent already has a page named \"Notes\"" (:message duplicate)))))
         (p/catch (fn [e]
                    (is false (str "unexpected error: " e))))
