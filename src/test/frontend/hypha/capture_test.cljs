@@ -14,6 +14,7 @@
             [cljs.test :refer [deftest is testing]]
             [clojure.string :as string]
             [frontend.hypha.capture :as capture]
+            [frontend.state :as state]
             [frontend.test.helper :as test-helper :include-macros true
              :refer [deftest-async]]
             [promesa.core :as p]))
@@ -102,36 +103,81 @@
     :write! (fn [k v]
               (swap! *data assoc k (js/JSON.stringify (clj->js v))))}))
 
+(defn- fake-inbox
+  "Stand-in for hypha-server's capture inbox: `:fetch` lists what is
+  pending, `:ack` answers with the next of `ack-statuses` (200 once they
+  run out) and, like the server, removes the acked clips only on 200.
+  `:acks` records every ack call as `[status ids]`."
+  ([clips] (fake-inbox clips []))
+  ([clips ack-statuses]
+   (let [*pending (atom (vec clips))
+         *statuses (atom ack-statuses)
+         *acks (atom [])]
+     {:fetch (fn [] (async-resp {:status 200 :body {:clips @*pending}}))
+      :ack (fn [ids]
+             (let [status (or (first @*statuses) 200)]
+               (swap! *statuses rest)
+               (swap! *acks conj [status ids])
+               (when (= 200 status)
+                 (swap! *pending (fn [pending] (vec (remove (comp (set ids) :id) pending)))))
+               (async-resp {:status status :body {:remaining (count @*pending)}})))
+      :acks *acks
+      :pending *pending})))
+
+(defn- recording-dispatch
+  "Dispatch stub that records what it inserted and rejects for titles in
+  `failing-titles`."
+  ([*dispatched] (recording-dispatch *dispatched #{}))
+  ([*dispatched failing-titles]
+   (fn [args]
+     (if (contains? failing-titles (:title args))
+       (p/rejected (ex-info "insert failed" {}))
+       (do (swap! *dispatched conj args)
+           (p/resolved nil))))))
+
 (deftest-async drain-inbox-does-nothing-when-the-inbox-is-empty
-  (let [acked (atom :never-called)
+  (let [{:keys [fetch ack acks]} (fake-inbox [])
         dispatched (atom [])]
-    (-> (capture/<drain-inbox!
-         (fn [] (async-resp {:status 200 :body {:clips []}}))
-         (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil))
-         (memory-store))
+    (-> (capture/<drain-inbox! fetch ack (recording-dispatch dispatched) (memory-store))
         (p/then (fn [drained]
-                  (is (= 0 drained))
+                  (is (= {:inserted 0 :failed 0} drained))
                   (is (= [] @dispatched))
-                  (is (= :never-called @acked)
+                  (is (= [] @acks)
                       "an empty inbox must not cost an ack round-trip"))))))
 
 (deftest-async drain-inbox-dispatches-in-order-then-acks-every-id
-  (let [acked (atom nil)
+  (let [{:keys [fetch ack acks]} (fake-inbox [{:id "c1" :url "https://example.com/1"}
+                                              {:id "c2" :title "Second"}])
         dispatched (atom [])]
-    (-> (capture/<drain-inbox!
-         (fn [] (async-resp {:status 200
-                             :body {:clips [{:id "c1" :url "https://example.com/1"}
-                                            {:id "c2" :title "Second"}]}}))
-         (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil))
-         (memory-store))
+    (-> (capture/<drain-inbox! fetch ack (recording-dispatch dispatched) (memory-store))
         (p/then (fn [drained]
-                  (is (= 2 drained))
+                  (is (= {:inserted 2 :failed 0} drained))
                   (is (= [{:url "https://example.com/1"} {:title "Second"}] @dispatched)
                       "clips are inserted oldest-first, one at a time")
-                  (is (= ["c1" "c2"] @acked)
+                  (is (= [[200 ["c1" "c2"]]] @acks)
                       "ack happens only after the blocks were dispatched"))))))
+
+(deftest-async drain-inbox-waits-for-each-insert-before-the-next-and-the-ack
+  (let [{:keys [fetch ack acks]} (fake-inbox [{:id "c1" :title "First"}
+                                              {:id "c2" :title "Second"}])
+        events (atom [])
+        first-insert (p/deferred)
+        dispatch (fn [args]
+                   (swap! events conj [:dispatch (:title args)])
+                   (if (= "First" (:title args))
+                     first-insert
+                     (p/resolved nil)))
+        drain (capture/<drain-inbox! fetch ack dispatch (memory-store))]
+    (p/let [_ (p/delay 20)
+            before @events
+            acks-before @acks
+            _ (p/resolve! first-insert nil)
+            _ drain]
+      (is (= [[:dispatch "First"]] before)
+          "the second clip is not dispatched while the first insert is pending")
+      (is (= [] acks-before) "nothing is acked while an insert is pending")
+      (is (= [[:dispatch "First"] [:dispatch "Second"]] @events))
+      (is (= [[200 ["c1" "c2"]]] @acks)))))
 
 (deftest-async drain-inbox-skips-ack-when-the-fetch-fails
   (let [acked (atom :never-called)
@@ -139,61 +185,100 @@
     (-> (capture/<drain-inbox!
          (fn [] (async-resp {:status 401 :body {:error "unauthorized"}}))
          (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
-         (fn [args] (swap! dispatched conj args) (p/resolved nil))
+         (recording-dispatch dispatched)
          (memory-store))
         (p/then (fn [drained]
-                  (is (= 0 drained))
+                  (is (= {:inserted 0 :failed 0} drained))
                   (is (= [] @dispatched))
                   (is (= :never-called @acked)
                       "a failed fetch must leave the inbox untouched for the next boot"))))))
 
-(deftest-async drain-inbox-does-not-ack-when-an-insert-fails
-  (let [acked (atom :never-called)
+(deftest-async drain-inbox-keeps-a-failed-clip-without-holding-up-the-others
+  (let [{:keys [fetch ack acks pending]} (fake-inbox [{:id "c1" :title "First"}
+                                                      {:id "c2" :title "Broken"}
+                                                      {:id "c3" :title "Third"}])
         store (memory-store)
-        fetch (fn [] (async-resp {:status 200
-                                  :body {:clips [{:id "c1" :title "First"}
-                                                 {:id "c2" :title "Second"}]}}))
-        ack (fn [ids] (reset! acked ids) (async-resp {:status 200 :body {:remaining 0}}))
         dispatched (atom [])]
-    (p/let [failed-drain (capture/<drain-inbox!
-                          fetch ack
-                          (fn [args]
-                            (if (= "Second" (:title args))
-                              (p/rejected (ex-info "insert failed" {}))
-                              (do (swap! dispatched conj args) (p/resolved nil))))
-                          store)
-            acked-after-failure @acked
-            retry-drain (capture/<drain-inbox!
-                         fetch ack
-                         (fn [args] (swap! dispatched conj args) (p/resolved nil))
-                         store)]
-      (is (= 0 failed-drain))
-      (is (= :never-called acked-after-failure)
-          "the clips are the user's only copy; nothing is acked while one is not inserted")
-      (is (= 1 retry-drain) "only the clip that failed is inserted on retry")
-      (is (= [{:title "First"} {:title "Second"}] @dispatched)
-          "the clip inserted before the failure is not inserted twice")
-      (is (= ["c1" "c2"] @acked)))))
+    (p/let [first-drain (capture/<drain-inbox! fetch ack (recording-dispatch dispatched #{"Broken"}) store)
+            pending-after-first @pending
+            retry-drain (capture/<drain-inbox! fetch ack (recording-dispatch dispatched) store)]
+      (is (= {:inserted 2 :failed 1} first-drain))
+      (is (= [[200 ["c1" "c3"]] [200 ["c2"]]] @acks)
+          "only clips that are in the graph are acked")
+      (is (= [{:id "c2" :title "Broken"}] pending-after-first)
+          "the failed clip is the user's only copy and stays in the inbox")
+      (is (= {:inserted 1 :failed 0} retry-drain))
+      (is (= [{:title "First"} {:title "Third"} {:title "Broken"}] @dispatched)
+          "nothing is inserted twice")
+      (is (= [] @pending)))))
 
 (deftest-async drain-inbox-retries-a-failed-ack-without-duplicating-clips
-  (let [ack-statuses (atom [500 200])
-        acked (atom [])
+  (let [{:keys [fetch ack acks pending]} (fake-inbox [{:id "c1" :title "First"}] [500])
         dispatched (atom [])
         store (memory-store)
-        fetch (fn [] (async-resp {:status 200
-                                  :body {:clips [{:id "c1" :title "First"}]}}))
-        ack (fn [ids]
-              (let [status (first @ack-statuses)]
-                (swap! ack-statuses rest)
-                (swap! acked conj [status ids])
-                (async-resp {:status status})))
-        dispatch (fn [args] (swap! dispatched conj args) (p/resolved nil))]
+        dispatch (recording-dispatch dispatched)]
     (p/let [first-drain (capture/<drain-inbox! fetch ack dispatch store)
             second-drain (capture/<drain-inbox! fetch ack dispatch store)]
-      (is (= 1 first-drain))
-      (is (= 0 second-drain) "the server still lists the clip, but it is already in the graph")
+      (is (= {:inserted 1 :failed 0} first-drain))
+      (is (= {:inserted 0 :failed 0} second-drain)
+          "the server still lists the clip, but it is already in the graph")
       (is (= [{:title "First"}] @dispatched) "no duplicate block")
-      (is (= [[500 ["c1"]] [200 ["c1"]]] @acked) "the ack is retried until the server takes it"))))
+      (is (= [[500 ["c1"]] [200 ["c1"]]] @acks) "the ack is retried until the server takes it")
+      (is (= [] @pending)))))
+
+;; ---------------------------------------------------------------------------
+;; The production dispatch
+
+(defn- pub-event-like-the-event-loop
+  "What `state/pub-event!` hands back for a handler that returned
+  `handler-promise`: `frontend.handler.events/run!` resolves the deferred
+  with the handler's promise as its value, and promesa does not adopt it."
+  [handler-promise]
+  (let [d (p/deferred)]
+    (p/resolve! d handler-promise)
+    d))
+
+(deftest-async dispatch-clip-default-settles-with-the-insert
+  ;; Pending dispatches are never bound with p/let here: that would wait for
+  ;; the very insert the test resolves later.
+  (let [original-pub-event! state/pub-event!
+        inserts (atom [])
+        published (atom [])
+        _ (set! state/pub-event! (fn [[event-key args]]
+                                   (swap! published conj [event-key (js->clj args :keywordize-keys true)])
+                                   (let [insert (p/deferred)]
+                                     (swap! inserts conj insert)
+                                     (pub-event-like-the-event-loop insert))))
+        first-dispatch (capture/<dispatch-clip-default {:title "First"})
+        first-settled? (atom false)]
+    (p/finally first-dispatch (fn [_ _] (reset! first-settled? true)))
+    (-> (p/let [_ (p/delay 20)
+                settled-before-insert? @first-settled?
+                _ (p/resolve! (first @inserts) {:block/uuid "b1"})
+                resolved first-dispatch
+                outcome-of (fn [title settle!]
+                             (let [outcome (-> (capture/<dispatch-clip-default {:title title})
+                                               (p/then (fn [_] :resolved))
+                                               (p/catch (fn [e] (ex-message e))))]
+                               (p/let [_ (p/delay 20)]
+                                 (settle! (last @inserts))
+                                 outcome)))
+                failed (outcome-of "Second" #(p/reject! % (ex-info "insert failed" {})))
+                nothing-inserted (outcome-of "Third" #(p/resolve! % nil))]
+          (is (false? settled-before-insert?)
+              "the event deferred resolving is not the insert finishing")
+          (is (= {:block/uuid "b1"} resolved))
+          (is (= [[:editor/quick-capture {:title "First" :append true}]
+                  [:editor/quick-capture {:title "Second" :append true}]
+                  [:editor/quick-capture {:title "Third" :append true}]]
+                 @published)
+              "a capture never goes into the block being edited")
+          (is (= "insert failed" failed)
+              "a failed insert must reach the caller, or the clip would be acked")
+          (is (= "quick capture inserted no block" nothing-inserted)
+              "quick capture resolves without inserting on some paths"))
+        (p/finally (fn [_ _]
+                     (set! state/pub-event! original-pub-event!))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Parked share-target / bookmarklet captures
@@ -201,22 +286,26 @@
 (deftest-async deliver-parked-files-captures-in-order-and-empties-the-store
   (let [data (atom {})
         store (memory-store data)
-        dispatched (atom [])]
+        dispatched (atom [])
+        dispatch (recording-dispatch dispatched)]
     (capture/park-capture! store {:title "First" :url "https://example.com/1"})
     (capture/park-capture! store {:content "Second"})
-    (p/let [_ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))
-            _ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))]
+    (p/let [first-run (capture/<deliver-parked! store dispatch)
+            second-run (capture/<deliver-parked! store dispatch)]
+      (is (= {:delivered 2 :failed 0} first-run))
+      (is (= {:delivered 0 :failed 0} second-run))
       (is (= [{:title "First" :url "https://example.com/1"} {:content "Second"}] @dispatched)
           "each capture is filed exactly once")
       (is (= ["[]"] (vals @data))))))
 
-(deftest-async deliver-parked-keeps-a-capture-whose-insert-failed
+(deftest-async deliver-parked-keeps-a-failed-capture-without-holding-up-the-others
   (let [store (memory-store)
         dispatched (atom [])]
-    (capture/park-capture! store {:title "First"})
-    (p/let [failure (-> (capture/<deliver-parked! store (fn [_args] (p/rejected (ex-info "no graph" {}))))
-                        (p/then (fn [_] :resolved))
-                        (p/catch (fn [_] :rejected)))
-            _ (capture/<deliver-parked! store (fn [args] (swap! dispatched conj args) (p/resolved nil)))]
-      (is (= :rejected failure))
-      (is (= [{:title "First"}] @dispatched) "the capture survived the failed attempt"))))
+    (capture/park-capture! store {:title "Broken"})
+    (capture/park-capture! store {:title "Second"})
+    (p/let [first-run (capture/<deliver-parked! store (recording-dispatch dispatched #{"Broken"}))
+            retry-run (capture/<deliver-parked! store (recording-dispatch dispatched))]
+      (is (= {:delivered 1 :failed 1} first-run))
+      (is (= {:delivered 1 :failed 0} retry-run))
+      (is (= [{:title "Second"} {:title "Broken"}] @dispatched)
+          "the capture behind the failing one is filed, and the failing one survives for a retry"))))

@@ -884,6 +884,7 @@
  :help.shortcuts/title "Keyboard shortcuts"
  :help.shortcuts/triggers "Triggers"
 
+ :hypha.capture/insert-failed "Some captures could not be added to the graph. Hypha will try again the next time it starts."
  :hypha.capture/waiting-for-graph "Your capture is saved. It will be added once a graph is open."
 
  :hypha.login/access-code-placeholder "Access code"
