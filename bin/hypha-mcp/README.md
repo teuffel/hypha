@@ -32,17 +32,18 @@ pre-warming. Set `HYPHA_NO_BOOTSTRAP=1` to disable auto-bootstrap.
 
 - **Node >= 22.5** (the worker uses the `node:sqlite` builtin). Node 20 will not
   work. Set `HYPHA_NODE` to a Node 22 binary if your default `node` is older.
-- Built artifacts in the repo: `static/logseq-cli.js` and
-  `static/js/db-worker-node.js`. Build them **with the literal-slash define**
-  (Patch #15) so the CLI/worker match the Hypha web build:
+- Built artifacts in the repo: `static/logseq-cli.js` (the OCaml CLI from
+  `cli/`) and `static/db-worker-node.js`. Build them in the dev container; the
+  worker **with the literal-slash define** (Patch #15) so it matches the Hypha
+  web build:
   ```sh
-  clojure -M:cljs release logseq-cli db-worker-node \
-    --config-merge '{:closure-defines {logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
-  node ./scripts/build-db-worker-node-bundle.mjs
-  ln -sf ../db-worker-node.js static/js/db-worker-node.js
+  bin/dev bash -c "clojure -M:cljs release db-worker-node \
+    --config-merge '{:closure-defines {logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}' \
+    && pnpm db-worker-node:bundle \
+    && (cd cli && opam install . --deps-only --with-test) \
+    && pnpm cli:release"
   ```
-  (logseq-cli and db-worker-node must be built from the same commit so their
-  revisions match, otherwise the CLI refuses to talk to the worker.)
+  (Build both from the same commit; the CLI checks the worker's revision.)
 
 ## Secrets stay OUT of this repo
 
