@@ -132,6 +132,20 @@
    :write! (fn [k v]
              (.setItem js/localStorage k (js/JSON.stringify (clj->js v))))})
 
+(defn clear-local-storage-keeping-captures!
+  "`localStorage.clear()` for logout, but keep captures that are not in
+  the graph yet: they are the only copy. Also keep the ids of clips that
+  are inserted but not yet acked, or they would be inserted again."
+  []
+  (let [kept (into {}
+                   (keep (fn [k]
+                           (when-let [v (.getItem js/localStorage k)]
+                             [k v])))
+                   [parked-key inserted-clip-ids-key])]
+    (.clear js/localStorage)
+    (doseq [[k v] kept]
+      (.setItem js/localStorage k v))))
+
 (defn- read-vec
   [store k]
   (vec ((:read store) k)))
