@@ -130,6 +130,23 @@
                   refresh-tick-ms)]
       (reset! *refresh-loop-handle handle))))
 
+(declare stop-refresh-loop!)
+
+(defn <logout!
+  "End the server session (the HttpOnly cookie cannot be cleared from
+  script) and stop refreshing. Without this a logout in the app left the
+  session alive: the next page load, or the refresh loop within minutes,
+  logged the user back in."
+  []
+  (stop-refresh-loop!)
+  (let [done (p/deferred)]
+    (go
+      (let [resp (<! (http/post "/auth/logout" {:with-credentials? true}))]
+        (when-not (= 204 (:status resp))
+          (log/warn :hypha/logout-failed {:status (:status resp)}))
+        (p/resolve! done nil)))
+    done))
+
 (defn stop-refresh-loop!
   "Stop the periodic JWT-refresh tick. Used for test cleanup and the
   logout flow; production code calls this rarely."

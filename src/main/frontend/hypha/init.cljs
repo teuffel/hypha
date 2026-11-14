@@ -57,8 +57,8 @@
   `frontend.handler.db-based.sync/<wait-for-db-worker-ready!` (private)
   but kept in this Hypha namespace to avoid an upstream patch.
 
-  Rejects after `db-worker-ready-timeout-ms`: a worker that never comes up
-  must not leave the post-login work pending forever without a trace."
+  Logs an error after `db-worker-ready-timeout-ms`, so a worker that never
+  comes up does not leave the post-login work pending without a trace."
   []
   (if @state/*db-worker
     (p/resolved true)
@@ -75,12 +75,13 @@
       (when @state/*db-worker
         (remove-watch state/*db-worker watch-key)
         (p/resolve! ready true))
-      (-> (p/timeout ready db-worker-ready-timeout-ms)
-          (p/catch (fn [e]
-                     (remove-watch state/*db-worker watch-key)
-                     (log/error :hypha/db-worker-not-ready
-                                {:timeout-ms db-worker-ready-timeout-ms})
-                     (throw e)))))))
+      ;; Report a worker that is late, but keep waiting: the post-login
+      ;; work (auth push, remote graph list) has no other trigger.
+      (js/setTimeout #(when-not (p/resolved? ready)
+                        (log/error :hypha/db-worker-not-ready
+                                   {:waited-ms db-worker-ready-timeout-ms}))
+                     db-worker-ready-timeout-ms)
+      ready)))
 
 (defn- <push-auth-to-db-worker!
   "Push :auth/id-token + :auth/access-token into the db-worker state.
@@ -158,9 +159,10 @@
     (let [resp (<! (<fetch-session))
           status (:status resp)]
       (cond
-        (= 200 status)
-        (when-let [id-token (get-in resp [:body :id-token])]
-          (set-hypha-id-token! id-token))
+        ;; A 200 without a token is not hypha-server (e.g. a captive portal
+        ;; or a misrouted proxy answering with HTML): retry like a 5xx.
+        (and (= 200 status) (get-in resp [:body :id-token]))
+        (set-hypha-id-token! (get-in resp [:body :id-token]))
 
         (contains? #{401 403} status)
         (state/pub-event! [:user/login])
