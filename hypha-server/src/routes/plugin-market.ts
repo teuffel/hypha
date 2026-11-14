@@ -16,7 +16,7 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, isSafeSubpath, serveCached } from "../plugin-cache.js";
+import { PluginCache, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
 
 const INDEX_TTL_SECONDS = 3600;
 const PACKAGE_TTL_SECONDS = 86_400;
@@ -50,13 +50,14 @@ export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (ap
 
   app.get("/plugin-market/packages/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(`${deps.upstreamBase}/packages`, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `market:packages:${subpath}`,
-      upstreamUrl: `${deps.upstreamBase}/packages/${subpath}`,
+      cacheKey: `market:packages:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: PACKAGE_TTL_SECONDS,
       reply,
     });

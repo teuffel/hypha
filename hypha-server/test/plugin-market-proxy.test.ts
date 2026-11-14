@@ -236,6 +236,37 @@ test("/plugin-market/packages/* — rejects path traversal with 400 invalid_path
   }
 });
 
+// A double-encoded dot segment survives the router's single decode as
+// %2e%2e, and fetch() resolves that as "..": the request would leave the
+// marketplace prefix and fetch any file on the upstream host, served from
+// the Hypha origin.
+test("plugin proxies — reject double-encoded traversal, no upstream call", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    for (const url of [
+      "/plugin-market/packages/%252e%252e/%252e%252e/attacker/repo/main/evil.svg",
+      "/plugin-cdn/r2/%252e%252e/other/path.json",
+      "/plugin-cdn/assets/%252e%252e/elsewhere/index.html",
+      "/plugin-cdn/assets/a/%252E%252e/b/index.html",
+    ]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.equal(res.statusCode, 400, url);
+      assert.deepEqual(res.json(), { error: "invalid_path" }, url);
+    }
+    assert.equal(market.calls.length, 0);
+    assert.equal(cdn.calls.length, 0);
+    assert.equal(assets.calls.length, 0);
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
+  }
+});
+
 test("/plugin-cdn/r2/* — manifest + asset subpaths cached independently", async () => {
   const market = await startFakeUpstream();
   const cdn = await startFakeUpstream();

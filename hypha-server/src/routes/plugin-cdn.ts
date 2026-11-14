@@ -28,7 +28,7 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, isSafeSubpath, serveCached } from "../plugin-cache.js";
+import { PluginCache, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
 
 const R2_TTL_SECONDS = 86_400;
 const ASSETS_TTL_SECONDS = 86_400;
@@ -57,13 +57,14 @@ export interface PluginCdnDeps {
 export const pluginCdnRoute: FastifyPluginAsync<PluginCdnDeps> = async (app, deps) => {
   app.get("/plugin-cdn/r2/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(deps.upstreamBase, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `cdn:r2:${subpath}`,
-      upstreamUrl: `${deps.upstreamBase}/${subpath}`,
+      cacheKey: `cdn:r2:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: R2_TTL_SECONDS,
       reply,
     });
@@ -71,13 +72,14 @@ export const pluginCdnRoute: FastifyPluginAsync<PluginCdnDeps> = async (app, dep
 
   app.get("/plugin-cdn/assets/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(deps.assetsUpstreamBase, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `cdn:assets:${subpath}`,
-      upstreamUrl: `${deps.assetsUpstreamBase}/${subpath}`,
+      cacheKey: `cdn:assets:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: ASSETS_TTL_SECONDS,
       reply,
       extraHeaders: ASSETS_RESPONSE_HEADERS,

@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PluginCache, isSafeSubpath, type CacheEntry } from "../src/plugin-cache.ts";
+import { PluginCache, isSafeSubpath, resolveUpstreamUrl, type CacheEntry } from "../src/plugin-cache.ts";
 
 function makeEntry(body: string, ttlMs: number, contentType = "application/json"): CacheEntry {
   return {
@@ -136,3 +136,35 @@ test("isSafeSubpath — segment containing '..' as a substring is fine", () => {
   assert.equal(isSafeSubpath("foo.."), true);
   assert.equal(isSafeSubpath("a/..b/c"), true);
 });
+
+test("isSafeSubpath — rejects what is still percent-encoded after routing", () => {
+  // The router decodes once: a request for %252e%252e reaches us as %2e%2e,
+  // which fetch() would resolve as "..".
+  assert.equal(isSafeSubpath("%2e%2e/x"), false);
+  assert.equal(isSafeSubpath("a/%2E%2e/b"), false);
+  assert.equal(isSafeSubpath(".%2e/x"), false);
+  assert.equal(isSafeSubpath("a%2fb"), false);
+  // An encoded ? or # would move part of the path into the query/fragment.
+  assert.equal(isSafeSubpath("a?b"), false);
+  assert.equal(isSafeSubpath("a#b"), false);
+});
+
+test("resolveUpstreamUrl — keeps the request below the configured base", () => {
+  const base = "https://raw.githubusercontent.com/logseq/marketplace/master/packages";
+  assert.equal(
+    resolveUpstreamUrl(base, "logseq-plugin-tags/icon.png"),
+    "https://raw.githubusercontent.com/logseq/marketplace/master/packages/logseq-plugin-tags/icon.png",
+  );
+  assert.equal(resolveUpstreamUrl(base, "%2e%2e/%2e%2e/%2e%2e/%2e%2e/attacker/repo/main/evil.svg"), null);
+  assert.equal(resolveUpstreamUrl(base, "../../../../attacker/repo/main/evil.svg"), null);
+  assert.equal(resolveUpstreamUrl(base, "a\\..\\..\\x"), null);
+  assert.equal(resolveUpstreamUrl(base, ""), null);
+});
+
+test("resolveUpstreamUrl — returns the normalised URL, usable as cache key", () => {
+  assert.equal(
+    resolveUpstreamUrl("https://plugins.logseq.io/r2", "repo/v1 beta/manifest.json"),
+    "https://plugins.logseq.io/r2/repo/v1%20beta/manifest.json",
+  );
+});
+
