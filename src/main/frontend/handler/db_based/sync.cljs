@@ -154,8 +154,10 @@
     ;; :datascript-conn. :sync-download-graph? true skips initial-data
     ;; seeding + migration; prepare-import! (reset? = true) unlinks and
     ;; recreates the db anyway.
-    (p/let [dbs (state/<invoke-db-worker :thread-api/list-db)
-            existed? (some #(= repo (:name %)) dbs)
+    ;; db-exists checks the same pool directory create-or-open-db opens;
+    ;; list-db names are decoded from directory names and do not round-trip
+    ;; for every graph name.
+    (p/let [existed? (state/<invoke-db-worker :thread-api/db-exists repo)
             _ (state/<invoke-db-worker :thread-api/create-or-open-db
                                        repo {:sync-download-graph? true})]
       (not existed?))))
@@ -483,13 +485,15 @@
 ;; replaces the same-named local db with the server state.
 (defn <rtc-replace-local-with-remote!
   [repo graph-name remote-graph-id remote-graph-e2ee?]
-  (p/do!
-   (<rtc-download-graph! graph-name remote-graph-id (boolean remote-graph-e2ee?))
-   (<get-remote-graphs)
-   (state/pub-event! [:graph/switch repo {:rtc-download? true}])
-   ;; Switching to the repo that is already current does not fire the
-   ;; graph-switch rtc trigger, so start sync explicitly.
-   (<rtc-start! repo)))
+  (p/let [_ (<rtc-download-graph! graph-name remote-graph-id (boolean remote-graph-e2ee?))
+          ;; The renderer still holds the replaced graph: switch first, so a
+          ;; failing graph list does not leave it on stale content.
+          ;; pub-event! resolves with the handler's promise as its value, so
+          ;; bind it again to wait for the switch.
+          switch (state/pub-event! [:graph/switch repo {:rtc-download? true}])
+          _ switch
+          _ (<get-remote-graphs)]
+    (<rtc-start! repo)))
 
 (defn <rtc-create-graph-and-start-sync!
   [repo graph-e2ee?]
