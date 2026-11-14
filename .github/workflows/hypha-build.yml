@@ -72,14 +72,16 @@ jobs:
         run: bb lint:dev
 
       - name: Build test asset
-        run: clojure -M:test compile test
+        # db-worker-node too: the electron db-worker-manager tests start a
+        # real worker (same as upstream's build.yml).
+        run: pnpm cljs:test
 
       - name: ClojureScript unit tests
         run: pnpm cljs:run-test
 
       - name: deps/db-sync tests
         run: |
-          pnpm --dir deps/db-sync install --frozen-lockfile
+          pnpm --dir deps/db-sync install --frozen-lockfile --ignore-workspace
           pnpm --dir deps/db-sync test
 
   hypha-build:
