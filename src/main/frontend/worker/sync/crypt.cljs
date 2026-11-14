@@ -86,6 +86,10 @@
 (defonce ^:private device-secret-key "hypha-e2ee-device-secret")
 
 (defn- <device-secret
+  "The device secret, created on first use. A password stored before it
+  existed was wrapped with the JWT sub; it is deleted then, not kept at
+  rest. The user is asked for the password once and it is saved under
+  the new secret."
   [platform']
   (p/let [existing (platform/read-secret-text platform' device-secret-key)]
     (if (seq existing)
@@ -94,7 +98,8 @@
                         array-seq
                         (map #(.padStart (.toString % 16) 2 "0"))
                         (apply str))]
-        (p/let [_ (platform/save-secret-text! platform' device-secret-key secret)]
+        (p/let [_ (platform/delete-secret-text! platform' e2ee-password-secret-key)
+                _ (platform/save-secret-text! platform' device-secret-key secret)]
           secret)))))
 
 (defn- <password-persistence-secret

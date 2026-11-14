@@ -317,7 +317,10 @@
                                                            (p/resolved (get @saved key)))
                                platform/save-secret-text! (fn [_platform' key text]
                                                             (swap! saved assoc key text)
-                                                            (p/resolved nil))]
+                                                            (p/resolved nil))
+                               platform/delete-secret-text! (fn [_platform' key]
+                                                              (swap! saved dissoc key)
+                                                              (p/resolved nil))]
                  (p/do!
                   (#'sync-crypt/<save-e2ee-password "password")
                   (#'sync-crypt/<save-e2ee-password "password-2")))
@@ -335,6 +338,34 @@
 
 ;; HYPHA-PATCH-010: the read path must use the same device secret so a
 ;; password saved under a Hypha session can be re-decrypted across reboots.
+(deftest read-e2ee-password-drops-a-password-stored-before-the-device-secret-test
+  ;; Such a password was wrapped with the JWT sub, which the server knows.
+  ;; It is deleted, not decrypted: the user is asked for it once.
+  (async done
+         (let [old-state @worker-state/*state
+               saved (atom {"logseq-encrypted-password" "blob-wrapped-with-the-jwt-sub"})]
+           (reset! worker-state/*state (assoc old-state :auth/refresh-token nil
+                                              :auth/id-token "hypha-jwt"))
+           (-> (p/with-redefs [platform/current (fn [] {:env {:runtime :browser}})
+                               platform/read-secret-text (fn [_platform' key]
+                                                           (p/resolved (get @saved key)))
+                               platform/save-secret-text! (fn [_platform' key text]
+                                                            (swap! saved assoc key text)
+                                                            (p/resolved nil))
+                               platform/delete-secret-text! (fn [_platform' key]
+                                                              (swap! saved dissoc key)
+                                                              (p/resolved nil))]
+                 (#'sync-crypt/<read-e2ee-password nil))
+               (p/then (fn [password]
+                         (is false (str "expected the old password to be gone, got " password))))
+               (p/catch (fn [e]
+                          (is (= :missing-persisted-password (:reason (ex-data e))))
+                          (is (not (contains? @saved "logseq-encrypted-password")))
+                          (is (re-matches #"[0-9a-f]{64}" (get @saved "hypha-e2ee-device-secret")))))
+               (p/finally (fn []
+                            (reset! worker-state/*state old-state)
+                            (done)))))))
+
 (deftest read-e2ee-password-uses-device-secret-in-browser-without-refresh-token-test
   (async done
          (let [old-state @worker-state/*state
