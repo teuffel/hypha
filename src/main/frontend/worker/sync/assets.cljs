@@ -353,14 +353,25 @@
               :asset-uuid asset-uuid
               :error error}))
 
+(defn- live-sync-repo
+  "The repo whose sync connection is open right now, if any.
+  `:logseq.kv/graph-remote?` and asset remote metadata are never retracted
+  (deleting the remote graph or leaving a shared one keeps them), so they
+  alone do not prove the server still holds anything."
+  []
+  (when-let [client @worker-state/*db-sync-client]
+    (when (= :open (some-> (:ws-state client) deref))
+      (:repo client))))
+
 (defn evictable-asset-files
   "Local asset copies that are safe to delete because the server holds
-  them: the graph is synced with a remote, the asset has remote metadata
-  and no asset op is pending for it. Only graphs open in this worker are
-  considered; the rest cannot be checked."
+  them: the graph's sync connection is open, the graph is marked remote,
+  the asset has remote metadata and no asset op is pending for it."
   []
-  (vec
-   (for [[repo conn] @worker-state/*datascript-conns
+  (let [live-repo (live-sync-repo)]
+   (vec
+    (for [[repo conn] @worker-state/*datascript-conns
+         :when (= live-repo repo)
          :let [db @conn]
          :when (true? (:kv/value (d/entity db :logseq.kv/graph-remote?)))
          :let [pending-asset-uuids (set (map :block/uuid (client-op/get-all-asset-ops repo)))]
@@ -371,7 +382,7 @@
          :when (and (seq asset-type)
                     (not (contains? pending-asset-uuids asset-uuid)))]
      {:repo repo
-      :file-name (asset-file-name asset-uuid asset-type)})))
+      :file-name (asset-file-name asset-uuid asset-type)}))))
 
 ;; Hypha asset-cache eviction (frontend.hypha.asset-cache) may only delete
 ;; what the server can hand back.

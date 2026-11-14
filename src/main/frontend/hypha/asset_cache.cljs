@@ -24,9 +24,11 @@
        drops to the 60% target.
 
   Assets of local-only graphs and assets that were never uploaded are
-  never candidates: the local copy is the only one. The trigger is the
-  overall quota, which OPFS SQLite usually dominates, so a pass may free
-  nothing; the tick then backs off instead of re-checking every 30 s.
+  never candidates: the local copy is the only one, and neither are assets
+  of a graph whose sync is not live right now. The trigger is the overall
+  quota, which OPFS SQLite usually dominates, so a pass may not reach its
+  target; after every pass that ran the tick pauses for 10 minutes instead
+  of re-checking every 30 s.
 
   Evicted assets get re-downloaded on demand the next time a block
   renders them, via the existing VA1 lazy-load path (`asset-cp` asks for
@@ -51,15 +53,17 @@
     <evict-until!  — pure-ish helper; exposed for unit testing
     <evict-pass!   — one check-and-evict pass with injected deps; exposed
                      for unit testing"
-  (:require [frontend.state :as state]
+  (:require [frontend.config :as config]
+            [frontend.state :as state]
             [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
+            [logseq.common.path :as path]
             [promesa.core :as p]))
 
 (def ^:private ^:const evict-trigger-percent 0.8)
 (def ^:private ^:const evict-target-percent 0.6)
 (def ^:private ^:const tick-ms 30000)
-(def ^:private ^:const nothing-freed-backoff-ms (* 10 60 1000))
+(def ^:private ^:const pass-backoff-ms (* 10 60 1000))
 
 (defn- <storage-estimate
   "Returns a promise of {:usage :quota} or nil when the Storage API
@@ -85,13 +89,15 @@
                    :size (or (.-size s) 0)})))
       (p/catch (constantly nil))))
 
-(defn- asset-path
-  "LightningFS path of an asset's local copy:
-  `/<graph-name>/<local-assets-dir>/<uuid>.<ext>`."
+(defn asset-path
+  "LightningFS path of an asset's local copy, built the way the storage
+  layer builds it (`frontend.worker.platform.browser/asset-path`): the
+  graph segment stays URL-encoded, e.g. `/Lambda%20RTC/assets/<file>`."
   [{:keys [repo file-name]}]
-  (str "/" (common-config/strip-leading-db-version-prefix repo)
-       "/" common-config/local-assets-dir
-       "/" file-name))
+  (path/url-to-path
+   (path/path-join (config/get-repo-dir repo)
+                   common-config/local-assets-dir
+                   file-name)))
 
 (defn- <evictable-asset-files
   "Asset-file metadata of the local copies the worker reports as safe to
@@ -170,13 +176,20 @@
       (reset! *running? true)
       (-> (<evict-pass! pfs <storage-estimate <evictable-asset-files)
           (p/then (fn [freed]
-                    (when (and (some? freed) (zero? freed))
-                      (reset! *idle-until (+ (js/Date.now) nothing-freed-backoff-ms)))))
+                    ;; A pass that ran either brought usage below the
+                    ;; trigger, so the next ticks are cheap no-ops, or could
+                    ;; not, because the bytes belong to something it may not
+                    ;; touch. Re-running it every 30 s would only evict
+                    ;; whatever was viewed (and re-downloaded) in between.
+                    (when (some? freed)
+                      (reset! *idle-until (+ (js/Date.now) pass-backoff-ms)))))
           (p/catch (fn [e]
                      (log/warn :hypha/asset-cache-tick-failed
-                               {:error e})))
+                               {:error e})
+                     (reset! *idle-until (+ (js/Date.now) pass-backoff-ms))))
           (p/finally (fn []
-                       (reset! *running? false)))))))
+                       (reset! *running? false)))
+          (p/then (constantly nil))))))
 
 (defn start!
   "Idempotent: starts the background eviction tick exactly once per

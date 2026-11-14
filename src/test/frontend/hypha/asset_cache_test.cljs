@@ -8,7 +8,7 @@
 
   Which assets are evictable is decided in the worker, see
   `frontend.worker.sync.assets-test`."
-  (:require [cljs.test :refer [is]]
+  (:require [cljs.test :refer [deftest is]]
             [frontend.hypha.asset-cache :as asset-cache]
             [frontend.test.helper :as test-helper :include-macros true
              :refer [deftest-async]]
@@ -67,6 +67,15 @@
         (p/then (fn [freed]
                   (is (= [] @calls))
                   (is (= 0 freed)))))))
+
+(deftest asset-path-matches-the-storage-layer
+  ;; frontend.worker.platform.browser stores assets under the URL-encoded
+  ;; graph name; see frontend.worker.platform-browser-test.
+  (is (= "/Lambda%20RTC/assets/69fb07e1-852f-4896-9d30-761843368fdb.png"
+         (asset-cache/asset-path {:repo "logseq_db_Lambda RTC"
+                                  :file-name "69fb07e1-852f-4896-9d30-761843368fdb.png"})))
+  (is (= "/example.org/assets/x.pdf"
+         (asset-cache/asset-path {:repo "logseq_db_example.org" :file-name "x.pdf"}))))
 
 (defn- estimate-of
   [usage quota]

@@ -1,5 +1,5 @@
 (ns frontend.worker.sync.assets-test
-  (:require [cljs.test :refer [async deftest is]]
+  (:require [cljs.test :refer [async deftest is testing]]
             [datascript.core :as d]
             [frontend.common.crypt :as crypt]
             [frontend.worker.platform :as platform]
@@ -210,15 +210,23 @@
                                                     {:uuid pending :uploaded? true}
                                                     {:uuid never-uploaded :uploaded? false}])
                "logseq_db_local" (graph-conn false [{:uuid local-graph-asset :uploaded? true}])}
-        prev-conns @worker-state/*datascript-conns]
+        prev-conns @worker-state/*datascript-conns
+        prev-client @worker-state/*db-sync-client]
     (reset! worker-state/*datascript-conns conns)
     (try
       (with-redefs [client-op/get-all-asset-ops (fn [repo]
                                                   (when (= "logseq_db_synced" repo)
                                                     [{:block/uuid pending
                                                       :update-asset [:update-asset 1 {:block-uuid pending}]}]))]
+        (reset! worker-state/*db-sync-client {:repo "logseq_db_synced" :ws-state (atom :open)})
         (is (= [{:repo "logseq_db_synced"
                  :file-name (str uploaded ".png")}]
-               (sync-assets/evictable-asset-files))))
+               (sync-assets/evictable-asset-files)))
+        (testing "remote flags alone are not enough: they survive deleting the remote graph"
+          (reset! worker-state/*db-sync-client {:repo "logseq_db_synced" :ws-state (atom :closed)})
+          (is (= [] (sync-assets/evictable-asset-files)))
+          (reset! worker-state/*db-sync-client nil)
+          (is (= [] (sync-assets/evictable-asset-files)))))
       (finally
-        (reset! worker-state/*datascript-conns prev-conns)))))
+        (reset! worker-state/*datascript-conns prev-conns)
+        (reset! worker-state/*db-sync-client prev-client)))))
