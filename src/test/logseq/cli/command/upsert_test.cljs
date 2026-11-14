@@ -784,6 +784,43 @@
                    (is false (str "unexpected error: " e))))
         (p/finally done))))
 
+(deftest test-execute-upsert-page-rejected-parent-fails-before-mutation
+  (async done
+    (let [mutations* (atom [])
+          action {:type :upsert-page
+                  :mode :create
+                  :repo "demo-repo"
+                  :graph "demo-graph"
+                  :page "Notes"
+                  :parent "Child"
+                  :update-tags ["TagOne"]}]
+      (-> (p/with-redefs [cli-server/ensure-server! (fn [config _repo]
+                                                      (p/resolved (assoc config :base-url "http://example")))
+                          add-command/resolve-tags (fn [_ _ tags]
+                                                     (p/resolved (when (seq tags) [{:db/id 100}])))
+                          add-command/find-pages-by-name (fn [_ _ page-name _]
+                                                           (p/resolved [(case page-name
+                                                                          "Notes" {:db/id 1 :block/uuid (random-uuid)}
+                                                                          "Child" {:db/id 3 :block/uuid (random-uuid)})]))
+                          transport/invoke (fn [_ method args]
+                                             (case method
+                                               ;; page 3 ("Child") sits below page 1
+                                               :thread-api/pull
+                                               (let [[_ _ id] args]
+                                                 (p/resolved (cond-> {:db/id id :block/title "Notes"}
+                                                               (= 3 id) (assoc :block/parent {:db/id 1}))))
+                                               :thread-api/q (p/resolved [])
+                                               (do (swap! mutations* conj method)
+                                                   (p/resolved nil))))]
+            (p/let [result (upsert-command/execute-upsert-page action {})]
+              (is (= :error (:status result)))
+              (is (= :invalid-options (get-in result [:error :code])))
+              (is (empty? @mutations*)
+                  "a rejected --parent must not leave tag or property changes behind")))
+          (p/catch (fn [e]
+                     (is false (str "unexpected error: " e))))
+          (p/finally done)))))
+
 (deftest test-execute-upsert-task-page-invalid-status-fails-before-mutation
   (async done
     (let [calls* (atom [])

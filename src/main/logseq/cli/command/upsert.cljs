@@ -1247,6 +1247,16 @@
                      (ensure-page-by-id! cfg (:repo action) (:id action))
                      (ensure-page-entity! cfg (:repo action) (:page action)))
               page-id (:db/id page)
+              ;; HYPHA: resolve and check --parent before anything is written
+              ;; to the page, so a rejected parent leaves tags and properties
+              ;; untouched.
+              parent-page (when (and (:parent action) (not (:remove-parent action)))
+                            (ensure-page-entity! cfg (:repo action) (:parent action)))
+              _ (when (and parent-page (= (:db/id parent-page) page-id))
+                  (throw (ex-info "A page cannot be its own parent"
+                                  {:code :invalid-options :page (:page action)})))
+              _ (when parent-page
+                  (<ensure-valid-page-parent! cfg (:repo action) page-id (:db/id parent-page)))
               block-uuids (resolve-block-uuids-by-id! cfg (:repo action) [page-id])
               update-tag-ids (->> (or update-tags [])
                                   (map :db/id)
@@ -1271,13 +1281,6 @@
                                       [[:db/retract page-id :block/parent]
                                        [:db/retract page-id :block/order]]
                                       {} {}]))
-               parent-page (when (and (:parent action) (not (:remove-parent action)))
-                             (ensure-page-entity! cfg (:repo action) (:parent action)))
-               _ (when (and parent-page (= (:db/id parent-page) page-id))
-                   (throw (ex-info "A page cannot be its own parent"
-                                   {:code :invalid-options :page (:page action)})))
-               _ (when parent-page
-                   (<ensure-valid-page-parent! cfg (:repo action) page-id (:db/id parent-page)))
                _ (when parent-page
                    (transport/invoke cfg :thread-api/transact
                                      [(:repo action)
