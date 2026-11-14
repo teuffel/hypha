@@ -8,7 +8,7 @@
 #   bin/hypha-build --release     release-mode  (full prod pipeline)
 #
 # Compile-mode (M0-M2 default):
-#   - clojure -M:cljs compile app db-worker logseq-cli  (with HYPHA-MODE define)
+#   - clojure -M:cljs compile app db-worker  (with HYPHA-MODE define)
 #   - A8 smoke (HYPHA_MODE in main.js)
 #   - deps/db-sync build:node-adapter
 #   - hypha-server tsc
@@ -73,8 +73,12 @@ if [[ "$MODE" == "release" ]]; then
   clojure -M:cljs release app db-worker db-worker-node logseq-cli \
     --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
 else
-  next_step "ClojureScript compile (app + db-worker + logseq-cli, HYPHA_MODE=true)"
-  clojure -M:cljs compile app db-worker logseq-cli \
+  # No logseq-cli here: the CLI refuses to talk to a db-worker-node of another
+  # revision, and compile mode does not build db-worker-node. Rebuilding only
+  # the CLI would break an existing static/logseq-cli.js + db-worker-node pair
+  # (and stop its running sync daemon). The pair is built together in --release.
+  next_step "ClojureScript compile (app + db-worker, HYPHA_MODE=true)"
+  clojure -M:cljs compile app db-worker \
     --config-merge '{:closure-defines {frontend.hypha.config/HYPHA-MODE true logseq.common.util.namespace/HYPHA-LITERAL-SLASH true}}'
 fi
 
