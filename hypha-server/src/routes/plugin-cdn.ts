@@ -28,7 +28,8 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
+import { PluginCache, requireSession, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
+import type { SessionStore } from "../auth/session.js";
 
 const R2_TTL_SECONDS = 86_400;
 const ASSETS_TTL_SECONDS = 86_400;
@@ -44,6 +45,7 @@ const ASSETS_RESPONSE_HEADERS = {
 
 export interface PluginCdnDeps {
   cache: PluginCache;
+  sessions: SessionStore;
   /** e.g. "https://plugins.logseq.io/r2" (no trailing slash). */
   upstreamBase: string;
   /**
@@ -55,6 +57,8 @@ export interface PluginCdnDeps {
 }
 
 export const pluginCdnRoute: FastifyPluginAsync<PluginCdnDeps> = async (app, deps) => {
+  app.addHook("preHandler", requireSession(deps.sessions));
+
   app.get("/plugin-cdn/r2/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
     const upstreamUrl = resolveUpstreamUrl(deps.upstreamBase, subpath);

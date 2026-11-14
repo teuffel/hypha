@@ -16,7 +16,26 @@
  * rate ≥ 80% after a few browser reloads) via `GET /health?detail=cache`.
  */
 
-import type { FastifyReply } from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import { SessionStore, SESSION_COOKIE_NAME } from "./auth/session.js";
+
+/**
+ * preHandler for the plugin proxies: only a logged-in browser may use them.
+ *
+ * Their responses (plugin HTML and JS) are served from the Hypha origin, so
+ * a script in them can call /auth/session. Requiring the session cookie
+ * stops anonymous use and drive-by navigations from other sites: the cookie
+ * is SameSite=Strict, so a cross-site navigation does not carry it, while
+ * the app's own fetches and plugin iframes do.
+ */
+export function requireSession(sessions: SessionStore) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    const sessionId = request.cookies[SESSION_COOKIE_NAME];
+    if (!sessionId || !sessions.lookup(sessionId)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+  };
+}
 
 export interface CacheEntry {
   body: Buffer;
