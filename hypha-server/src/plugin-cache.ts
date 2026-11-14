@@ -91,17 +91,53 @@ export class PluginCache {
 
 /**
  * Reject wildcard subpaths that try to escape the upstream prefix or smuggle
- * absolute URLs. GitHub raw and Cloudflare R2 both normalize `..` server-side,
- * but our cache keys would diverge from the canonical path, so reject early.
+ * absolute URLs. This is the cheap textual check; `resolveUpstreamUrl` is the
+ * one that decides.
+ *
+ * A "%" is rejected outright. The router has already percent-decoded the
+ * path once, so one that is still there came in double-encoded
+ * (`%252e%252e` arrives here as `%2e%2e`), and `fetch()`'s URL parser treats
+ * `%2e%2e` exactly like `..`. "?" and "#" can only come from an encoded
+ * `%3F`/`%23` for the same reason; they would turn part of the path into a
+ * query or fragment upstream.
  */
 export function isSafeSubpath(p: string): boolean {
   if (!p || p.length === 0) return false;
   if (p.startsWith("/") || p.startsWith("\\")) return false;
+  if (/[%?#]/.test(p)) return false;
   // Reject any path containing a ".." segment.
   for (const segment of p.split(/[/\\]/)) {
     if (segment === "..") return false;
   }
   return true;
+}
+
+/**
+ * Build the upstream URL for `subpath` below `base` (no trailing slash), or
+ * null when the request must be refused.
+ *
+ * The URL is parsed the way `fetch()` will parse it and has to stay below
+ * `base` afterwards. Checking the string alone is not enough: the parser
+ * resolves dot segments in every spelling it knows, and both upstreams host
+ * other people's content next to ours (any repository on
+ * raw.githubusercontent.com, any plugin in the bucket). A request that
+ * climbs out of the prefix would be served from the Hypha origin.
+ *
+ * The returned URL is the normalised one, so it is also the right cache key.
+ */
+export function resolveUpstreamUrl(base: string, subpath: string): string | null {
+  if (!isSafeSubpath(subpath)) return null;
+  let baseUrl: URL;
+  let url: URL;
+  try {
+    baseUrl = new URL(`${base}/`);
+    url = new URL(`${base}/${subpath}`);
+  } catch {
+    return null;
+  }
+  if (url.origin !== baseUrl.origin) return null;
+  if (!url.pathname.startsWith(baseUrl.pathname)) return null;
+  return url.href;
 }
 
 export interface ServeCachedOptions {
