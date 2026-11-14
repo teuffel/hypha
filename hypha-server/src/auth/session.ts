@@ -26,6 +26,11 @@ export class SessionStore {
   create(username: string): string {
     const id = randomUUID();
     const now = Date.now();
+    // Expired sessions were only dropped when looked up again, and every
+    // clipper login creates one that is never looked up.
+    for (const [sessionId, record] of this.sessions) {
+      if (record.expiresAt <= now) this.sessions.delete(sessionId);
+    }
     this.sessions.set(id, {
       username,
       createdAt: now,

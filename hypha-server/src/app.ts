@@ -99,9 +99,14 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   // resources loadable without their servers needing to advertise CORP —
   // matters for Logseq's external icon CDNs, image proxies, etc. The
   // page itself is still cross-origin isolated; SharedArrayBuffer works.
-  app.addHook("onSend", async (_request, reply) => {
+  app.addHook("onSend", async (request, reply) => {
     reply.header("Cross-Origin-Opener-Policy", "same-origin");
     reply.header("Cross-Origin-Embedder-Policy", "credentialless");
+    // Tokens and captured clips: never let a shared cache in front of us
+    // (a blanket caching rule on the outer proxy) store them.
+    if (request.url.startsWith("/auth/") || request.url.startsWith("/capture")) {
+      reply.header("Cache-Control", "no-store");
+    }
   });
 
   await app.register(fastifyCookie);
