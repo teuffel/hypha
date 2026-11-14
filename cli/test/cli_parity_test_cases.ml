@@ -9024,4 +9024,89 @@ let () =
           hypha_expect_invalid "duplicate" result "already has a page named";
           expect_int "nothing applied" 0 (Vec.length !apply_calls)))
 
+(* HYPHA-PATCH-018: an ISO date for a :date property resolves to the journal
+   page of that day, whatever the graph's journal title format. *)
+let hypha_date_server ~journal_ids apply_calls =
+  invoke_server (fun body ->
+      if Js.String.includes ~search:"thread-api/apply-outliner-ops" body then (
+        apply_calls := Vec.push_back !apply_calls body;
+        if Js.String.includes ~search:"create-page" body then
+          "[\"^ \
+           \",\"~:result\",[\"2026-02-12\",\"~u00000000-0000-4000-8000-000000000205\"]]"
+        else "true")
+      else if Js.String.includes ~search:"thread-api/pull" body then
+        if Js.String.includes ~search:"logseq.property/type" body then
+          "[\"^ \",\"~:logseq.property/type\",\"~:date\"]"
+        else if Js.String.includes ~search:"000000000205" body then
+          "[\"^ \
+           \",\"~:db/id\",205,\"~:block/uuid\",\"~u00000000-0000-4000-8000-000000000205\"]"
+        else hypha_page_transit 60 hypha_kid_uuid "kid" "Kid"
+      else if Js.String.includes ~search:"thread-api/q" body then
+        if Js.String.includes ~search:"journal-day" body then journal_ids
+        else
+          "[[\"^ \
+           \",\"~:db/id\",90,\"~:db/ident\",\"~:user.property/abgabe\",\"~:block/name\",\"abgabe\",\"~:block/title\",\"abgabe\",\"~:logseq.property/type\",\"~:date\"]]"
+      else "null")
+
+let hypha_date_action () =
+  let repo = Cli_primitive.create_repo "demo" in
+  Upsert.Upsert_page
+    {
+      repo;
+      graph = Cli_config.repo_to_graph repo;
+      mode = Upsert.Update;
+      id = Some 60L;
+      page = None;
+      rename = None;
+      restore = false;
+      parent = None;
+      remove_parent = false;
+      plan =
+        {
+          Property.empty_update_plan with
+          update_properties =
+            Vec.singleton
+              {
+                Property.key = Property.Key_name "abgabe";
+                value = Edn_util.string "2026-02-12";
+              };
+        };
+    }
+
+let hypha_last_set_property_body name apply_calls =
+  match
+    Vec.find_opt
+      (fun body -> Js.String.includes ~search:"batch-set-property" body)
+      !apply_calls
+  with
+  | Some body -> body
+  | None ->
+      fail_test (name ^ ": expected a batch-set-property op");
+      ""
+
+let () =
+  test_promise "Hypha :date property value resolves to the existing journal"
+    (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert (hypha_date_server ~journal_ids:"[203]" apply_calls)
+        (hypha_date_action ()) (fun result ->
+          expect_bool "ok" false (Cli_result.is_error result);
+          let body = hypha_last_set_property_body "existing" apply_calls in
+          expect_named_contains "journal id" body "203";
+          expect_named_not_contains "raw date" body "2026-02-12";
+          expect_bool "no page created" false
+            (Vec.exists
+               (fun body -> Js.String.includes ~search:"create-page" body)
+               !apply_calls)));
+
+  test_promise "Hypha :date property value creates a missing journal" (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert (hypha_date_server ~journal_ids:"[]" apply_calls)
+        (hypha_date_action ()) (fun result ->
+          expect_bool "ok" false (Cli_result.is_error result);
+          expect_named_contains "creates the day" (Vec.nth !apply_calls 0)
+            "create-page";
+          let body = hypha_last_set_property_body "missing" apply_calls in
+          expect_named_contains "created journal id" body "205"))
+
 let touch = ()

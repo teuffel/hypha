@@ -1855,6 +1855,88 @@ let rec resolve_property_value_refs invoke_config repo value =
               loop Vec.empty (Edn_util.vec_of_array fields)
           | _ -> pure (Ok value)))
 
+(* HYPHA-PATCH-018: the worker only accepts a journal page for a :date
+   property, so an ISO date string ("2026-02-12") is resolved to the journal
+   page of that day by :block/journal-day, which does not depend on the graph's
+   journal title format. A missing day is created with create-page, which turns
+   an ISO title into that day's journal page. This also happens under
+   --dry-run; an empty journal page is harmless. *)
+let iso_journal_day text =
+  let text = String.trim text in
+  match Time.parse_date_as_utc text with
+  | None -> None
+  | Some date ->
+      let year, month, day, _, _, _ = Time.utc_date_time date in
+      if String.equal text (Printf.sprintf "%04d-%02d-%02d" year month day) then
+        Some ((year * 10000) + (month * 100) + day)
+      else None
+
+let journal_day_query =
+  Cli_primitive.make_datascript_query
+    ~find:(Vec.singleton (vector_vec (Vec.of_array [| sym "?e"; sym "..." |])))
+    ~in_:
+      (Vec.of_array
+         [| Melange_edn_melange.symbol "$"; Melange_edn_melange.symbol "?day" |])
+    ~where:
+      (Vec.singleton
+         (Cli_primitive.V
+            (Edn_util.vector_t_vec
+               (Vec.of_array [| sym "?e"; kw "block/journal-day"; sym "?day" |]))))
+    ()
+
+let is_date_property invoke_config repo ident =
+  let open Cli_effect in
+  map
+    (fun entity ->
+      Option.bind
+        (Edn_util.get entity "logseq.property/type")
+        Edn_util.as_keyword
+      = Some "date")
+    (pull_entity_by_lookup invoke_config repo
+       (vector_vec (Vec.singleton (kw "logseq.property/type")))
+       (vector_vec (Vec.of_array [| kw "db/ident"; Edn_util.any ident |])))
+
+let resolve_journal_page_id invoke_config repo text day =
+  let open Cli_effect in
+  let id_value entity =
+    match id_of_entity entity with
+    | Some id -> Ok (Edn_util.int64 id)
+    | None -> Error (page_not_found ())
+  in
+  bind
+    (Transport.thread_api_q invoke_config ~repo
+       ~query:
+         (Edn_util.vector_t_vec
+            (Vec.of_array
+               [|
+                 query_value journal_day_query;
+                 Edn_util.int64 (Int64.of_int day);
+               |])))
+    (fun ids ->
+      match
+        Option.bind
+          (Option.bind (Edn_util.as_seq ids) (fun ids -> Vec.nth_opt ids 0))
+          Edn_util.as_int64
+      with
+      | Some id -> pure (Ok (Edn_util.int64 id))
+      | None ->
+          bind (create_page invoke_config repo text) (fun create_result ->
+              map id_value
+                (Add.pull_created_page invoke_config repo text create_result)))
+
+let resolve_date_property_value invoke_config repo ident value =
+  let open Cli_effect in
+  let day_text =
+    Option.bind (Edn_util.as_string value) (fun text ->
+        Option.map (fun day -> (day, String.trim text)) (iso_journal_day text))
+  in
+  match day_text with
+  | None -> pure (Ok value)
+  | Some (day, text) ->
+      bind (is_date_property invoke_config repo ident) (function
+        | false -> pure (Ok value)
+        | true -> resolve_journal_page_id invoke_config repo text day)
+
 let resolve_property_assignments invoke_config repo assignments =
   let open Cli_effect in
   Add.all_results
@@ -1865,12 +1947,15 @@ let resolve_property_assignments invoke_config repo assignments =
            (function
            | Error err -> pure (Error err)
            | Ok ident ->
-               map
-                 (function
-                   | Error err -> Error err
-                   | Ok value -> Ok (ident, value))
-                 (resolve_property_value_refs invoke_config repo
-                    assignment.value)))
+               bind
+                 (resolve_date_property_value invoke_config repo ident
+                    assignment.value) (function
+                 | Error err -> pure (Error err)
+                 | Ok value ->
+                     map
+                       (function
+                         | Error err -> Error err | Ok value -> Ok (ident, value))
+                       (resolve_property_value_refs invoke_config repo value))))
        assignments)
 
 let option_resolution_error option err =

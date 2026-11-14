@@ -328,6 +328,20 @@
     (is (= default-name (:block/name page))
         "Journal block/name remains the default formatter, independent of title format")))
 
+(deftest create-iso-date-title-reuses-journal-of-a-custom-title-format
+  ;; The CLI resolves a :date property value such as "2026-02-12" through
+  ;; create-page with split-namespace?. With a custom journal title format
+  ;; that must land on the existing journal page, not on a new page.
+  (let [conn (db-test/create-conn)
+        _ (d/transact! conn [[:db/add :logseq.class/Journal :logseq.property.journal/title-format "EEEE, dd.MM.yyyy"]])
+        [_ journal-uuid] (outliner-page/create! conn "Feb 12th, 2026" {})
+        [_ page-uuid] (outliner-page/create! conn "2026-02-12" {:split-namespace? true})]
+    (is (= journal-uuid page-uuid)
+        "The ISO title resolves to the existing journal page")
+    (is (= 20260212 (:block/journal-day (d/entity @conn [:block/uuid page-uuid]))))
+    (is (nil? (ldb/get-page @conn "2026-02-12"))
+        "No regular page named after the ISO date is created")))
+
 (deftest create-slash-formatted-journal-does-not-create-namespace-pages
   (let [conn (db-test/create-conn)
         _ (d/transact! conn [[:db/add :logseq.class/Journal :logseq.property.journal/title-format "yyyy/MM/dd"]])
