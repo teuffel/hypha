@@ -169,17 +169,21 @@ function entitySelector({ id, uuid }) {
   return [];
 }
 
-// Serialize a nested block tree ([{title, children?}]) to the EDN vector the
-// `logseq upsert block --blocks` flag expects, e.g.
-//   [{:block/title "Obst" :block/children [{:block/title "Äpfel"}]}]
-function ednBlockTree(nodes) {
-  const esc = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  const node = (n) => {
-    let s = `{:block/title ${esc(n.title)}`;
-    if (n.children && n.children.length) s += ` :block/children [${n.children.map(node).join(" ")}]`;
-    return s + "}";
-  };
-  return `[${nodes.map(node).join(" ")}]`;
+// Serialize a nested block tree ([{title, children?}]) to the markdown outline
+// the `logseq upsert block --blocks` flag expects, e.g.
+//   - Obst
+//     - Äpfel
+// Continuation lines of a multi-line title stay inside their block.
+function markdownBlockTree(nodes, depth = 0) {
+  const indent = "  ".repeat(depth);
+  return nodes
+    .map((n) => {
+      const [first, ...rest] = String(n.title).split("\n");
+      const lines = [`${indent}- ${first}`, ...rest.map((line) => `${indent}  ${line}`)];
+      if (n.children && n.children.length) lines.push(markdownBlockTree(n.children, depth + 1));
+      return lines.join("\n");
+    })
+    .join("\n");
 }
 
 const server = new McpServer({ name: "Hypha MCP Server", version: "0.1.0" });
@@ -313,7 +317,7 @@ server.registerTool(
     if (propertiesEdn) args.push("--update-properties", propertiesEdn);
     if (removeProperties?.length) args.push("--remove-properties", ednStringVector(removeProperties));
     pushOpt(args, "--parent", parent);
-    if (removeParent) args.push("--remove-parent", "true");
+    if (removeParent) args.push("--remove-parent");
     return mcpText(await runCli(args));
   },
 );
@@ -323,20 +327,19 @@ server.registerTool(
   {
     title: "Rename Page",
     description:
-      "Rename a page's title (updates its name and references). Identify the page by name, id " +
-      "(db/id from read tools), or uuid; `to` is the new title (a literal '/' is kept literal). RTC-synced.",
+      "Rename a page's title (updates its name and references). Identify the page by name or id " +
+      "(db/id from read tools); `to` is the new title (a literal '/' is kept literal). RTC-synced.",
     inputSchema: {
       page: z.string().optional().describe("Current page name"),
       id: z.union([z.number(), z.string()]).optional().describe("Page db/id"),
-      uuid: z.string().optional().describe("Page uuid"),
       to: z.string().describe("New page title"),
     },
   },
-  async ({ page, id, uuid, to }) => {
+  async ({ page, id, to }) => {
     const hasId = id !== undefined && id !== null && String(id) !== "";
-    const sel = hasId ? ["--id", String(id)] : uuid ? ["--uuid", uuid] : page ? ["--page", page] : [];
-    if (!sel.length) return mcpText({ ok: false, text: "rename_page: provide page, id, or uuid" });
-    return mcpText(await runCli(["rename", "page", ...sel, "--to", to, "--output", "json"]));
+    const sel = hasId ? ["--id", String(id)] : page ? ["--page", page] : [];
+    if (!sel.length) return mcpText({ ok: false, text: "rename_page: provide page or id" });
+    return mcpText(await runCli(["upsert", "page", ...sel, "--rename", to, "--output", "json"]));
   },
 );
 
@@ -361,7 +364,7 @@ server.registerTool(
     if (!sel.length) return mcpText({ ok: false, text: "set_page_parent: provide page (name) or id" });
     if (!parent && !removeParent) return mcpText({ ok: false, text: "set_page_parent: provide parent or removeParent" });
     const args = ["upsert", "page", ...sel, "--output", "json"];
-    if (removeParent) args.push("--remove-parent", "true");
+    if (removeParent) args.push("--remove-parent");
     else pushOpt(args, "--parent", parent);
     return mcpText(await runCli(args));
   },
@@ -418,7 +421,7 @@ server.registerTool(
   async ({ targetPage, blocks }) => {
     if (!blocks.length) return mcpText({ ok: false, text: "upsert_blocks: blocks is empty" });
     return mcpText(
-      await runCli(["upsert", "block", "--target-page", targetPage, "--blocks", ednBlockTree(blocks), "--output", "json"]),
+      await runCli(["upsert", "block", "--target-page", targetPage, "--blocks", markdownBlockTree(blocks), "--output", "json"]),
     );
   },
 );
@@ -462,8 +465,8 @@ server.registerTool(
       uuid: z.string().optional().describe("Existing task block uuid (update mode)"),
       status: z.string().optional().describe("Task status (e.g. todo, doing, done)"),
       priority: z.string().optional().describe("Task priority (e.g. low, medium, high)"),
-      scheduled: z.string().optional().describe("Scheduled date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
-      deadline: z.string().optional().describe("Deadline date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
+      scheduled: z.string().optional().describe("Scheduled date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM], or epoch ms. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
+      deadline: z.string().optional().describe("Deadline date, ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM], or epoch ms. Ambiguous formats (DD.MM.YYYY, YYYY/MM/DD) are rejected."),
     },
   },
   async ({ content, targetPage, id, uuid, status, priority, scheduled, deadline }) => {
