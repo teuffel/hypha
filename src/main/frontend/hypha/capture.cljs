@@ -82,7 +82,7 @@
   `:git/current-repo` is set from localStorage before anything is loaded."
   []
   (and (some? (state/get-current-repo))
-       (false? (:db/restoring? @state/state))))
+       (false? (state/get-state :db/restoring?))))
 
 (defn- signed-in?
   "The capture inbox needs a token, and the session is restored

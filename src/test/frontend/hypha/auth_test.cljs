@@ -82,3 +82,24 @@
     (set! js/setInterval orig-set-interval)
     (set! js/clearInterval orig-clear-interval)
     (p/resolved nil)))
+
+(defn- jwt-for-sub
+  [sub n]
+  (str "h." (js/btoa (js/JSON.stringify #js {:sub sub :n n})) ".s"))
+
+(deftest-async refresh-hypha-id-token-keeps-the-session-of-the-same-user
+  (let [orig-token (state/get-auth-id-token)
+        orig-graphs (state/get-state :rtc/graphs)
+        first-token (jwt-for-sub "user-1" 1)
+        graphs [{:graph-uuid "g1"}]]
+    (state/set-auth-id-token nil)
+    (-> (p/let [_ (hypha-auth/<refresh-hypha-id-token!
+                   (fn [] (async-resp {:status 200 :body {:id-token first-token}})))
+                _ (state/set-state! :rtc/graphs graphs)
+                _ (hypha-auth/<refresh-hypha-id-token!
+                   (fn [] (async-resp {:status 200 :body {:id-token (jwt-for-sub "user-1" 2)}})))]
+          (is (= graphs (state/get-state :rtc/graphs))
+              "a re-minted token of the same user is not a user switch"))
+        (p/finally (fn []
+                     (state/set-auth-id-token orig-token)
+                     (state/set-state! :rtc/graphs orig-graphs))))))

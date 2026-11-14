@@ -11,7 +11,7 @@
      (via `frontend.config/set-custom-sync-server-url!`).
   2. Calls GET `/auth/session` to exchange the HttpOnly Hypha session cookie
      for a fresh JWT; on success, the JWT is placed into
-     `state/state[:auth/id-token]` and `flows/*current-login-user` so the rest
+     `:auth/id-token` and `:auth/current-login-user` so the rest
      of the app sees an authenticated user.
   3. On 401 it dispatches `[:user/login]`, which Patch #1 in
      `handler/events/ui.cljs` routes to the Hypha access-code login modal.
@@ -34,7 +34,6 @@
   (:require [cljs-http.client :as http]
             [cljs.core.async :refer [<! go]]
             [frontend.config :as config]
-            [frontend.flows :as flows]
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
             [frontend.hypha.asset-cache :as asset-cache]
@@ -101,7 +100,7 @@
       (p/then (fn [_]
                 (state/<invoke-db-worker
                  :thread-api/sync-app-state
-                 (select-keys @state/state
+                 (select-keys (state/get-state)
                               [:auth/id-token :auth/access-token]))))))
 
 (defn- <fetch-remote-graphs-after-login!
@@ -136,9 +135,9 @@
   Browser B's freshly-authenticated session sees its remote graphs in the
   picker without further clicks."
   [id-token]
-  (state/set-auth-id-token id-token)
-  (some->> (user-handler/parse-jwt id-token)
-           (reset! flows/*current-login-user))
+  (let [user (user-handler/parse-jwt id-token)]
+    (state/set-auth-id-token id-token (:sub user))
+    (state/set-state! :auth/current-login-user user))
   (<fetch-remote-graphs-after-login!))
 
 (defn- <fetch-session

@@ -45,6 +45,11 @@ on:
         type: boolean
         required: true
         default: true
+      publish-linux-stores:
+        description: 'Publish Flathub and Snap'
+        type: boolean
+        required: true
+        default: false
   # schedule: # Every workday at the 2 P.M. (UTC) we run a scheduled nightly build
   #   - cron: '0 14 * * MON-FRI'
 
@@ -52,6 +57,7 @@ env:
   CLOJURE_VERSION: '1.12.4.1618'
   NODE_VERSION: '24'
   JAVA_VERSION: '21'
+  OCAML_VERSION: '5.1.1'
 
 jobs:
   compile-cljs:
@@ -110,6 +116,18 @@ jobs:
         with:
           cli: ${{ env.CLOJURE_VERSION }}
 
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_VERSION }}
+
+      - name: Fetch OCaml deps
+        working-directory: cli
+        run: opam install . --deps-only --with-test --yes
+
+      - name: Fetch CLI pnpm deps
+        run: pnpm --dir cli install --frozen-lockfile --ignore-workspace
+
       - name: Retrieve tag version
         id: ref
         run: |
@@ -137,7 +155,14 @@ jobs:
           echo "ENABLE_FILE_SYNC_PRODUCTION=${{ github.event_name == 'schedule' || github.event.inputs.enable-file-sync-production == 'true' }}" >> $GITHUB_ENV
 
       - name: Compile CLJS
-        run: pnpm install --frozen-lockfile && gulp build && pnpm cljs:release-electron && pnpm db-worker-node:bundle && pnpm webpack-app-build && pnpm desktop:prepare-runtime-js
+        run: |
+          pnpm install --frozen-lockfile
+          gulp build
+          pnpm cljs:release-electron
+          pnpm db-worker-node:bundle
+          opam exec -- pnpm cli:release
+          pnpm webpack-app-build
+          pnpm desktop:prepare-runtime-js
         env:
           LOGSEQ_SENTRY_DSN: ${{ secrets.LOGSEQ_SENTRY_DSN }}
           LOGSEQ_POSTHOG_TOKEN: ${{ secrets.LOGSEQ_POSTHOG_TOKEN }}
@@ -193,7 +218,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: static
-          path: static
+          path: |
+            static
+            deps/graph-lifecycle
+            sidecar
           include-hidden-files: true
 
   build-linux-x64:
@@ -204,7 +232,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -232,6 +260,9 @@ jobs:
       - name: Build/Release Electron App
         run: pnpm install --frozen-lockfile && pnpm electron:make
         working-directory: ./static
+
+      - name: Verify packaged embedding sidecar
+        run: test -f static/dist/linux-unpacked/resources/sidecar/embedding_server.py
 
       - name: Save artifacts
         run: |
@@ -261,7 +292,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -291,6 +322,9 @@ jobs:
         run: pnpm electron:make-linux-arm64
         working-directory: ./static
 
+      - name: Verify packaged embedding sidecar
+        run: test -f static/dist/linux-arm64-unpacked/resources/sidecar/embedding_server.py
+
       - name: Save artifacts
         run: |
           mkdir -p builds
@@ -319,7 +353,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -371,6 +405,10 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
+      - name: Verify packaged embedding sidecar
+        run: |
+          if (-not (Test-Path "static/dist/win-unpacked/resources/sidecar/embedding_server.py")) { exit 1 }
+
       - name: Save Artifact
         run: |
           mkdir builds
@@ -393,7 +431,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -445,6 +483,10 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
+      - name: Verify packaged embedding sidecar
+        run: |
+          if (-not (Test-Path "static/dist/win-arm64-unpacked/resources/sidecar/embedding_server.py")) { exit 1 }
+
       - name: Save Artifact
         run: |
           mkdir builds
@@ -467,7 +509,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -527,6 +569,9 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Verify packaged embedding sidecar
+        run: test -f static/dist/mac/Logseq.app/Contents/Resources/sidecar/embedding_server.py
+
       - name: Save x64 artifacts
         run: |
           mkdir -p builds
@@ -550,7 +595,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Retrieve tag version
         id: ref
@@ -610,6 +655,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID_EMAIL }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Verify packaged embedding sidecar
+        run: test -f static/dist/mac-arm64/Logseq.app/Contents/Resources/sidecar/embedding_server.py
 
       - name: Save arm64 artifacts
         run: |
@@ -698,7 +746,7 @@ jobs:
         run: ls -rl
 
       - name: Update Nightly Release
-        uses: andelf/nightly-release@main
+        uses: andelf/nightly-release@5834076edc55cc05975561c9722043f072ac5c26 # main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -810,7 +858,7 @@ jobs:
   trigger-flathub-release:
     runs-on: ubuntu-22.04
     needs: [ release ]
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.build-target == 'beta' || github.event.inputs.build-target == 'stable') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish-linux-stores == 'true' && (github.event.inputs.build-target == 'beta' || github.event.inputs.build-target == 'stable') }}
     steps:
       - name: Trigger Flathub release
         run: |
@@ -855,13 +903,13 @@ jobs:
   publish-linux-snap:
     runs-on: ubuntu-22.04
     needs: [ release ]
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.build-target == 'beta' || github.event.inputs.build-target == 'stable') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish-linux-stores == 'true' && (github.event.inputs.build-target == 'beta' || github.event.inputs.build-target == 'stable') }}
     steps:
       - name: Download The Static Asset
         uses: actions/download-artifact@v4
         with:
           name: static
-          path: static
+          path: .
 
       - name: Install Node.js
         uses: actions/setup-node@v4

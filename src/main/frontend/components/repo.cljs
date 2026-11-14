@@ -1,17 +1,22 @@
 (ns frontend.components.repo
-  (:require [clojure.string :as string]
+  (:require [cljs-bean.core :as bean]
+            [clojure.string :as string]
+            [electron.ipc :as ipc]
             [frontend.components.rtc.indicator :as rtc-indicator]
             [frontend.config :as config]
             [frontend.context.i18n :as i18n :refer [t]]
-            [frontend.db :as db]
+            [frontend.handler.db-based.import :as db-import-handler]
             [frontend.handler.db-based.sync :as rtc-handler]
+            [frontend.handler.events.rtc-error :as rtc-error]
             [frontend.handler.graph :as graph]
             [frontend.handler.notification :as notification]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
+            [frontend.handler.ui :as ui-handler]
             [frontend.handler.user :as user-handler]
             [frontend.hypha.config :as hypha-config]
             [frontend.mobile.util :as mobile-util]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
@@ -19,17 +24,25 @@
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
             [logseq.common.util :as common-util]
-            [logseq.db :as ldb]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [medley.core :as medley]
             [promesa.core :as p]
             [io.factorhouse.hsx.core :as hsx]))
 
+(declare existing-local-graph-action? choose-existing-local-graph-source!)
+
 (defn graph-sync-icon-name
   [{:keys [remote? graph-e2ee?]}]
   (when remote?
     (if graph-e2ee? "lock" "cloud")))
+
+(defn- repo-display-name
+  [repo-url]
+  (let [repo-name (text-util/get-graph-name-from-path repo-url)]
+    (if (config/db-based-graph? repo-name)
+      (config/db-graph-name repo-name)
+      repo-name)))
 
 (defn local-uploadable-graph?
   [{:keys [root remote? rtc-graph? url]}]
@@ -51,14 +64,28 @@
        (user-handler/logged-in?)
        (user-handler/rtc-group?)))
 
+(defn <invoke-db-worker
+  [op & args]
+  (apply state/<invoke-db-worker op args))
+
+(defn- handle-cloud-graph-error!
+  [error]
+  (log/error :db-sync/cloud-graph-failed error)
+  (when (rtc-error/e2ee-decrypt-failed? error)
+    (notification/show! (t :encryption/wrong-password) :error false)))
+
 (defn- graph-e2ee-enabled?
   [{:keys [url graph-e2ee?] :as graph}]
-  (if (contains? graph :graph-e2ee?)
-    (true? graph-e2ee?)
-    (if (= url (state/get-current-repo))
-      (let [e2ee? (ldb/get-graph-rtc-e2ee? (db/get-db))]
-        (if (nil? e2ee?) true (true? e2ee?)))
-      true)))
+  (cond
+    (contains? graph :graph-e2ee?)
+    (p/resolved (true? graph-e2ee?))
+
+    (= url (state/get-current-repo))
+    (p/let [e2ee? (<invoke-db-worker :thread-api/get-key-value url :logseq.kv/graph-rtc-e2ee?)]
+      (if (nil? e2ee?) true (true? e2ee?)))
+
+    :else
+    (p/resolved true)))
 
 (defn- <ensure-current-graph-for-upload!
   [repo]
@@ -72,7 +99,7 @@
         dialog-config {:cancel-label (t :ui/cancel)
                        :ok-label (t :ui/confirm)}]
     (-> (shui/dialog-confirm!
-         [:p.font-medium.-my-4 (t :graph/upload-local-confirm-desc graph-name)]
+         [:p.font-medium.mb-6 (t :graph/upload-local-confirm-desc graph-name)]
          dialog-config)
         (p/then
          (fn []
@@ -90,6 +117,9 @@
               (rtc-indicator/on-upload-finished-task
                hide-upload-log!)
               (-> (rtc-handler/<rtc-upload-graph! url graph-e2ee?)
+                  (p/catch (fn [error]
+                             (handle-cloud-graph-error! error)
+                             (p/rejected error)))
                   (p/finally hide-upload-log!)))))))))
 
 (hsx/defc normalized-graph-label
@@ -192,8 +222,7 @@
                                      (state/pub-event! [:rtc/download-remote-graph GraphName GraphUUID GraphSchemaVersion graph-e2ee?])
 
                                      :else
-                                     (when-not (util/capacitor?)
-                                       (state/pub-event! [:graph/pull-down-remote-graph repo]))))))]
+                                     nil))))]
       (when-let [time (some-> (or last-seen-at created-at) (safe-locale-date))]
         [:small.text-muted-foreground (t :graph/last-opened-at-label time)])]
 
@@ -260,7 +289,7 @@
                                   (fn []
                                     (state/set-state! :rtc/loading-graphs? true)
                                     (when (= (state/get-current-repo) repo)
-                                      (state/<invoke-db-worker :thread-api/rtc-stop))
+                                      (rtc-handler/<rtc-stop!))
                                     (p/do! (rtc-handler/<rtc-delete-graph! GraphUUID GraphSchemaVersion)
                                            (state/set-state! :rtc/loading-graphs? false)
                                            (rtc-handler/<get-remote-graphs)))))))}
@@ -279,7 +308,7 @@
                                   (fn []
                                     (state/set-state! :rtc/loading-graphs? true)
                                     (when (= (state/get-current-repo) repo)
-                                      (state/<invoke-db-worker :thread-api/rtc-stop))
+                                      (rtc-handler/<rtc-stop!))
                                     (-> (rtc-handler/<rtc-leave-graph! GraphUUID)
                                         (p/then (fn []
                                                   (notification/show! (t :graph/left) :success)
@@ -306,13 +335,45 @@
                    (contains? remote-names (config/db-graph-name url))))
             local-graphs)))
 
+;; HYPHA-PATCH-014: rendered by repos-cp in Hypha mode.
+(hsx/defc name-collision-banner
+  "One row per local graph that collides by name with one of the user's own
+  remote graphs. Each \"Connect\" button triggers the Patch #13 resolve
+  dialog without requiring an upload click first."
+  [local-graphs own-graphs]
+  (let [name-collision-graphs (local-graphs-with-remote-name-match local-graphs own-graphs)]
+    (when (seq name-collision-graphs)
+      [:div.cp__hypha-rebind-banner.bg-amber-02.border.border-amber-06.rounded.p-3.mb-6.flex.flex-col.gap-2
+       [:div.text-sm.font-medium (t :graph.rebind/banner-title)]
+       [:div.text-xs.opacity-80 (t :graph.rebind/banner-desc)]
+       (for [{:keys [url]} name-collision-graphs]
+         (let [graph-name (config/db-graph-name url)
+               match (first (filter #(= graph-name (:GraphName %)) own-graphs))]
+           [:div.flex.flex-row.items-center.gap-2.text-sm
+            {:key url}
+            [:span.flex-1.font-mono graph-name]
+            (shui/button
+             {:variant :outline
+              :size :sm
+              :on-click
+              #(state/pub-event!
+                [:rtc/graph-already-exists-resolve
+                 {:repo url
+                  :graph-name graph-name
+                  :remote-graph-id (:GraphUUID match)
+                  :remote-graph-e2ee? (:graph-e2ee? match)
+                  :remote-updated-at (:updated-at match)}])}
+             (t :graph.rebind/banner-action))]))])))
+
 (hsx/defc repos-cp
   []
-  (let [login? (boolean (state/use-sub :auth/id-token))
-        repos (state/use-sub [:me :repos])
+  (let [session (rfx/use-sub [:auth/graph-session])
+        login? (boolean (rfx/use-sub [:auth/id-token]))
+        list-remotes? (and login? (user-handler/can-list-remote-graphs?))
+        repos (rfx/use-sub [:me :repos])
         repos (util/distinct-by :url repos)
-        remotes (state/use-sub :rtc/graphs)
-        remotes-loading? (state/use-sub :rtc/loading-graphs?)
+        remotes (rfx/use-sub [:rtc/graphs])
+        remotes-loading? (rfx/use-sub [:rtc/loading-graphs?])
         repos (->> (if (and login? (seq remotes))
                      (repo-handler/combine-local-&-remote-graphs repos remotes)
                      repos)
@@ -325,19 +386,12 @@
                           (config/db-based-graph? (:url item)))))
         {remote-graphs true local-graphs false} (group-by (comp boolean :remote?) repos)
         {own-graphs true shared-graphs false}
-        (group-by (fn [graph] (= "manager" (:graph<->user-user-type graph))) remote-graphs)
-        ;; HYPHA-PATCH-014: local graphs that collide by name with one
-        ;; of the user's own remote graphs. Banner shown only in Hypha
-        ;; mode (the only target where the collision flow has a
-        ;; one-click resolve via Patch #13).
-        name-collision-graphs (when hypha-config/hypha-mode?
-                                (local-graphs-with-remote-name-match
-                                 local-graphs own-graphs))]
+        (group-by (fn [graph] (= "manager" (:graph<->user-user-type graph))) remote-graphs)]
     (hooks/use-effect!
      (fn []
-       (when (and login? (user-handler/rtc-group?))
+       (when list-remotes?
          (rtc-handler/<get-remote-graphs)))
-     [login?])
+     [session])
     [:div#graphs
      (when-not (util/capacitor?)
        [:h1.title (t :graph/all-graphs)])
@@ -349,42 +403,25 @@
          [:div.mr-8
           (ui/button
            (t :graph/create-new)
-           :on-click #(state/pub-event! [:graph/new-db-graph]))]])
+           :on-click #(state/pub-event! [:graph/new-db-graph]))]
+         (when (existing-local-graph-action?)
+           [:div.mr-8
+            (ui/button
+             (t :graph.add-existing/action)
+             :class "add-existing-graph-btn"
+             :data-testid "add-existing-graph"
+             :on-click choose-existing-local-graph-source!)])])
 
-      ;; HYPHA-PATCH-014: hint banner — one row per name-collision.
-      ;; Each "Connect" button triggers the Patch #13 resolve dialog
-      ;; without requiring an upload click first.
-      (when (seq name-collision-graphs)
-        [:div.cp__hypha-rebind-banner.bg-amber-02.border.border-amber-06.rounded.p-3.mb-6.flex.flex-col.gap-2
-         [:div.text-sm.font-medium (t :graph.rebind/banner-title)]
-         [:div.text-xs.opacity-80 (t :graph.rebind/banner-desc)]
-         (for [{:keys [url]} name-collision-graphs]
-           (let [graph-name (config/db-graph-name url)
-                 match (first (filter #(= graph-name (:GraphName %)) own-graphs))]
-             [:div.flex.flex-row.items-center.gap-2.text-sm
-              {:key url}
-              [:span.flex-1.font-mono graph-name]
-              (shui/button
-               {:variant :outline
-                :size :sm
-                :on-click
-                #(state/pub-event!
-                  [:rtc/graph-already-exists-resolve
-                   {:repo url
-                    :graph-name graph-name
-                    :remote-graph-id (:GraphUUID match)
-                    :remote-graph-e2ee? (:graph-e2ee? match)
-                    :remote-updated-at (:updated-at match)}])}
-               (t :graph.rebind/banner-action))]))])
+      ;; HYPHA-PATCH-014: name-collision hint banner (Hypha mode only).
+      (when hypha-config/hypha-mode?
+        (name-collision-banner local-graphs own-graphs))
 
       [:div
        [:h2.text-lg.font-medium.mb-4 (t :graph/local-graphs)]
        (when (seq local-graphs)
          (repos-inner local-graphs))]
 
-      (when (and (user-handler/rtc-group?)
-                 (seq remote-graphs)
-                 login?)
+      (when (and list-remotes? (seq remote-graphs))
         [:<>
          (when (seq own-graphs)
            [:div
@@ -441,19 +478,16 @@
                                                  (when target
                                                    (state/pub-event! [:graph/open-new-window target])))))
                                            (cond
-                                                  ;; exists locally?
+                                             ;; exists locally?
                                              (or (:root graph) (not rtc-graph?))
                                              (state/pub-event! [:graph/switch url])
 
                                              (and rtc-graph? remote?)
-                                             (do
-                                               (state/pub-event!
-                                                [:rtc/download-remote-graph GraphName GraphUUID GraphSchemaVersion graph-e2ee?])
-                                               (when (util/mobile?)
-                                                 false))
+                                             (state/pub-event!
+                                              [:rtc/download-remote-graph GraphName GraphUUID GraphSchemaVersion graph-e2ee?])
 
                                              :else
-                                             (state/pub-event! [:graph/pull-down-remote-graph graph])))))}})))
+                                             nil))))}})))
                     switch-repos)]
     (->> repo-links (remove nil?))))
 
@@ -475,6 +509,15 @@
       (shui/tabler-icon "database-import")
       [:span (t :import/notes)]))
 
+   (when (existing-local-graph-action?)
+     (shui/button
+      {:size :sm :variant :ghost
+       :class "add-existing-graph-btn"
+       :data-testid "add-existing-graph"
+       :on-click choose-existing-local-graph-source!}
+      (shui/tabler-icon "folder-plus")
+      [:span (t :graph.add-existing/action)]))
+
    (when-not config/publishing?
      (shui/button {:size :sm :variant :ghost
                    :on-click (fn []
@@ -483,15 +526,24 @@
                                  (route-handler/redirect-to-all-graphs)))}
                   (shui/tabler-icon "layout-2") [:span (t :graph/all-graphs)]))])
 
+(defn close-sidebar-after-repo-popup-action!
+  []
+  (when (util/sm-breakpoint?)
+    (js/setTimeout #(state/set-left-sidebar-open! false) 0)))
+
+(defn repo-popup-action-target?
+  [target]
+  (boolean (.closest target "a, button, [role='menuitem']")))
+
 (hsx/defc repos-dropdown-content
   [& {:keys [contentid footer?] :as opts
       :or {footer? true}}]
-  (let [current-repo (state/use-sub :git/current-repo)
-        login? (boolean (state/use-sub :auth/id-token))
-        repos (state/use-sub [:me :repos])
-        rtc-graphs (state/use-sub :rtc/graphs)
-        downloading-graph-id (state/use-sub :rtc/downloading-graph-uuid)
-        remotes-loading? (state/use-sub :rtc/loading-graphs?)
+  (let [current-repo (rfx/use-sub [:git/current-repo])
+        login? (boolean (rfx/use-sub [:auth/id-token]))
+        repos (rfx/use-sub [:me :repos])
+        rtc-graphs (rfx/use-sub [:rtc/graphs])
+        downloading-graph-id (rfx/use-sub [:rtc/downloading-graph-uuid])
+        remotes-loading? (rfx/use-sub [:rtc/loading-graphs?])
         repos (sort-repos-with-metadata-local repos)
         repos (->>
                (if (and (seq rtc-graphs) login?)
@@ -515,21 +567,23 @@
                             :on-click (fn []
                                         (rtc-handler/<get-remote-graphs))}
                            (ui/icon "refresh" {:size 15}))))])
-        _remote? (and current-repo (:remote? (first (filter #(= current-repo (:url %)) repos))))
-        _repo-name (when current-repo (db/get-repo-name current-repo))]
+        _remote? (and current-repo (:remote? (first (filter #(= current-repo (:url %)) repos))))]
 
     [:div
      {:class (when (<= (count repos) 1) "no-repos")}
      (header-fn)
      [:div.cp__repos-list-wrap
-      (for [{:keys [hr item hover-detail title options icon]} (items-fn)]
+      (for [[idx {:keys [hr item hover-detail title options icon]}] (map-indexed vector (items-fn))]
         (let [on-click' (:on-click options)
               href' (:href options)
               menu-item (if (util/mobile?) ui/menu-link shui/dropdown-menu-item)]
           (if hr
-            (if (util/mobile?) [:hr.py-2] (shui/dropdown-menu-separator))
+            (if (util/mobile?)
+              [:hr.py-2 {:key (str "separator-" idx)}]
+              (shui/dropdown-menu-separator {:key (str "separator-" idx)}))
             (menu-item
              (assoc options
+                    :key (or href' hover-detail (str "repo-" idx))
                     :title hover-detail
                     :on-click (fn [^js e]
                                 (when on-click'
@@ -570,19 +624,26 @@
 
 (hsx/defc graphs-selector
   []
-  (let [current-repo (state/use-sub :git/current-repo)
-        user-repos (state/use-sub [:me :repos])
+  (let [current-repo (rfx/use-sub [:git/current-repo])
+        user-repos (rfx/use-sub [:me :repos])
         current-repo' (some->> user-repos (medley/find-first #(= current-repo (:url %))))
-        repo-name (when current-repo (db/get-repo-name current-repo))
         remote? (:remote? current-repo')
         short-repo-name (if current-repo
-                          (db/get-short-repo-name repo-name)
+                          (repo-display-name current-repo)
                           (t :graph.switch/select-prompt))
         selector-opts (cond-> {:on-click (fn [^js e]
                                            (shui/popup-show! (.closest (.-target e) "a")
-                                                             (fn [{:keys [id]}] (repos-dropdown-content {:contentid id}))
+                                                             (fn [{:keys [id]}]
+                                                               (repos-dropdown-content
+                                                                {:contentid id}))
                                                              {:as-dropdown? true
-                                                              :content-props {:class "repos-list"}
+                                                              :focus-trigger? false
+                                                              :content-props
+                                                              {:class "repos-list"
+                                                               :on-click
+                                                               (fn [^js e]
+                                                                 (when (repo-popup-action-target? (.-target e))
+                                                                   (close-sidebar-after-repo-popup-action!)))}
                                                               :align :start}))}
                         (and (util/electron?) (:root current-repo'))
                         (assoc :on-context-menu
@@ -643,16 +704,116 @@
       (string/includes? graph-name "+")
       (string/includes? graph-name "/")))
 
+(defn existing-local-graph-action?
+  "Electron DB builds can re-add a local graph from disk after OS reinstall."
+  []
+  (boolean (and (util/electron?) (not config/publishing?))))
+
+(defn- <on-existing-local-graph-imported!
+  []
+  (p/do!
+   (graph/<upsert-current-graph-registry!)
+   (graph/remember-current-graph-id-in-tab!)
+   (state/pub-event! [:graph/sync-context])
+   (notification/show! (t :import/file-finished) :success)
+   (route-handler/redirect-to-home!)
+   (js/setTimeout ui-handler/re-render-root! 500)))
+
+(hsx/defc add-existing-graph-name-dialog
+  [default-name on-submit]
+  (let [[input set-input!] (hooks/use-state (or default-name ""))
+        submit! (fn []
+                  (let [graph-name (string/trim input)]
+                    (cond
+                      (string/blank? graph-name)
+                      (notification/show! (t :import/empty-graph-name) :error)
+
+                      (invalid-graph-name? graph-name)
+                      (invalid-graph-name-warning)
+
+                      (repo-handler/graph-already-exists? graph-name)
+                      (notification/show! (t :import/graph-name-conflict) :error)
+
+                      :else
+                      (on-submit graph-name))))]
+    [:div.container
+     [:div.sm:flex.sm:items-start
+      [:div.mt-3.text-center.sm:mt-0.sm:text-left
+       [:h3#modal-headline.leading-6.font-medium.pb-2
+        (t :import/new-graph-name)]]]
+     (shui/input
+      {:auto-focus true
+       :value input
+       :placeholder (t :graph/name-placeholder)
+       :on-change (fn [e]
+                    (set-input! (util/evalue e)))
+       :on-key-down (fn [e]
+                      (when (= "Enter" (util/ekey e))
+                        (submit!)))})
+     [:div.mt-5.sm:mt-4.flex
+      (ui/button (t :ui/submit)
+                 {:on-click submit!})]]))
+
+(defn <add-existing-local-graph!
+  [source]
+  (when (existing-local-graph-action?)
+    (p/let [^js ret (ipc/ipc :showOpenDialog
+                             (merge {:title (t :graph.add-existing/action)}
+                                    (case source
+                                      :folder {:properties ["openDirectory"]}
+                                      {:properties ["openFile"]
+                                       :filters [{:name "Logseq"
+                                                  :extensions ["sqlite" "zip"]}]})))
+            path (some-> (bean/->clj ret) :filePaths first)]
+      (when-not (string/blank? path)
+        (shui/dialog-open!
+         #(add-existing-graph-name-dialog
+           (db-import-handler/suggested-graph-name path)
+           (fn [graph-name]
+             (shui/dialog-close!)
+             (db-import-handler/<import-existing-local-graph!
+              path graph-name <on-existing-local-graph-imported!)))
+         {:id :add-existing-graph-name
+          :title (t :import/new-graph-name)})))))
+
+(hsx/defc add-existing-graph-source-dialog
+  []
+  [:div.flex.flex-col.gap-3.p-1
+   (shui/button
+    {:class "add-existing-graph-folder-btn"
+     :data-testid "add-existing-graph-folder"
+     :on-click (fn []
+                 (shui/dialog-close!)
+                 (<add-existing-local-graph! :folder))}
+    (t :graph.add-existing/folder-action))
+   (shui/button
+    {:variant :secondary
+     :class "add-existing-graph-file-btn"
+     :data-testid "add-existing-graph-file"
+     :on-click (fn []
+                 (shui/dialog-close!)
+                 (<add-existing-local-graph! :file))}
+    (t :graph.add-existing/file-action))])
+
+(defn choose-existing-local-graph-source!
+  []
+  (when (existing-local-graph-action?)
+    (shui/dialog-open!
+     add-existing-graph-source-dialog
+     {:id :add-existing-graph-source
+      :title (t :graph.add-existing/action)})))
+
+
 (defn ensure-e2ee-rsa-key-for-cloud!
   [{:keys [cloud? graph-e2ee? refresh-token token user-uuid e2ee-rsa-key-ensured?]} set-e2ee-rsa-key-ensured?]
   (if (and cloud? graph-e2ee? refresh-token token user-uuid (not e2ee-rsa-key-ensured?))
     (-> (p/do!
          (state/pub-event! [:rtc/sync-app-state])
-         (state/<invoke-db-worker :thread-api/set-db-sync-config
-                                  {:enabled? true
-                                   :ws-url (config/db-sync-ws-url)
-                                   :http-base (config/db-sync-http-base)})
-         (p/let [rsa-key-pair (state/<invoke-db-worker :thread-api/db-sync-ensure-user-rsa-keys)]
+         (<invoke-db-worker :thread-api/set-db-sync-config
+                            {:enabled? true
+                             :ws-url (config/db-sync-ws-url)
+                             :http-base (config/db-sync-http-base)})
+         (p/let [rsa-key-pair (<invoke-db-worker :thread-api/db-sync-ensure-user-rsa-keys)]
            (set-e2ee-rsa-key-ensured? (some? rsa-key-pair))))
         (p/catch (fn [e]
                    (log/error :db-sync/ensure-user-rsa-keys-failed e)
@@ -688,8 +849,7 @@
                              (->
                               (p/do
                                 (rtc-handler/<rtc-create-graph-and-start-sync! repo graph-e2ee?))
-                              (p/catch (fn [error]
-                                         (log/error :create-db-failed error)))
+                              (p/catch handle-cloud-graph-error!)
                               (p/finally (fn []
                                            (set-creating-db? false)))))
                            (shui/dialog-close!))))))

@@ -5,13 +5,13 @@
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
-            [frontend.db :as db]
+            [frontend.db.async :as db-async]
+            [frontend.extensions.video :as video]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.state :as state]
             [frontend.util :as util]
-            [frontend.util.text :as text-util]
             [promesa.core :as p]))
 
 (defn- is-tweet-link
@@ -21,7 +21,8 @@
         (re-matches #"^https://x\.com/.*?/status/.*?$" url))))
 
 (defn quick-capture [args]
-  (if-let [today-page-title (db/get-today-journal-title)]
+  (p/let [today-page-title (db-async/<get-today-journal-title (state/get-current-repo))]
+   (if today-page-title
     (let [{:keys [url title content page append]} (bean/->clj args)
           title (or title "")
           url (or url "")
@@ -32,16 +33,15 @@
                                  [:quick-capture-options :redirect-page?]
                                  false)
           prettify-url? (get-in (state/get-config)
-                                [:quick-capture-option :prettify-url?]
+                                [:quick-capture-options :prettify-url?]
                                 true)
           today-page (string/lower-case today-page-title)
           current-page (state/get-current-page) ;; empty when in journals page
           default-page (get-in (state/get-config)
                                [:quick-capture-options :default-page])
           page (cond
-                 (and (state/enable-journals?)
-                      (or (= page "TODAY")
-                          (and (string/blank? page) insert-today?)))
+                 (or (= page "TODAY")
+                     (and (string/blank? page) insert-today?))
                  today-page
 
                  (not-empty page)
@@ -54,16 +54,14 @@
                  current-page
 
                  :else
-                 (if (state/enable-journals?) ;; default to "quick capture" page if journals are not enabled
-                   today-page
-                   "quick capture"))
+                 today-page)
           time (date/get-current-time)
           text (or (and content (not-empty (string/trim content))) "")
           link (cond
                  (string/blank? url)
                  title
 
-                 (and prettify-url? (boolean (text-util/get-matched-video url)))
+                 (and prettify-url? (boolean (video/get-matched-video url)))
                  (str title " {{video " url "}}")
 
                  (and prettify-url? (is-tweet-link url))
@@ -95,12 +93,8 @@
         (p/do!
          (editor-handler/escape-editing)
          (when (not= page (state/get-current-page))
-           (page-handler/<create! page {:redirect? redirect-page?}))
-        ;; Or else this will clear the newly inserted content
-         ;; HYPHA-PATCH-023: wait inside the promise chain instead of a
-         ;; detached timeout, so the returned promise settles with the insert.
-         (p/delay 100)
+           (page-handler/<create! page {:redirect? redirect-page? :edit? false}))
          (editor-handler/api-insert-new-block! content {:page page
                                                         :edit-block? true
                                                         :replace-empty-target? true}))))
-    (notification/show! (t :journal/parse-date-to-name-error) :error)))
+    (notification/show! (t :journal/parse-date-to-name-error) :error))))
