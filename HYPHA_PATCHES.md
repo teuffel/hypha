@@ -21,13 +21,13 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Patch form**:
   ```clojure
   ;; ORIGINAL (~line 349)
-  (defmethod events/handle :user/login [[_]]
+  (defevent! :user/login [[_]]
     (if (mobile-util/native-platform?)
       (route-handler/redirect! {:to :user-login})
       (login/open-login-modal!)))
 
   ;; HYPHA
-  (defmethod events/handle :user/login [[_]]
+  (defevent! :user/login [[_]]
     (cond
       hypha-config/hypha-mode?
       (hypha-login/open-login-modal!)
@@ -42,6 +42,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   `[frontend.hypha.config :as hypha-config]`,
   `[frontend.hypha.login :as hypha-login]`.
 - **Line count**: +4 (one cond clause + if→cond restructuring) +2 requires
+- **Upstream sync 2026-11**: upstream replaced the `events/handle`
+  multimethod with `defevent!` registrations; the patch moved along unchanged.
 - **Rationale**: In Hypha mode the access-code login modal must replace
   Cognito's Amplify-driven modal. All call sites that publish `:user/login`
   (`components/settings.cljs`, `components/header.cljs`, etc.) stay
@@ -53,7 +55,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Wrapping `:user/login` via an event hijack: rejected (more invasive,
     higher surface for upstream divergence).
 - **Break signal — structural**:
-  - `defmethod events/handle :user/login` is renamed, deleted, or moved
+  - `defevent! :user/login` is renamed, deleted, or moved
     to another file or split across files.
 - **Break signal — semantic**:
   - Cond ordering changes; a new clause lands before `hypha-mode?` and
@@ -61,7 +63,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `:user/login` event is replaced by a new event schema upstream.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'defmethod events/handle :user/login' src/main/frontend/handler/events/ui.cljs`
+    `rg -c 'defevent! :user/login' src/main/frontend/handler/events/ui.cljs`
     ⇒ `1`
   - Semantic, manual at triage: the first cond clause must read
     `hypha-config/hypha-mode?`.
@@ -1050,6 +1052,13 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     (`:status 0`) and 5xx reject in `<refresh-hypha-id-token!`, and
     `frontend.hypha.init` retries the boot-time session restore instead
     of prompting for the access code.
+- **Upstream sync 2026-11**: `state/set-auth-id-token` now keys a graph
+  session by user id; called with the token alone, every re-mint looked like
+  a user switch and emptied the remote graph list. Both Hypha call sites pass
+  the JWT `sub` (guard: `refresh-hypha-id-token-keeps-the-session-of-the-same-user`).
+  Upstream's `<ensure-id&access-token!` awaited the core.async refresh with
+  `p/let`, which does not wait for a channel; it now bridges it into a
+  promise (guard: `ensure-token-waits-for-the-refresh-test`).
 - **Rationale**: Stock Logseq uses Cognito OAuth: a refresh-token plus
   /oauth2/token mints a fresh id-token whenever the current one nears
   expiry. Hypha has no refresh-token (Patch #3); the only persistent
@@ -1189,7 +1198,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
      (<rtc-start! repo)))
 
   ;; handler/events/rtc.cljs: event opens the resolve dialog
-  (defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
+  (defevent! :rtc/graph-already-exists-resolve [[_ payload]]
     (shui/dialog-open! #(graph-rebind/graph-already-exists-dialog payload) …))
   ```
 - **Rationale**: Before this patch, uploading a local-only graph whose
@@ -1496,260 +1505,96 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 ## Patch #16 — CLI `upsert page --parent/--remove-parent` (explicit namespace)
 
 - **ID**: HYPHA-PATCH-016
-- **Introduced**: Phase 1.7 (companion to Patch #15), 2026-06-04
-- **File**: `src/main/logseq/cli/command/upsert.cljs`
+- **Introduced**: Phase 1.7 (companion to Patch #15), 2026-06-04. Ported to
+  the OCaml CLI (`cli/`) in the upstream sync of 2026-11, after upstream
+  deleted the ClojureScript CLI.
+- **Files**:
+  - `cli/spec/commands/upsert.mli` (`page_opts` and `Upsert_page` gain
+    `parent` and `remove_parent`; spec change approved by the user)
+  - `cli/lib/upsert.ml` (validation, build, `page_parent_ops`)
+  - `cli/lib/cli_parse.ml`, `cli/lib/command_registry.ml` (options)
 - **Patch form**:
-  ```clojure
-  ;; require added
-  [logseq.db.common.order :as db-order]
+  ```ocaml
+  (* upsert.ml *)
+  type page_parent_change = Set_parent of string | Remove_parent
 
-  ;; upsert-page-spec gains:
-  :parent {:desc "Parent page name or db/id; nests this page under it ..."
-           :complete :pages}
-  :remove-parent {:desc "Remove the page's parent (make it top-level)"
-                  :coerce :boolean}
+  (* --parent: [:move-blocks [[page-uuid] parent-uuid {:sibling? false}]];
+     the worker assigns :block/order. The parent is found or created. *)
+  (* --remove-parent: [:transact [[[:db/retract id :block/parent]
+                                   [:db/retract id :block/order]] {}]] *)
 
-  ;; build-page-action carries :parent / :remove-parent into the action.
-
-  ;; execute-upsert-page, after the tag/property ops, sets the namespace parent
-  ;; via the existing :thread-api/transact, mirroring page-with-parent-and-order
-  ;; (parent + order); --remove-parent retracts both → top-level:
-  (when (:remove-parent action)
-    (transport/invoke cfg :thread-api/transact
-      [repo [[:db/retract page-id :block/parent] [:db/retract page-id :block/order]] {} {}]))
-  (when parent-page
-    (transport/invoke cfg :thread-api/transact
-      [repo [{:db/id page-id :block/parent (:db/id parent-page) :block/order (db-order/gen-key)}] {} {}]))
+  let page_result_with_resolved_plan ?restore ?rename ?parent_change ... =
+    bind (page_parent_ops ...) @@ function
+    | Error err -> ...   (* nothing written *)
+    | Ok parent_ops -> ... (* plan ops, then parent_ops *)
   ```
-- **Line count**: +~70 (spec keys + action carry + executor block + require +
-  parent validation).
-- **Hardened**: 2026-11 — the raw transact skipped the checks the outliner's
-  page ops make. `<ensure-valid-page-parent!` now runs before it and refuses a
-  parent that sits below the page (a `:block/parent` cycle) and a parent that
-  already has another page with the same title. It uses the existing
-  `:thread-api/pull` and `:thread-api/q` only. Regression guard:
-  `test-upsert-page-parent-validation` in `logseq.cli.command.upsert-test`.
-- **Rationale**: With Patch #15 "/" is literal, so the old "type A/B" namespace
-  shortcut is gone. A DB-native hierarchy needs an explicit `:block/parent`. The
-  CLI had no parent primitive and no `--parent` flag, and the MCP bridge
-  (`bin/hypha-mcp`) can only reach the graph through CLI subcommands. This adds
-  `--parent` (nest under a page, created if missing) and `--remove-parent`
-  (back to top-level), reusing the **existing** `:thread-api/transact` (no new
-  thread-api, per the CLI AGENTS.md rule). It mirrors the invariants of
-  `outliner/page.cljs/page-with-parent-and-order` (parent + `db-order/gen-key`
-  order); removing retracts both, matching how plain top-level pages store
-  neither attribute.
-- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs` gains
-  a `parent`/`removeParent` arg on `upsert_page` and a `set_page_parent` tool
-  (Hypha-own tooling, not upstream code).
-- **Additive alternatives considered**:
-  - New `:thread-api/set-page-parent` endpoint: rejected — AGENTS.md says don't
-    add thread-apis unless necessary; `:thread-api/transact` already suffices.
-  - `apply-outliner-ops` move-blocks: rejected — pages aren't block-tree
-    children; namespace parent is set by direct attribute transact, not a move.
-  - MCP wrapper POSTs to db-worker-node `/v1/invoke` directly: rejected —
-    duplicates transit transport + server discovery in JS, fragile.
-- **Break signal — structural**:
-  - `upsert-page-spec`, `build-page-action`, or `execute-upsert-page` is renamed
-    / restructured, or `:thread-api/transact` changes arity.
-  - `logseq.db.common.order/gen-key` is renamed/moved.
-- **Break signal — semantic**:
-  - Upstream adds its own page-parent CLI option → reconcile / drop.
-  - The page-parent invariants change (e.g. order no longer required).
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'remove-parent' src/main/logseq/cli/command/upsert.cljs` ⇒ `>=2`
-    `rg -c 'db-order/gen-key' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
-  - Semantic, manual at triage: `execute-upsert-page` must set
-    `:block/parent` + `:block/order` via `:thread-api/transact`, and
-    `--remove-parent` must retract both.
-- **On break**:
-  - Structural → re-anchor on the new executor shape.
-  - Semantic upstream-merged → drop the flags if upstream provides equivalents.
-
----
-
-## Patch #17 — Reliable ISO-8601 parsing for datetime properties
-
-- **ID**: HYPHA-PATCH-017
-- **Introduced**: Phase 1.7 follow-up (task scheduled/deadline reliability), 2026-06-04
-- **File**: `src/main/logseq/cli/command/add.cljs`
-- **Patch form**:
-  ```clojure
-  ;; ORIGINAL — bare js/Date string parse (locale/format dependent)
-  (defn- parse-datetime-value [value]
-    (cond
-      (number? value) {:ok? true :value value}
-      (string? value) (let [date (js/Date. value) ms (.getTime date)]
-                        (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))
-      :else {:ok? false}))
-
-  ;; HYPHA — gate on an unambiguous ISO-8601 regex before js/Date.
-  (def ^:private iso-datetime-re
-    #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(z|[+-]\d{2}:?\d{2})?)?$")
-  (defn- parse-datetime-value [value]
-    (cond
-      (number? value) {:ok? true :value value}
-      (string? value) (let [s (string/trim value)]
-                        (if-not (re-matches iso-datetime-re s)
-                          {:ok? false}
-                          (let [ms (.getTime (js/Date. s))]
-                            (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))))
-      :else {:ok? false}))
-  ```
-  Plus a clearer error message at the `:datetime` branch of
-  `coerce-property-value-basic`. The fraction was `\.\d{1,3}` until
-  2026-11, which rejected microsecond timestamps
-  (`2026-02-12T10:00:00.123456Z`); regression guard
-  `test-parse-datetime-value-accepts-iso-fractions-of-any-length` in
-  `logseq.cli.command.add-test`.
-- **Line count**: +~12 (regex def + guard + comment), 1 message line changed.
-- **Rationale**: `upsert task --scheduled/--deadline` (and any `:datetime`
-  property) fed the raw string straight to `(js/Date. value)`. `new Date()` is
-  notoriously locale/format-dependent: `"12.02.2026"` (German DD.MM.YYYY) parsed
-  as **December 2026**, and `"2026/02/12"` vs `"2026-02-12"` flipped between
-  local and UTC midnight — all **silently**, since `new Date` returns a valid
-  (wrong) date that passes the isNaN check. Users reported the due-date field as
-  "not reliably settable". This restricts input to unambiguous ISO-8601
-  (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS][.mmm][Z|±HH:MM]`, space allowed for
-  `T`) and **fails fast** with a guiding message on anything else — matching the
-  repo's "fail-fast over fallback, never mask invalid state" rule. ISO inputs
-  behave exactly as before; out-of-range ISO dates still fail via isNaN.
+- **Line count**: about +190 in `upsert.ml`, +4 each in spec, parser and
+  registry.
+- **Rationale**: With Patch #15 "/" is literal, so a DB-native hierarchy needs
+  an explicit `:block/parent`. The MCP bridge (`bin/hypha-mcp`) reaches the
+  graph only through CLI subcommands. `ensure_valid_page_parent` refuses the
+  page itself, a parent below the page (a `:block/parent` cycle;
+  `:move-blocks` would silently do nothing) and a parent that already holds a
+  page with the same title. It runs before tags and properties are written.
 - **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
-  `upsert_task` scheduled/deadline tool descriptions document the ISO format.
+  `upsert_page` (`parent`/`removeParent`) and `set_page_parent`.
 - **Additive alternatives considered**:
-  - Support locale formats (DD.MM.YYYY): rejected — reintroduces ambiguity
-    (`01.02` = Jan 2 or Feb 1?) for a tool also driven by AI agents/scripts.
-  - Leave as-is and document ISO-only: rejected — silent wrong dates remain.
-  - Upstream PR: ideal long-term; the bug is generic, not Hypha-specific.
-- **Break signal — structural**:
-  - `parse-datetime-value` or `coerce-property-value-basic` is renamed/moved, or
-    `:datetime` coercion stops routing through `parse-datetime-value`.
-- **Break signal — semantic**:
-  - Upstream adds its own datetime normalization → reconcile/drop.
+  - Raw `:thread-api/transact` with `:block/order` (the old CLJS form):
+    rejected, the OCaml CLI cannot generate fractional order keys;
+    `:move-blocks` lets the worker do it.
+  - A separate `set-parent` command: needs a new `Command_id` (a larger spec
+    change) for no gain over two options on `upsert page`.
+- **Break signal — structural**: `page_result_with_resolved_plan` or the
+  `Upsert_page` record changes shape; the `:move-blocks` op changes its args.
+- **Break signal — semantic**: upstream adds its own page-parent option, or
+  `:move-blocks` stops accepting a page under a page.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'iso-datetime-re' src/main/logseq/cli/command/add.cljs` ⇒ `2`
-  - Semantic, manual at triage: `parse-datetime-value` must `re-matches`
-    `iso-datetime-re` before constructing `js/Date`.
-- **On break**:
-  - Structural → re-anchor the guard on the new coercion site.
-  - Semantic upstream-merged → drop the regex guard.
+    `rg -c 'HYPHA-PATCH-016' cli/lib/upsert.ml` ⇒ `3`
+    `rg -c 'remove_parent' cli/spec/commands/upsert.mli` ⇒ `2`
+  - Regression guard: the `Hypha upsert page --parent …` tests in
+    `cli/test/cli_parity_test_cases.ml`.
+- **On break**: re-anchor on the new page execution path; drop if upstream
+  provides an equivalent.
 
 ---
 
-## Patch #18 — Resolve :date properties by journal-day, not by formatted title
+## Patch #18 — Resolve :date property values by journal-day
 
 - **ID**: HYPHA-PATCH-018
-- **Introduced**: Phase 1.7 follow-up (date-property reliability), 2026-06-04
-- **File**: `src/main/logseq/cli/command/add.cljs`
+- **Introduced**: Phase 1.7 follow-up (date-property reliability), 2026-06-04.
+  Ported to the OCaml CLI in the upstream sync of 2026-11.
+- **File**: `cli/lib/upsert.ml` (`resolve_property_assignments`)
 - **Patch form**:
-  ```clojure
-  ;; ORIGINAL — resolve the journal page by its formatted title via ensure-page!
-  (let [... title (date-time-util/int->journal-title journal-day formatter)
-            page  (ensure-page! config repo title)]
-    (if-let [id (:db/id page)] id (throw ... "journal page not found")))
-
-  ;; HYPHA — resolve/create by :block/journal-day
-  (defn- find-journal-page-id-by-day [config repo journal-day]
-    (p/let [results (transport/invoke config :thread-api/q
-                      [repo [{:find '[[?e ...]] :in '[$ ?day]
-                              :where '[[?e :block/journal-day ?day]]} journal-day]])]
-      (first results)))
-  ;; resolve-date-page-id: existing = (find-journal-page-id-by-day …);
-  ;; if missing, create-page with the title, then look up by day again.
+  ```ocaml
+  (* An ISO date string for a :date property becomes the db/id of that day's
+     journal page: [:find [?e ...] :in $ ?day :where [?e :block/journal-day ?day]].
+     A missing day is created with create-page "YYYY-MM-DD", which the
+     outliner turns into the journal page of that day. *)
+  bind (resolve_date_property_value invoke_config repo ident assignment.value)
+    (fun value -> ... resolve_property_value_refs ... value)
   ```
-- **Line count**: +~14 (helper + day-based lookup/create), -2 (old title path).
-- **Rationale**: `upsert … --update-properties '{:some-date-prop "2026-02-12"}'`
-  for a `:date`-typed property failed with **"journal page not found"** even when
-  the journal day existed. A journal page's `:block/name` is always the canonical
-  `"MMM do, yyyy"` form (e.g. `feb 12th, 2026`), independent of the graph's
-  `:logseq.property.journal/title-format` (e.g. the German `"EEEE, dd.MM.yyyy"`
-  → `:block/title` `Thursday, 12.02.2026`). The old resolver built the lookup
-  name from the **custom title-format** and queried `:block/name`, which never
-  matched — so it fell through to creating a page under the wrong name and
-  returned no id. Journal pages are keyed by `:block/journal-day`; resolving by
-  day is format-independent and idempotent (find-or-create), fixing both the
-  "exists but not found" case and new-day creation.
-- **Companion change (NOT a patch)**: none.
-- **Additive alternatives considered**:
-  - Build the lookup name with the canonical `"MMM do, yyyy"` format instead of
-    the custom one: works, but still string-fragile (locale/format assumptions);
-    the journal-day key is the robust identity.
-  - Look up by `:block/title` instead of `:block/name`: rejected — title is the
-    display form and not the stable key; multiple formats have existed over a
-    graph's life (older journals store canonical titles).
-  - Upstream PR: ideal long-term; the bug is generic for custom journal formats.
-- **Break signal — structural**:
-  - `resolve-date-page-id` is renamed/moved, or `:block/journal-day` stops being
-    the journal key, or `:thread-api/q` changes arg shape.
-- **Break signal — semantic**:
-  - Upstream changes journal-page identity (e.g. day no longer stored).
+- **Line count**: about +80.
+- **Rationale**: `upsert page|block --update-properties '{:prop "2026-02-12"}'`
+  sent the raw string, and the worker rejected it ("should be a journal
+  date"). A journal page's identity is `:block/journal-day`; resolving by day
+  is independent of the graph's journal title format and idempotent. This
+  also runs under `--dry-run` of a block create; an empty journal page is
+  harmless.
+- **Additive alternatives considered**: a `[:block/name …]` lookup: the update
+  path has no `materialize_name_lookups`, and `:block/name` is not unique, so
+  the worker cannot resolve it.
+- **Break signal — structural**: `resolve_property_assignments` is renamed or
+  property values stop flowing through it.
+- **Break signal — semantic**: upstream coerces date values itself → drop.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs` ⇒ `4`
-  - Semantic, manual at triage: `resolve-date-page-id` must resolve via
-    `:block/journal-day`, not via a title-name lookup.
-- **On break**:
-  - Structural → re-anchor the day-based lookup on the new resolver.
-  - Semantic upstream-merged → drop the helper.
-
----
-
-## Patch #19 — `rename page` CLI command (+ MCP rename_page)
-
-- **ID**: HYPHA-PATCH-019
-- **Introduced**: Phase 1.7 follow-up (page rename), 2026-06-04
-- **Files**:
-  - `src/main/logseq/cli/command/upsert.cljs` (spec, entry, build + execute fns)
-  - `src/main/logseq/cli/commands.cljs` (build-action + execute dispatch cases)
-- **Patch form**:
-  ```clojure
-  ;; upsert.cljs
-  (def ^:private rename-page-spec
-    {:page {...} :id {:coerce :long} :uuid {...} :to {:desc "New page title"}})
-  ;; entry: (core/command-entry ["rename" "page"] :rename-page "Rename a page" rename-page-spec ...)
-  (defn build-rename-page-action [options repo] ...)        ; validates page id|uuid|name + --to
-  (defn- resolve-existing-page! [cfg repo {:keys [id uuid page]}] ...) ; never creates
-  (defn execute-rename-page [action config]
-    ... (transport/invoke cfg :thread-api/apply-outliner-ops
-          [repo [[:rename-page [page-uuid (:to action)]]] {}]) ...)
-
-  ;; commands.cljs
-  :rename-page (upsert-command/build-rename-page-action options repo)   ; build-action case
-  :rename-page (upsert-command/execute-rename-page action config)       ; execute case
-  ```
-- **Line count**: +~70 in upsert.cljs (spec + entry + 3 fns), +4 in commands.cljs.
-- **Rationale**: The CLI/MCP could create and delete pages but not rename one.
-  Renaming a page (its `:block/title`, derived `:block/name`, and references) is
-  the `:rename-page` outliner op, already used by the frontend
-  (`handler/page/rename!`). This exposes it as `logseq rename page
-  --page|--id|--uuid … --to <new title>` (reusing `:thread-api/apply-outliner-ops`
-  — no new thread-api) and an MCP `rename_page` tool. Identification never
-  auto-creates (rename of a missing page is an error). Works with literal-"/"
-  titles (Patch #15) since the op goes through the gated validation.
-- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
-  `rename_page` tool (Hypha-own tooling).
-- **Additive alternatives considered**:
-  - Fold into `upsert page --rename-to`: rejected — the user asked for a
-    discrete command; a dedicated `rename page` reads clearer and matches
-    `remove page`/`upsert page` grouping.
-  - New thread-api: unnecessary — `apply-outliner-ops :rename-page` exists.
-- **Break signal — structural**:
-  - `:rename-page` op is renamed/removed from `deps/outliner`'s op set, or the
-    `build-action`/`execute` dispatch in `commands.cljs` is restructured so the
-    new cases are dropped, or `upsert-command/entries` no longer aggregated.
-- **Break signal — semantic**:
-  - Upstream ships its own page-rename CLI command → reconcile/drop.
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'execute-rename-page' src/main/logseq/cli/commands.cljs` ⇒ `1`
-    `rg -c '"rename" "page"' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
-  - Semantic, manual at triage: `execute-rename-page` must call
-    `:thread-api/apply-outliner-ops` with a `[:rename-page [uuid to]]` op.
-- **On break**:
-  - Structural → re-anchor the dispatch cases / entry / op name.
-  - Semantic upstream-merged → drop the command if upstream provides it.
+    `rg -c 'HYPHA-PATCH-018' cli/lib/upsert.ml` ⇒ `1`
+  - Regression guards: `Hypha :date property value …` in
+    `cli/test/cli_parity_test_cases.ml`;
+    `create-iso-date-title-reuses-journal-of-a-custom-title-format` in
+    `logseq.outliner.page-test`.
+- **On break**: re-anchor on the new property-value resolution.
 
 ---
 
@@ -1828,15 +1673,21 @@ during weekly upstream-sync, the detection grep is the first thing run; the
                     (:logseq.property.history/scalar-value item))
               … (date/int->local-time-2 (:block/created-at item)))])
 
-  ;; block-context-menu-content — gated menu item (only when history exists)
-  (when-let [history (seq (:logseq.property.history/_block block))]
+  ;; block-context-menu-content — history is queried from the worker
+  ;; (<get-property-history repo (:db/id block)) next to the block fetch;
+  ;; the menu item is gated on it
+  (when-let [history (seq property-history)]
     (shui/dropdown-menu-item
      {:key "Property history"
       :on-click (fn [_e] (shui/dialog-open! (fn [] (property-history-cp history))
                                             {:title (t :block/property-history)}))}
      (t :block/property-history)))
   ```
-- **Line count**: +~25 (component + menu item + require), +1 per dict.
+- **Line count**: +~40 (query, component, menu item, require), +1 per dict.
+- **Upstream sync 2026-11**: upstream's context menu now gets the block as a
+  plain map from the worker (`db-async/<get-block`), which has no reverse
+  refs. The history is queried from the worker with a nested pull instead of
+  read from `:logseq.property.history/_block`.
 - **Rationale**: The property-history mechanic (Patch #20 toggle +
   `:logseq.property.history/*` records) had no general read UI — only a
   status-specific `status-history-cp`. This adds a general viewer: a
@@ -1987,105 +1838,19 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
-## Patch #23 — Quick capture returns the insert promise
+## Retired patches
 
-- **ID**: HYPHA-PATCH-023
-- **Introduced**: Fork-delta review follow-up (capture inbox acked
-  clips whose insert never happened), 2026-11
-- **File**: `src/main/frontend/quick_capture.cljs` (`quick-capture`)
-- **Patch form**:
-  ```clojure
-  ;; ORIGINAL — detached timeout, the returned promise resolves before
-  ;; the block exists and never sees an insert failure
-  (p/do!
-   (editor-handler/escape-editing)
-   (when (not= page (state/get-current-page))
-     (page-handler/<create! page {:redirect? redirect-page?}))
-   (js/setTimeout #(editor-handler/api-insert-new-block! content {...})
-                  100))
-
-  ;; HYPHA — same 100 ms wait, inside the chain
-  (p/do!
-   (editor-handler/escape-editing)
-   (when (not= page (state/get-current-page))
-     (page-handler/<create! page {:redirect? redirect-page?}))
-   (p/delay 100)
-   (editor-handler/api-insert-new-block! content {...}))
-  ```
-- **Line count**: 2 logic lines changed plus a 2-line comment.
-- **Rationale**: `frontend.hypha.capture` acks a clip in hypha-server's
-  capture inbox once it is in the graph; the server then deletes it.
-  With the detached timeout the only signal available was "100-odd ms
-  have passed", so a failed or skipped insert still got acked and the
-  clip was gone. The `:editor/quick-capture` event's promise settles
-  with its handler's, so returning the insert promise is all the capture
-  code needs to wait for the insert and to see it fail.
-- **Companion change (NOT a patch)**: `frontend.hypha.capture` waits for
-  the event promise instead of a fixed delay.
-- **Additive alternatives considered**:
-  - Re-implement quick capture in `frontend.hypha.capture`: rejected —
-    duplicates template rendering, target-page rules and the journal
-    fallback.
-  - Poll the db for the inserted block: rejected — the block's content
-    is template-dependent and `:replace-empty-target?` may reuse an
-    existing block, so there is nothing reliable to look for.
-  - Submit upstream: plausible — returning the promise is harmless for
-    the Electron and mobile callers.
-- **Break signal — structural**:
-  - `quick-capture` is renamed or the insert moves out of the `p/do!`.
-- **Break signal — semantic**:
-  - Upstream reintroduces a detached timer or stops returning the
-    promise from the `:editor/quick-capture` event handler.
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'HYPHA-PATCH-023' src/main/frontend/quick_capture.cljs` ⇒ `1`
-  - Semantic, manual at triage: `quick-capture`'s non-editing branch
-    must return a promise that settles with `api-insert-new-block!`.
-  - Regression guard: `drain-inbox-does-not-ack-when-an-insert-fails`
-    in `frontend.hypha.capture-test` covers the consumer; the patched
-    line itself has no unit test (needs a live graph).
-- **On break**:
-  - Structural → re-apply at the new insert site.
-  - Semantic upstream-merged → drop the patch.
-
----
-
-## Patch #24 — RTC auto-start survives a failed start
-
-- **ID**: HYPHA-PATCH-024
-- **Introduced**: Fork-delta review round 2, 2026-11
-- **File**: `src/main/frontend/handler/db_based/rtc_background_tasks.cljs`
-  (`::auto-start-rtc-if-possible`)
-- **Patch form**:
-  ```clojure
-  ;; ORIGINAL
-  (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))
-
-  ;; HYPHA
-  (try
-    (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))
-    (catch Cancelled e (throw e))
-    (catch :default e
-      (log/error :rtc-start-failed {:start-reason start-reason :repo repo :error e})))
-  ```
-- **Line count**: +8 (try/catch, import, comment).
-- **Rationale**: `<rtc-start!` rejects when the token is expired and the
-  refresh fails (offline at wake-up, session lost). The rejection ended the
-  missionary background task for the rest of the tab session, and that task
-  is the only thing that starts sync on later logins, graph switches,
-  visibility and network-online events. Sync then silently never started
-  again until a reload.
-- **Additive alternatives considered**: restart the task from
-  `run-background-task`'s fail handler: rejected, it is shared by every
-  background task.
-- **Break signal — structural**: the task is renamed or rewritten.
-  Upstream has since replaced it with an `add-watch` on a trigger atom that
-  runs `p/do!` per event, which does not have this problem: on the next
-  upstream merge, drop this patch and take upstream's version.
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'HYPHA-PATCH-024' src/main/frontend/handler/db_based/rtc_background_tasks.cljs` ⇒ `1`
-- **On break**: take upstream's rewrite.
+- **#17 ISO-8601 parsing for datetime properties** and **#19 `rename page`**
+  were dropped in the upstream sync of 2026-11, when upstream replaced the
+  ClojureScript CLI with the OCaml CLI in `cli/`. Its `Time.parse_time`
+  accepts only RFC 3339 with seconds (fractions of any length), `YYYY-MM-DD`
+  and epoch ms, and rejects `12.02.2026`. `upsert page --rename` covers the
+  rename; the MCP `rename_page` tool now calls it.
+- **#23 Quick capture returns the insert promise** and **#24 RTC auto-start
+  survives a failed start** were dropped in the upstream sync of 2026-11.
+  Upstream's `quick-capture` no longer inserts from a detached timeout, and
+  upstream rewrote the RTC auto-start task as a per-event `p/do!` that a
+  failed start cannot end. The numbers are not reused.
 
 ---
 
