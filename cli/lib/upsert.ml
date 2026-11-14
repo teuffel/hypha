@@ -22,6 +22,9 @@ type page_opts = {
   page : string option;
   rename : string option;
   restore : bool;
+  parent : string option;
+      (** HYPHA-PATCH-016: page to nest this page under. *)
+  remove_parent : bool;  (** HYPHA-PATCH-016: make the page top-level. *)
   update_tags_edn : string option;
   update_properties_edn : string option;
   remove_tags_edn : string option;
@@ -134,6 +137,8 @@ type action =
       page : string option;
       rename : string option;
       restore : bool;
+      parent : string option;
+      remove_parent : bool;
       plan : Property.update_plan;
     }
   | Upsert_task of {
@@ -281,6 +286,10 @@ let invalid_options = function
       Some "rename must be non-empty"
   | Parsed_page { id = None; page = None; rename = Some _; _ } ->
       Some "--rename requires --id or --page"
+  | Parsed_page { parent = Some _; remove_parent = true; _ } ->
+      Some "only one of --parent or --remove-parent is allowed"
+  | Parsed_page { parent = Some parent; _ } when String.trim parent = "" ->
+      Some "parent must be non-empty"
   | Parsed_tag { name = Some name; _ } when normalize_tag_name name = None ->
       Some "tag name must not be blank"
   | Parsed_property opts
@@ -723,6 +732,8 @@ let build_page repo graph (opts : page_opts) =
                  page;
                  rename = opts.rename;
                  restore = opts.restore;
+                 parent = Option.map String.trim opts.parent;
+                 remove_parent = opts.remove_parent;
                  plan;
                })
       | None, Some page ->
@@ -736,6 +747,8 @@ let build_page repo graph (opts : page_opts) =
                  page = Some page;
                  rename = opts.rename;
                  restore = opts.restore;
+                 parent = Option.map String.trim opts.parent;
+                 remove_parent = opts.remove_parent;
                  plan;
                })
       | None, None ->
@@ -3050,51 +3063,224 @@ let execute_task_update mode invoke_config repo id uuid status_input
                            (upsert_id_not_found "task"
                               (Option.value id ~default:0L))))))
 
-let page_result_with_resolved_plan ?(restore = false) ?rename mode invoke_config
-    repo page_id page_uuid resolved =
-  let open Cli_effect in
-  let update_effect =
-    match rename with
-    | Some name ->
-        let ops =
-          Vec.push_front
-            (resolved_update_plan_ops (Vec.singleton page_uuid) resolved)
-            (rename_page_op page_uuid name)
-        in
-        let ops =
-          if restore then
-            Vec.push_front ops (restore_recycled_page_op page_uuid)
-          else ops
-        in
-        map
-          (fun result -> Ok result)
-          (apply_outliner_ops invoke_config repo ops)
-    | None ->
-        let restore_effect =
-          if restore then restore_recycled_page invoke_config repo page_uuid
-          else pure Edn_util.nil
-        in
-        bind restore_effect (fun _ ->
-            apply_resolved_update_plan invoke_config repo
-              (Vec.singleton page_uuid) resolved)
-  in
-  map
-    (function
-      | Error err -> Cli_result.error ~command:Command_id.Upsert_page mode err
-      | Ok _ -> ok_page_ids mode (Vec.singleton page_id))
-    update_effect
+(* HYPHA-PATCH-016: explicit namespace parent for `upsert page`. With
+   literal "/" in titles (Patch #15) a DB-native hierarchy needs an explicit
+   :block/parent. --parent moves the page under the parent page (created if
+   missing) with the :move-blocks op, which also assigns the order;
+   --remove-parent retracts parent and order, like a plain top-level page.
+   The parent is resolved and checked before anything is written. *)
+type page_parent_change = Set_parent of string | Remove_parent
 
-let page_result_with_plan ?restore ?rename mode invoke_config repo page_id
-    page_uuid plan =
+let page_parent_change parent remove_parent =
+  match (parent, remove_parent) with
+  | Some name, _ -> Some (Set_parent name)
+  | None, true -> Some Remove_parent
+  | None, false -> None
+
+let move_page_under_op page_uuid parent_uuid =
+  vector_vec
+    (Vec.of_array
+       [|
+         kw "move-blocks";
+         vector_vec
+           (Vec.of_array
+              [|
+                vector_vec (Vec.singleton (Edn_util.uuid page_uuid));
+                Edn_util.uuid parent_uuid;
+                Edn_util.map_vec
+                  (Vec.singleton (kw "sibling?", Edn_util.bool false));
+              |]);
+       |])
+
+let remove_page_parent_op page_id =
+  let retract attr =
+    vector_vec
+      (Vec.of_array [| kw "db/retract"; Edn_util.int64 page_id; kw attr |])
+  in
+  vector_vec
+    (Vec.of_array
+       [|
+         kw "transact";
+         vector_vec
+           (Vec.of_array
+              [|
+                vector_vec
+                  (Vec.of_array
+                     [| retract "block/parent"; retract "block/order" |]);
+                Edn_util.map_vec Vec.empty;
+              |]);
+       |])
+
+let page_id_and_uuid entity =
+  match (id_of_entity entity, uuid_of_entity entity) with
+  | Some id, Some uuid -> Ok (id, uuid)
+  | _ -> Error (page_not_found ())
+
+let resolve_parent_page invoke_config repo name =
+  let open Cli_effect in
+  bind (pull_pages_by_name invoke_config repo name page_selector)
+    (fun existing ->
+      match first_entity existing with
+      | Some page when recycled_entity page ->
+          pure (Error (recycled_page_error ()))
+      | Some page -> pure (page_id_and_uuid page)
+      | None ->
+          bind (create_page invoke_config repo name) (fun create_result ->
+              map page_id_and_uuid
+                (pull_created_page invoke_config repo name create_result)))
+
+let parent_id_selector =
+  vector_vec
+    (Vec.of_array
+       [|
+         kw "db/id";
+         Edn_util.map_vec
+           (Vec.singleton
+              (kw "block/parent", vector_vec (Vec.singleton (kw "db/id"))));
+       |])
+
+(* Other pages under `parent_id` with the page's title. *)
+let same_title_children_query =
+  Cli_primitive.make_datascript_query
+    ~find:(Vec.singleton (vector_vec (Vec.of_array [| sym "?b"; sym "..." |])))
+    ~in_:
+      (Vec.of_array
+         [|
+           Melange_edn_melange.symbol "$";
+           Melange_edn_melange.symbol "?page";
+           Melange_edn_melange.symbol "?parent";
+         |])
+    ~where:
+      (Vec.of_array
+         [|
+           Cli_primitive.V
+             (Edn_util.vector_t_vec
+                (Vec.of_array [| sym "?page"; kw "block/title"; sym "?title" |]));
+           Cli_primitive.V
+             (Edn_util.vector_t_vec
+                (Vec.of_array [| sym "?b"; kw "block/parent"; sym "?parent" |]));
+           Cli_primitive.V
+             (Edn_util.vector_t_vec
+                (Vec.of_array [| sym "?b"; kw "block/title"; sym "?title" |]));
+           Cli_primitive.V
+             (Edn_util.vector_t_vec
+                (Vec.of_array [| sym "?b"; kw "block/name" |]));
+           Cli_primitive.V
+             (Edn_util.vector_t_vec
+                (Vec.singleton
+                   (list_vec
+                      (Vec.of_array [| sym "not="; sym "?b"; sym "?page" |]))));
+         |])
+    ()
+
+let ensure_valid_page_parent invoke_config repo ~page_id ~parent_id =
+  let open Cli_effect in
+  let invalid message = pure (Error (Error.invalid_options message)) in
+  let rec walk ancestor_id seen =
+    if Int64.equal ancestor_id page_id then
+      invalid "a page cannot be nested under one of its own descendants"
+    else if Vec.exists (Int64.equal ancestor_id) seen then pure (Ok ())
+    else
+      bind (pull_entity_by_id invoke_config repo parent_id_selector ancestor_id)
+        (fun entity ->
+          match
+            Option.bind (Edn_util.get entity "block/parent") (fun parent ->
+                Edn_util.get_int64 parent "db/id")
+          with
+          | Some next -> walk next (Vec.push_back seen ancestor_id)
+          | None -> pure (Ok ()))
+  in
+  if Int64.equal parent_id page_id then
+    invalid "a page cannot be its own parent"
+  else
+    bind (walk parent_id Vec.empty) (function
+      | Error _ as err -> pure err
+      | Ok () ->
+          bind
+            (Transport.thread_api_q invoke_config ~repo
+               ~query:
+                 (Edn_util.vector_t_vec
+                    (Vec.of_array
+                       [|
+                         query_value same_title_children_query;
+                         Edn_util.int64 page_id;
+                         Edn_util.int64 parent_id;
+                       |])))
+            (fun ids ->
+              match Edn_util.as_seq ids with
+              | Some ids when not (Vec.is_empty ids) ->
+                  invalid "the parent already has a page named like this page"
+              | _ -> pure (Ok ())))
+
+let page_parent_ops invoke_config repo page_id page_uuid = function
+  | None -> Cli_effect.pure (Ok Vec.empty)
+  | Some Remove_parent ->
+      Cli_effect.pure (Ok (Vec.singleton (remove_page_parent_op page_id)))
+  | Some (Set_parent name) ->
+      let open Cli_effect in
+      bind (resolve_parent_page invoke_config repo name) (function
+        | Error _ as err -> pure err
+        | Ok (parent_id, parent_uuid) ->
+            map
+              (Result.map (fun () ->
+                   Vec.singleton (move_page_under_op page_uuid parent_uuid)))
+              (ensure_valid_page_parent invoke_config repo ~page_id ~parent_id))
+
+let page_result_with_resolved_plan ?(restore = false) ?rename ?parent_change
+    mode invoke_config repo page_id page_uuid resolved =
+  let open Cli_effect in
+  bind (page_parent_ops invoke_config repo page_id page_uuid parent_change)
+  @@ function
+  | Error err ->
+      pure (Cli_result.error ~command:Command_id.Upsert_page mode err)
+  | Ok parent_ops ->
+      let update_effect =
+        match rename with
+        | Some name ->
+            let ops =
+              Vec.push_front
+                (resolved_update_plan_ops (Vec.singleton page_uuid) resolved)
+                (rename_page_op page_uuid name)
+            in
+            let ops =
+              if restore then
+                Vec.push_front ops (restore_recycled_page_op page_uuid)
+              else ops
+            in
+            map
+              (fun result -> Ok result)
+              (apply_outliner_ops invoke_config repo ops)
+        | None ->
+            let restore_effect =
+              if restore then restore_recycled_page invoke_config repo page_uuid
+              else pure Edn_util.nil
+            in
+            bind restore_effect (fun _ ->
+                apply_resolved_update_plan invoke_config repo
+                  (Vec.singleton page_uuid) resolved)
+      in
+      bind update_effect (function
+        | Error err ->
+            pure (Cli_result.error ~command:Command_id.Upsert_page mode err)
+        | Ok _ when Vec.is_empty parent_ops ->
+            pure (ok_page_ids mode (Vec.singleton page_id))
+        | Ok _ ->
+            map
+              (fun _ -> ok_page_ids mode (Vec.singleton page_id))
+              (apply_outliner_ops invoke_config repo parent_ops))
+
+let page_result_with_plan ?restore ?rename ?parent_change mode invoke_config
+    repo page_id page_uuid plan =
   let open Cli_effect in
   bind (resolve_page_update_plan invoke_config repo plan) (function
     | Error err ->
         pure (Cli_result.error ~command:Command_id.Upsert_page mode err)
     | Ok resolved ->
-        page_result_with_resolved_plan ?restore ?rename mode invoke_config repo
-          page_id page_uuid resolved)
+        page_result_with_resolved_plan ?restore ?rename ?parent_change mode
+          invoke_config repo page_id page_uuid resolved)
 
-let execute_create_page mode invoke_config repo name restore plan =
+let execute_create_page ?parent_change mode invoke_config repo name restore
+    plan =
   let open Cli_effect in
   bind (pull_pages_by_name invoke_config repo name page_selector)
     (fun existing ->
@@ -3108,8 +3294,8 @@ let execute_create_page mode invoke_config repo name restore plan =
           else
             match (id_of_entity page, uuid_of_entity page) with
             | Some id, Some uuid ->
-                page_result_with_plan ~restore:recycled mode invoke_config repo
-                  id uuid plan
+                page_result_with_plan ~restore:recycled ?parent_change mode
+                  invoke_config repo id uuid plan
             | Some _, None when recycled ->
                 pure
                   (Cli_result.error ~command:Command_id.Upsert_page mode
@@ -3130,8 +3316,8 @@ let execute_create_page mode invoke_config repo name restore plan =
                       (fun page ->
                         match (id_of_entity page, uuid_of_entity page) with
                         | Some id, Some uuid ->
-                            page_result_with_resolved_plan mode invoke_config
-                              repo id uuid resolved
+                            page_result_with_resolved_plan ?parent_change mode
+                              invoke_config repo id uuid resolved
                         | Some id, None ->
                             pure (ok_page_ids mode (Vec.singleton id))
                         | _ ->
@@ -3139,8 +3325,8 @@ let execute_create_page mode invoke_config repo name restore plan =
                               (Cli_result.error ~command:Command_id.Upsert_page
                                  mode (page_not_found ()))))))
 
-let execute_update_page_entity ?rename mode invoke_config repo entity restore
-    plan =
+let execute_update_page_entity ?rename ?parent_change mode invoke_config repo
+    entity restore plan =
   let open Cli_effect in
   match id_of_entity entity with
   | None ->
@@ -3161,8 +3347,8 @@ let execute_update_page_entity ?rename mode invoke_config repo entity restore
       let recycled = recycled_entity entity in
       match uuid_of_entity entity with
       | Some uuid ->
-          page_result_with_plan ?rename ~restore:recycled mode invoke_config
-            repo id uuid plan
+          page_result_with_plan ?rename ?parent_change ~restore:recycled mode
+            invoke_config repo id uuid plan
       | None when recycled ->
           pure
             (Cli_result.error ~command:Command_id.Upsert_page mode
@@ -3173,7 +3359,8 @@ let execute_update_page_entity ?rename mode invoke_config repo entity restore
                (Error.make Error.Upsert_id_not_found "page uuid not found"))
       | None -> pure (ok_page_ids mode (Vec.singleton id)))
 
-let execute_update_page ?rename mode invoke_config repo id restore plan =
+let execute_update_page ?rename ?parent_change mode invoke_config repo id
+    restore plan =
   let open Cli_effect in
   bind (pull_entity_by_id invoke_config repo page_selector id) (fun entity ->
       if Option.is_none (id_of_entity entity) && Option.is_none rename then
@@ -3181,11 +3368,11 @@ let execute_update_page ?rename mode invoke_config repo id restore plan =
           (Cli_result.error ~command:Command_id.Upsert_page mode
              (upsert_id_not_found "page" id))
       else
-        execute_update_page_entity ?rename mode invoke_config repo entity
-          restore plan)
+        execute_update_page_entity ?rename ?parent_change mode invoke_config
+          repo entity restore plan)
 
-let execute_rename_page_by_name mode invoke_config repo name rename restore plan
-    =
+let execute_rename_page_by_name ?parent_change mode invoke_config repo name
+    rename restore plan =
   let open Cli_effect in
   bind (pull_pages_by_name invoke_config repo name page_selector)
     (fun pages ->
@@ -3200,8 +3387,8 @@ let execute_rename_page_by_name mode invoke_config repo name rename restore plan
             (Cli_result.error ~command:Command_id.Upsert_page mode
                (page_not_found ()))
       | 1 ->
-          execute_update_page_entity ~rename mode invoke_config repo
-            (Vec.nth matches 0) restore plan
+          execute_update_page_entity ~rename ?parent_change mode invoke_config
+            repo (Vec.nth matches 0) restore plan
       | _ ->
           let candidates =
             Vec.map
@@ -3419,8 +3606,20 @@ let execute_with_mode action config mode =
       pure
         (Cli_result.error ~command:Command_id.Upsert_tag mode
            (Error.make Error.Not_implemented "upsert tag is not implemented"))
-  | Upsert_page { repo; mode = page_mode; id; page; rename; restore; plan; _ }
-    ->
+  | Upsert_page
+      {
+        repo;
+        mode = page_mode;
+        id;
+        page;
+        rename;
+        restore;
+        parent;
+        remove_parent;
+        plan;
+        _;
+      } ->
+      let parent_change = page_parent_change parent remove_parent in
       bind (Server_runtime.ensure_server config repo ~create_empty_db:false)
         (function
         | Error err ->
@@ -3428,13 +3627,14 @@ let execute_with_mode action config mode =
         | Ok invoke_config -> (
             match (page_mode, id, page, rename) with
             | Create, None, Some page, None ->
-                execute_create_page mode invoke_config repo page restore plan
-            | Update, Some id, _, rename ->
-                execute_update_page ?rename mode invoke_config repo id restore
-                  plan
-            | Update, None, Some page, Some rename ->
-                execute_rename_page_by_name mode invoke_config repo page rename
+                execute_create_page ?parent_change mode invoke_config repo page
                   restore plan
+            | Update, Some id, _, rename ->
+                execute_update_page ?rename ?parent_change mode invoke_config
+                  repo id restore plan
+            | Update, None, Some page, Some rename ->
+                execute_rename_page_by_name ?parent_change mode invoke_config
+                  repo page rename restore plan
             | _ -> invalid_arg "invalid upsert page action"))
   | Upsert_property { repo; mode = Create; name = Some name; schema; _ } ->
       bind (Server_runtime.ensure_server config repo ~create_empty_db:false)

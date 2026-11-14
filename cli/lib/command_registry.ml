@@ -352,6 +352,10 @@ let options_for_command =
               value "rename" "name"
                 "Rename an existing page (requires --id or --page)";
               flag "restore" "Restore recycled page before updating";
+              value "parent" "page"
+                "Nest the page under this parent page (created if missing)";
+              flag "remove-parent"
+                "Remove the page's parent (make it top-level)";
             |];
           property_update_options;
         |]

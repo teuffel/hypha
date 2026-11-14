@@ -22,6 +22,8 @@ type page_opts = {
   page : string option;
   rename : string option;
   restore : bool;
+  parent : string option;  (** HYPHA-PATCH-016: page to nest this page under. *)
+  remove_parent : bool;  (** HYPHA-PATCH-016: make the page top-level. *)
   update_tags_edn : string option;
   update_properties_edn : string option;
   remove_tags_edn : string option;
@@ -134,6 +136,8 @@ type action =
       page : string option;
       rename : string option;
       restore : bool;
+      parent : string option;
+      remove_parent : bool;
       plan : Property.update_plan;
     }
   | Upsert_task of {

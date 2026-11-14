@@ -262,6 +262,8 @@ let allowed_options_for_path path =
         "page";
         "rename";
         "restore";
+        "parent";
+        "remove-parent";
         "update-tags";
         "update-properties";
         "remove-tags";
@@ -646,6 +648,8 @@ let parsed_upsert_command ?(args = Vec.empty) options = function
                 page = option_value "page" options;
                 restore = option_present "restore" options;
                 rename = option_value "rename" options;
+                parent = option_value "parent" options;
+                remove_parent = option_present "remove-parent" options;
                 update_tags_edn = option_value "update-tags" options;
                 update_properties_edn = option_value "update-properties" options;
                 remove_tags_edn = option_value "remove-tags" options;
