@@ -6,6 +6,7 @@
 //   "slow"        — wait FAKE_ADAPTER_DELAY_MS then print ready line
 //   "crash"       — exit(1) immediately, no ready line
 //   "silent"      — never print the ready line, keep running
+//   "env"         — print the env vars the runner must pass, then ready
 
 const mode = process.env.FAKE_ADAPTER_MODE ?? "ready";
 const port = process.env.DB_SYNC_PORT ?? "8787";
@@ -15,6 +16,11 @@ function emitReady() {
 }
 
 switch (mode) {
+  case "env":
+    console.log(`env:DB_SYNC_TRUST_FORWARDED_HEADERS=${process.env.DB_SYNC_TRUST_FORWARDED_HEADERS ?? ""}`);
+    emitReady();
+    setInterval(() => {}, 1000);
+    break;
   case "crash":
     console.error("fake-adapter: simulating early crash");
     process.exit(1);

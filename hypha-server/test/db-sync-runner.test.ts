@@ -87,6 +87,34 @@ test("DbSyncRunner — reports an exit after ready, but not one caused by stop()
   assert.deepEqual(stopped, [], "stop() is not an unexpected exit");
 });
 
+// The adapter ignores X-Forwarded-* unless told to trust them; without the
+// flag the snapshot URL points at the internal loopback and every graph
+// download fails in the browser.
+test("DbSyncRunner — passes DB_SYNC_TRUST_FORWARDED_HEADERS=true to the adapter", async () => {
+  const logger = collectLogger();
+  const runner = new DbSyncRunner({
+    adapterPath,
+    port: 18789,
+    dataDir: "/tmp/fake",
+    jwtIssuer: "test-issuer",
+    jwtAudience: "test-audience",
+    jwksUrl: "http://127.0.0.1:1/auth/jwks",
+    logger,
+    startupTimeoutMs: 5000,
+  });
+  process.env.FAKE_ADAPTER_MODE = "env";
+  try {
+    await runner.start();
+    assert.ok(
+      logger.entries.some((e) => e.msg.includes("env:DB_SYNC_TRUST_FORWARDED_HEADERS=true")),
+      JSON.stringify(logger.entries),
+    );
+  } finally {
+    delete process.env.FAKE_ADAPTER_MODE;
+    await runner.stop();
+  }
+});
+
 test("DbSyncRunner — rejects when the adapter exits before the ready line", async () => {
   const runner = new DbSyncRunner({
     adapterPath,
