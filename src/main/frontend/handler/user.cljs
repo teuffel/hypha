@@ -333,6 +333,9 @@
           {:id-token id-token :access-token access-token :refresh-token refresh-token})))))
 
 (defn logout []
+  ;; HYPHA-PATCH-012: the session lives in an HttpOnly cookie on the server.
+  (when hypha-config/hypha-mode?
+    (hypha-auth/<logout!))
   (clear-e2ee-password!)
   (clear-tokens)
   (.clear js/localStorage)

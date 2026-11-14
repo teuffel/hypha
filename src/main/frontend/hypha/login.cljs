@@ -31,6 +31,8 @@
              {:json-params {:code code}
               :with-credentials? true}))
 
+(def ^:private login-modal-id :hypha-login)
+
 (hsx/defc modal-inner
   []
   (let [[code set-code!] (hooks/use-state "")
@@ -48,7 +50,7 @@
                   (= 200 (:status resp))
                   (when-let [id-token (get-in resp [:body :id-token])]
                     (hypha-init/set-hypha-id-token! id-token)
-                    (shui/dialog-close!))
+                    (shui/dialog-close! login-modal-id))
 
                   (= 401 (:status resp))
                   (set-error! (t :hypha.login/invalid-code))
@@ -74,9 +76,15 @@
       (t :ui/login))]))
 
 (defn open-login-modal!
-  "Public entry point invoked by Patch #1."
+  "Public entry point invoked by Patch #1.
+
+  Every caller that finds the session gone asks for the login (sync start,
+  graph list, member list, ...), often several at once. Open one dialog."
   []
-  (shui/dialog-open!
-   (fn [_close] (modal-inner))
-   {:label :hypha-login
-    :title (t :ui/login)}))
+  (when-not (shui/dialog-get login-modal-id)
+    (shui/dialog-open!
+     (fn [_close] (modal-inner))
+     {:id login-modal-id
+      :close #(shui/dialog-close! login-modal-id)
+      :label :hypha-login
+      :title (t :ui/login)})))

@@ -10,7 +10,8 @@
             [lambdaisland.glogi :as log]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
-            [missionary.core :as m]))
+            [missionary.core :as m])
+  (:import [missionary Cancelled]))
 
 (defn- run-background-task-when-not-publishing
   [key' task]
@@ -49,4 +50,12 @@
   (m/ap
     (let [[start-reason repo] (m/?> rtc-flows/trigger-start-rtc-flow)]
       (log/info :try-to-start-rtc [start-reason repo])
-      (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))))))
+      ;; HYPHA-PATCH-024: one failed start (expired token while offline, a
+      ;; lost session) must not end this task: it is the only thing that
+      ;; starts sync on later logins, graph switches and reconnects.
+      (try
+        (c.m/<? (rtc-handler/<rtc-start! (or repo (state/get-current-repo))))
+        (catch Cancelled e
+          (throw e))
+        (catch :default e
+          (log/error :rtc-start-failed {:start-reason start-reason :repo repo :error e})))))))
