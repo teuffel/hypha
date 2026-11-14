@@ -5444,10 +5444,12 @@
 (defn- watchdog-client
   [{:keys [inflight pending-pull-since]}]
   {:repo test-repo
+   :graph-id "graph-1"
    :inflight (atom (or inflight []))
    :pending-pull-since (atom pending-pull-since)
    :sync-progress (atom nil)
    :sync-wedge-kills (atom 0)
+   :sync-watchdog-timer (atom nil)
    :last-sync-error (atom nil)})
 
 (defn- watchdog-ws
@@ -5456,23 +5458,30 @@
        :close (fn [] (swap! *closes inc))})
 
 (defn- run-watchdog-ticks!
-  "Tick the wedge watchdog at each of `times` (ms) with a stuck local-tx and
-  3 pending local txs."
-  [client ws times]
-  (with-redefs [client-op/get-pending-local-tx-count (fn [_repo] 3)
-                client-op/get-local-tx (fn [_repo] 7)
-                worker-state/online? (fn [] true)]
-    (doseq [now times]
-      (#'db-sync/sync-watchdog-tick! client ws now))))
+  "Tick the wedge watchdog at each of `times` (ms) with local-tx at
+  `local-tx` (default 7) and `pending` (default 3) pending local txs.
+  Resolves the number of re-flushes the ticks asked for."
+  ([client ws times] (run-watchdog-ticks! client ws times {}))
+  ([client ws times {:keys [local-tx pending] :or {local-tx 7 pending 3}}]
+   (let [reflushes (atom 0)]
+     (with-redefs [client-op/get-pending-local-tx-count (fn [_repo] pending)
+                   client-op/get-local-tx (fn [_repo] local-tx)
+                   worker-state/online? (fn [] true)
+                   sync-apply/enqueue-flush-pending! (fn [_repo _client] (swap! reflushes inc))]
+       (doseq [now times]
+         (#'db-sync/sync-watchdog-tick! client ws now)))
+     @reflushes)))
 
-(deftest sync-watchdog-leaves-long-running-apply-alone-test
-  (testing "pending local txs without progress are not a wedge while no server reply is outstanding"
+(deftest sync-watchdog-reflushes-instead-of-reconnecting-when-nothing-is-outstanding-test
+  (testing "pending local txs without progress while no server reply is outstanding"
     (let [closes (atom 0)
-          client (watchdog-client {})]
-      (run-watchdog-ticks! client (watchdog-ws closes) [0 30000 60000 90000 120000])
-      (is (zero? @closes))
+          client (watchdog-client {})
+          reflushes (run-watchdog-ticks! client (watchdog-ws closes) [0 30000 60000 90000 120000])]
+      (is (zero? @closes) "a long apply or a failed flush is not a lost reply")
       (is (zero? @(:sync-wedge-kills client)))
-      (is (nil? @(:last-sync-error client))))))
+      (is (nil? @(:last-sync-error client)))
+      (is (= 2 reflushes)
+          "a flush that failed before sending is retried once per timeout window"))))
 
 (deftest sync-watchdog-closes-ws-on-unanswered-request-test
   (testing "an unacked tx batch forces a reconnect after the wedge timeout"
@@ -5507,12 +5516,46 @@
     (is (= :db-sync/ws-wedged (:code @(:last-sync-error client))))
     (testing "progress clears the error and the kill count"
       (reset! (:sync-progress client) nil)
-      (with-redefs [client-op/get-pending-local-tx-count (fn [_repo] 3)
-                    worker-state/online? (fn [] true)]
-        (with-redefs [client-op/get-local-tx (fn [_repo] 7)]
-          (#'db-sync/sync-watchdog-tick! client (watchdog-ws closes) 0))
-        (with-redefs [client-op/get-local-tx (fn [_repo] 8)]
-          (#'db-sync/sync-watchdog-tick! client (watchdog-ws closes) 30000)))
+      (run-watchdog-ticks! client (watchdog-ws closes) [0] {:local-tx 7})
+      (run-watchdog-ticks! client (watchdog-ws closes) [30000] {:local-tx 8})
       (is (= 3 @closes))
+      (is (zero? @(:sync-wedge-kills client)))
+      (is (nil? @(:last-sync-error client))))))
+
+(deftest sync-watchdog-counts-a-recovery-before-the-first-tick-test
+  (testing "a forced reconnect usually re-flushes within a second, before the
+            first tick on the new connection; that must still reset the count"
+    (let [closes (atom 0)
+          client (watchdog-client {:inflight [(random-uuid)]})
+          ws (watchdog-ws closes)
+          captured-tick (atom nil)
+          original-set-interval js/setInterval
+          original-db-sync-client @worker-state/*db-sync-client]
+      (run-watchdog-ticks! client ws [0 60000])
+      (run-watchdog-ticks! client ws [120000])
+      (is (= 2 @(:sync-wedge-kills client)))
+      ;; reconnect: the loop restarts on the new socket
+      (set! js/setInterval (fn [f _ms] (reset! captured-tick f) :timer))
+      (try
+        (reset! worker-state/*db-sync-client (assoc client :ws ws))
+        (#'db-sync/start-sync-watchdog-loop client ws)
+        (is (= 7 (:local-tx @(:sync-progress client)))
+            "the snapshot of the previous connection is kept")
+        ;; the reply arrived before the first tick: inflight cleared, local-tx moved
+        (reset! (:inflight client) [])
+        (with-redefs [client-op/get-pending-local-tx-count (fn [_repo] 1)
+                      client-op/get-local-tx (fn [_repo] 9)
+                      worker-state/online? (fn [] true)]
+          (@captured-tick))
+        (is (zero? @(:sync-wedge-kills client)))
+        (finally
+          (set! js/setInterval original-set-interval)
+          (reset! worker-state/*db-sync-client original-db-sync-client)))))
+  (testing "a fully pushed client resets the count and the wedge error"
+    (let [client (watchdog-client {})]
+      (reset! (:sync-wedge-kills client) 3)
+      (reset! (:last-sync-error client) {:code :db-sync/ws-wedged})
+      (reset! (:sync-progress client) {:local-tx 7 :pending 3 :at 0})
+      (run-watchdog-ticks! client (watchdog-ws (atom 0)) [30000] {:pending 0})
       (is (zero? @(:sync-wedge-kills client)))
       (is (nil? @(:last-sync-error client))))))
