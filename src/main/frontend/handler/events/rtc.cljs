@@ -72,8 +72,12 @@
 (defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
   (shui/dialog-open!
    #(graph-rebind/graph-already-exists-dialog payload)
-   {:auto-width? true
-    :content-props {:onPointerDownOutside #(.preventDefault %)}}))
+   {:id graph-rebind/dialog-id
+    :auto-width? true
+    ;; Only the dialog's own buttons close it: it must stay open while the
+    ;; local graph is being replaced.
+    :content-props {:onPointerDownOutside #(.preventDefault %)
+                    :onEscapeKeyDown #(.preventDefault %)}}))
 
 (defn- sync-app-state!
   []

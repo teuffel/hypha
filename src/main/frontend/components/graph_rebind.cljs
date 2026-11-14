@@ -15,7 +15,9 @@
             [frontend.context.i18n :refer [t]]
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.notification :as notification]
+            [frontend.ui :as ui]
             [lambdaisland.glogi :as log]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [io.factorhouse.hsx.core :as hsx]))
@@ -32,10 +34,16 @@
   (when (string? graph-id)
     (subs graph-id 0 (min 8 (count graph-id)))))
 
+(def dialog-id :hypha-graph-rebind)
+
 (hsx/defc graph-already-exists-dialog
   [{:keys [repo graph-name remote-graph-id remote-graph-e2ee? remote-updated-at]}]
   (let [updated-at-str (format-remote-updated-at remote-updated-at)
-        short-id (short-graph-id remote-graph-id)]
+        short-id (short-graph-id remote-graph-id)
+        ;; The dialog stays open, and its overlay blocks the editor, until
+        ;; the take-over is done: the local graph is being replaced, and an
+        ;; edit made meanwhile would land in the new db.
+        [replacing? set-replacing!] (hooks/use-state false)]
     [:div.p-2.flex.flex-col.gap-4
      [:div.text-xl.font-medium (t :graph.rebind/title)]
      [:div.text-sm.opacity-80 (t :graph.rebind/desc graph-name)]
@@ -50,13 +58,15 @@
      [:div.flex.flex-row.gap-2.justify-end
       (shui/button
        {:variant :outline
-        :on-click #(shui/dialog-close!)}
+        :disabled replacing?
+        :on-click #(shui/dialog-close! dialog-id)}
        (t :ui/cancel))
       (shui/button
        {:variant :default
+        :disabled replacing?
         :on-click
         (fn []
-          (shui/dialog-close!)
+          (set-replacing! true)
           (-> (rtc-handler/<rtc-replace-local-with-remote!
                repo graph-name remote-graph-id remote-graph-e2ee?)
               (p/then (fn [_]
@@ -72,7 +82,10 @@
                           (t :graph.rebind/error
                              (or (some-> e ex-message)
                                  (str e)))
-                          :error)))))}
+                          :error)))
+              (p/finally (fn []
+                           (shui/dialog-close! dialog-id)))))}
+       (when replacing? (ui/loading nil))
        (t :graph.rebind/connect-action))]
      (when (and (string? remote-graph-id)
                 (not (string/blank? remote-graph-id)))
