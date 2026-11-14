@@ -3057,6 +3057,8 @@ let () =
                    page = Some "Home";
                    rename = None;
                    restore = false;
+                   parent = None;
+                   remove_parent = false;
                    update_tags_edn = None;
                    update_properties_edn = None;
                    remove_tags_edn = None;
@@ -3152,6 +3154,8 @@ let () =
                 page = Some "Home";
                 rename = None;
                 restore = false;
+                parent = None;
+                remove_parent = false;
                 plan = Property.empty_update_plan;
               }
           in
@@ -3202,6 +3206,8 @@ let () =
                 page = None;
                 rename = None;
                 restore = false;
+                parent = None;
+                remove_parent = false;
                 plan = Property.empty_update_plan;
               }
           in
@@ -3267,6 +3273,8 @@ let () =
                 page = Some "Home";
                 rename = None;
                 restore = true;
+                parent = None;
+                remove_parent = false;
                 plan;
               }
           in
@@ -3316,6 +3324,8 @@ let () =
                 page = Some "Home";
                 rename = None;
                 restore = true;
+                parent = None;
+                remove_parent = false;
                 plan = Property.empty_update_plan;
               }
           in
@@ -3368,6 +3378,8 @@ let () =
                 page = None;
                 rename = None;
                 restore = true;
+                parent = None;
+                remove_parent = false;
                 plan = Property.empty_update_plan;
               }
           in
@@ -8836,5 +8848,180 @@ let () =
           (config ())
       in
       expect_equal "show text payload" "Line 1\nLine 2" show_output)
+
+(* HYPHA-PATCH-016: upsert page --parent / --remove-parent. *)
+let hypha_kid_uuid = "00000000-0000-4000-8000-000000000060"
+let hypha_mom_uuid = "00000000-0000-4000-8000-000000000070"
+
+let hypha_page_transit id uuid name title =
+  Printf.sprintf
+    "[\"^ \
+     \",\"~:db/id\",%d,\"~:block/uuid\",\"~u%s\",\"~:block/name\",\"%s\",\"~:block/title\",\"%s\"]"
+    id uuid name title
+
+(* Answers the reads of `upsert page --page Kid --parent Mom`: the page and
+   parent lookups by name, the parent's ancestor pulls and the same-title
+   sibling query. Records every apply-outliner-ops body. *)
+let hypha_parent_server ?(mom_parent = "null") ?(same_title_ids = "[]")
+    apply_calls =
+  invoke_server (fun body ->
+      if Js.String.includes ~search:"thread-api/apply-outliner-ops" body then (
+        apply_calls := Vec.push_back !apply_calls body;
+        "true")
+      else if Js.String.includes ~search:"thread-api/pull" body then
+        Printf.sprintf "[\"^ \",\"~:db/id\",70,\"~:block/parent\",%s]"
+          mom_parent
+      else if Js.String.includes ~search:"thread-api/q" body then
+        if Js.String.includes ~search:"block/parent" body then same_title_ids
+        else if Js.String.includes ~search:"kid" body then
+          "[" ^ hypha_page_transit 60 hypha_kid_uuid "kid" "Kid" ^ "]"
+        else if Js.String.includes ~search:"mom" body then
+          "[" ^ hypha_page_transit 70 hypha_mom_uuid "mom" "Mom" ^ "]"
+        else "[]"
+      else "null")
+
+let hypha_upsert_page_action ?(page = Some "Kid") ?(id = None) ?parent
+    ?(remove_parent = false) () =
+  let repo = Cli_primitive.create_repo "demo" in
+  Upsert.Upsert_page
+    {
+      repo;
+      graph = Cli_config.repo_to_graph repo;
+      mode = (if Option.is_some id then Upsert.Update else Upsert.Create);
+      id;
+      page;
+      rename = None;
+      restore = false;
+      parent;
+      remove_parent;
+      plan = Property.empty_update_plan;
+    }
+
+let hypha_run_upsert server action check =
+  with_server server (fun base_url ->
+      let cfg =
+        { (config ~repo:"demo" ()) with Cli_config.base_url = Some base_url }
+      in
+      let* result =
+        effect_to_promise
+          (execute_with_output Upsert.execute action cfg Output.Mode.Human)
+      in
+      check result;
+      Js.Promise.resolve pass)
+
+let hypha_expect_invalid name result needle =
+  match result.Cli_result.error with
+  | Some err ->
+      expect_equal (name ^ " code") "invalid-options"
+        (Error.code_to_string err.Error.code);
+      expect_named_contains (name ^ " message") err.Error.message needle
+  | None -> fail_test (name ^ ": expected an error")
+
+let () =
+  test "Hypha upsert page parses --parent and --remove-parent" (fun () ->
+      (match
+         (expect_parse_ok "parent parse"
+            [| "upsert"; "page"; "--page"; "Kid"; "--parent"; "Mom" |])
+           .command
+       with
+      | Cli_request.Upsert (Upsert.Parsed_page opts) ->
+          expect_equal "parent" "Mom" (expect_some "parent value" opts.parent);
+          expect_bool "remove parent" false opts.remove_parent
+      | _ -> fail_test "expected upsert page");
+      match
+        (expect_parse_ok "remove parent parse"
+           [| "upsert"; "page"; "--id"; "60"; "--remove-parent" |])
+          .command
+      with
+      | Cli_request.Upsert (Upsert.Parsed_page opts) ->
+          expect_none "no parent" opts.parent;
+          expect_bool "remove parent" true opts.remove_parent
+      | _ -> fail_test "expected upsert page");
+
+  test "Hypha upsert page rejects --parent with --remove-parent or blank"
+    (fun () ->
+      let opts =
+        {
+          Upsert.id = None;
+          page = Some "Kid";
+          rename = None;
+          restore = false;
+          parent = Some "Mom";
+          remove_parent = true;
+          update_tags_edn = None;
+          update_properties_edn = None;
+          remove_tags_edn = None;
+          remove_properties_edn = None;
+        }
+      in
+      expect_equal "both" "only one of --parent or --remove-parent is allowed"
+        (expect_some "both invalid"
+           (Upsert.invalid_options (Upsert.Parsed_page opts)));
+      expect_equal "blank" "parent must be non-empty"
+        (expect_some "blank invalid"
+           (Upsert.invalid_options
+              (Upsert.Parsed_page
+                 { opts with parent = Some "  "; remove_parent = false }))));
+
+  test_promise "Hypha upsert page --parent moves the page under the parent"
+    (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert (hypha_parent_server apply_calls)
+        (hypha_upsert_page_action ~parent:"Mom" ()) (fun result ->
+          expect_bool "ok" false (Cli_result.is_error result);
+          expect_int "one apply" 1 (Vec.length !apply_calls);
+          let body = Vec.nth !apply_calls 0 in
+          expect_named_contains "move op" body "move-blocks";
+          expect_named_contains "moved page" body hypha_kid_uuid;
+          expect_named_contains "target parent" body hypha_mom_uuid));
+
+  test_promise "Hypha upsert page --remove-parent retracts parent and order"
+    (fun () ->
+      let apply_calls = ref Vec.empty in
+      let server =
+        invoke_server (fun body ->
+            if Js.String.includes ~search:"thread-api/apply-outliner-ops" body
+            then (
+              apply_calls := Vec.push_back !apply_calls body;
+              "true")
+            else if Js.String.includes ~search:"thread-api/pull" body then
+              hypha_page_transit 60 hypha_kid_uuid "kid" "Kid"
+            else "null")
+      in
+      hypha_run_upsert server
+        (hypha_upsert_page_action ~page:None ~id:(Some 60L) ~remove_parent:true
+           ()) (fun result ->
+          expect_bool "ok" false (Cli_result.is_error result);
+          expect_int "one apply" 1 (Vec.length !apply_calls);
+          let body = Vec.nth !apply_calls 0 in
+          expect_named_contains "transact op" body "transact";
+          expect_named_contains "retract" body "db/retract";
+          expect_named_contains "parent attr" body "block/parent";
+          expect_named_contains "order attr" body "block/order"));
+
+  test_promise "Hypha upsert page --parent refuses its own descendant"
+    (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert
+        (hypha_parent_server ~mom_parent:"[\"^ \",\"~:db/id\",60]" apply_calls)
+        (hypha_upsert_page_action ~parent:"Mom" ()) (fun result ->
+          hypha_expect_invalid "cycle" result "own descendants";
+          expect_int "nothing applied" 0 (Vec.length !apply_calls)));
+
+  test_promise "Hypha upsert page --parent refuses the page itself" (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert (hypha_parent_server apply_calls)
+        (hypha_upsert_page_action ~parent:"Kid" ()) (fun result ->
+          hypha_expect_invalid "self" result "its own parent";
+          expect_int "nothing applied" 0 (Vec.length !apply_calls)));
+
+  test_promise
+    "Hypha upsert page --parent refuses a parent with a same-titled page"
+    (fun () ->
+      let apply_calls = ref Vec.empty in
+      hypha_run_upsert (hypha_parent_server ~same_title_ids:"[61]" apply_calls)
+        (hypha_upsert_page_action ~parent:"Mom" ()) (fun result ->
+          hypha_expect_invalid "duplicate" result "already has a page named";
+          expect_int "nothing applied" 0 (Vec.length !apply_calls)))
 
 let touch = ()
