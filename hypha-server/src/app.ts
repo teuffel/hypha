@@ -69,7 +69,25 @@ export interface BuildAppOptions {
 
 export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: opts.logLevel === "silent" ? false : { level: opts.logLevel ?? "info" },
+    logger:
+      opts.logLevel === "silent"
+        ? false
+        : {
+            level: opts.logLevel ?? "info",
+            // Log paths only. The sync WebSocket carries the JWT in
+            // ?token=, and share-target captures carry the captured title,
+            // text and URL in the query string.
+            serializers: {
+              req(req: { method: string; url: string; host?: string; ip?: string }) {
+                return {
+                  method: req.method,
+                  url: req.url.split("?")[0],
+                  host: req.host,
+                  remoteAddress: req.ip,
+                };
+              },
+            },
+          },
   });
 
   // Cross-origin isolation — required for Logseq's sqlite-wasm in the
