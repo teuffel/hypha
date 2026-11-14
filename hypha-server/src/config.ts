@@ -123,7 +123,11 @@ export async function loadConfig(): Promise<HyphaRuntime> {
       envOr("HYPHA_SESSION_TTL_SECONDS", "2592000"),
       1,
     ),
-    cookieSecure: parseBoolEnv("HYPHA_COOKIE_SECURE", envOr("HYPHA_COOKIE_SECURE", "false")),
+    // Unset: Secure whenever the public URL (the issuer) is https.
+    cookieSecure: parseBoolEnv(
+      "HYPHA_COOKIE_SECURE",
+      envOr("HYPHA_COOKIE_SECURE", requireEnv("HYPHA_JWT_ISSUER").startsWith("https://") ? "true" : "false"),
+    ),
     signingKid: envOr("HYPHA_SIGNING_KID", "hypha-key-1"),
     staticDirs: [],
     dbSyncInternalPort: parseIntEnv("HYPHA_DB_SYNC_PORT", envOr("HYPHA_DB_SYNC_PORT", "8787"), 0),

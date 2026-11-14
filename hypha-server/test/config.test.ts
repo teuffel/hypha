@@ -43,8 +43,18 @@ const BASE = {
 test("loadConfig — accepts the defaults with a valid hash", async () => {
   const config = await withEnv(BASE, () => loadConfig());
   assert.equal(config.accessCodeHash, VALID_HASH);
-  assert.equal(config.cookieSecure, false);
+  assert.equal(config.cookieSecure, true, "https issuer");
   assert.equal(config.sessionTtlSeconds, 2592000);
+});
+
+test("loadConfig — Secure cookie follows the issuer scheme unless set", async () => {
+  assert.equal((await withEnv({ ...BASE, HYPHA_JWT_ISSUER: "https://notes.example.org" }, () => loadConfig())).cookieSecure, true);
+  assert.equal((await withEnv({ ...BASE, HYPHA_JWT_ISSUER: "http://localhost:3000" }, () => loadConfig())).cookieSecure, false);
+  assert.equal(
+    (await withEnv({ ...BASE, HYPHA_JWT_ISSUER: "https://notes.example.org", HYPHA_COOKIE_SECURE: "false" }, () => loadConfig()))
+      .cookieSecure,
+    false,
+  );
 });
 
 test("loadConfig — rejects a hash mangled by unquoted $ in .env", async () => {

@@ -19,7 +19,10 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "${HYPHA_HOST_PORT:-3000}:3000"
+      # Loopback only by default: put a TLS-terminating reverse proxy on the
+      # same host in front. Set HYPHA_BIND=0.0.0.0 to expose the port on all
+      # interfaces (LAN use; traffic is plain HTTP).
+      - "${HYPHA_BIND:-127.0.0.1}:${HYPHA_HOST_PORT:-3000}:3000"
     volumes:
       # Bind-mount: data survives container removal. On host, ensure the
       # directory is owned by UID 1000 (the `node` user inside the image)
@@ -31,8 +34,9 @@ services:
       HYPHA_ACCESS_CODE_HASH: ${HYPHA_ACCESS_CODE_HASH:?HYPHA_ACCESS_CODE_HASH must be set in .env}
       HYPHA_JWT_ISSUER: ${HYPHA_JWT_ISSUER:-http://localhost:3000}
       HYPHA_JWT_AUDIENCE: ${HYPHA_JWT_AUDIENCE:-hypha}
-      # Secure cookie only over TLS. Set to "true" when behind https.
-      HYPHA_COOKIE_SECURE: ${HYPHA_COOKIE_SECURE:-false}
+      # Secure session cookie. Unset: on when HYPHA_JWT_ISSUER is https://.
+      # Set "false" only for plain-HTTP LAN access by IP or hostname.
+      HYPHA_COOKIE_SECURE: ${HYPHA_COOKIE_SECURE:-}
       # Optional: extend the JWT lifetime, default 30d.
       HYPHA_JWT_TTL: ${HYPHA_JWT_TTL:-30d}
       # Internal — keep at /data; the volume mount above is the persistence.
