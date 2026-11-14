@@ -291,6 +291,16 @@
                   (log/error :hypha/capture-inbox-drain-failed {:error e})
                   {:inserted 0 :failed 0})))))
 
+(defn- <with-capture-lock
+  "Run `<f` while holding a lock shared by all tabs of this origin.
+  Delivery and drain read and rewrite the same localStorage lists and the
+  same server inbox; two tabs booting together would otherwise insert the
+  same clip twice or drop a parked capture."
+  [<f]
+  (if-let [locks (some-> js/navigator .-locks)]
+    (.request locks "hypha-capture" (fn [_lock] (<f)))
+    (<f)))
+
 (defn <start!
   "Boot entry point: file a share-target/bookmarklet capture from the URL
   and drain the clipper inbox.
@@ -333,9 +343,11 @@
                                                  (log/error :hypha/capture-unparked-insert-failed {:error e})
                                                  1)))
                                   0)
-                parked (<deliver-parked! local-store <dispatch-clip-default)
                 _ (<wait-until! signed-in? late-ready-poll-interval-ms nil)
-                drained (<drain-inbox!)]
+                {:keys [parked drained]} (<with-capture-lock
+                                          #(p/let [parked (<deliver-parked! local-store <dispatch-clip-default)
+                                                   drained (<drain-inbox!)]
+                                             {:parked parked :drained drained}))]
           (when (pos? (+ unparked-failed (:failed parked) (:failed drained)))
             (notification/show! (t :hypha.capture/insert-failed) :warning)))
         (p/catch (fn [e]
