@@ -90,6 +90,33 @@ check "patch-9: local-uploadable-graph? defends against stale :remote? flag" \
       "rg -c 'HYPHA-PATCH-009' src/main/frontend/components/repo.cljs" \
       "1"
 
+# === Patches #10-#24 (counts measured 2026-11-14) ===
+check "patch-10: e2ee password persistence secret" "rg -c 'HYPHA-PATCH-010' src/main/frontend/worker/sync/crypt.cljs" "1"
+check "patch-11: back/forward buttons in installed PWA" "rg -c 'HYPHA-PATCH-011' src/main/frontend/components/header.cljs" "1"
+check "patch-12a: Hypha token refresh + logout in handler/user" "rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs" "2"
+check "patch-12b: worker refresh via ui-request" "rg -c 'HYPHA-PATCH-012' src/main/frontend/worker/sync/auth.cljs" "1"
+check "patch-12c: :hypha-refresh-id-token ui-action" "rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/worker.cljs" "1"
+check "patch-13a: enriched graph-already-exists error" "rg -c 'HYPHA-PATCH-013' src/main/frontend/worker/sync/upload.cljs" "1"
+check "patch-13b: name-collision catch + take-over handler" "rg -c 'HYPHA-PATCH-013' src/main/frontend/handler/db_based/sync.cljs" "2"
+check "patch-13c: resolve dialog event" "rg -c 'HYPHA-PATCH-013' src/main/frontend/handler/events/rtc.cljs" "1"
+check "patch-14a: no demo graph in Hypha mode" "rg -c 'HYPHA-PATCH-014' src/main/frontend/handler.cljs" "1"
+check "patch-14b: name-collision banner" "rg -c 'HYPHA-PATCH-014' src/main/frontend/components/repo.cljs" "3"
+check "patch-15a: literal-slash define" "rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs" "3"
+check "patch-15b: literal-slash in outliner validate" "rg -cF 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs" "2"
+check "patch-15c: literal-slash in bin/hypha-build" "rg -c 'HYPHA-LITERAL-SLASH' bin/hypha-build" "2"
+check "patch-16a: CLI --remove-parent" "rg -c 'remove-parent' src/main/logseq/cli/command/upsert.cljs" "5"
+check "patch-16b: CLI --parent validation" "rg -cF '<ensure-valid-page-parent!' src/main/logseq/cli/command/upsert.cljs" "2"
+check "patch-17: ISO-8601 datetime gate" "rg -c 'iso-datetime-re' src/main/logseq/cli/command/add.cljs" "2"
+check "patch-18: :date by journal-day" "rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs" "4"
+check "patch-19a: rename page command" "rg -c 'execute-rename-page' src/main/logseq/cli/commands.cljs" "1"
+check "patch-19b: rename page spec" "rg -c '\"rename\" \"page\"' src/main/logseq/cli/command/upsert.cljs" "1"
+check "patch-20: enable-history toggle" "rg -c ':property.built-in/enable-history' src/main/frontend/components/property/config.cljs" "1"
+check "patch-21a: property-history viewer" "rg -c 'property-history-cp' src/main/frontend/components/content.cljs" "2"
+check "patch-21b: property-history i18n" "rg -c ':block/property-history' src/resources/dicts/en.edn" "1"
+check "patch-22: web download binds runtime" "rg -c 'HYPHA-PATCH-022' src/main/frontend/handler/db_based/sync.cljs" "1"
+check "patch-23: quick capture returns the insert" "rg -c 'HYPHA-PATCH-023' src/main/frontend/quick_capture.cljs" "1"
+check "patch-24: rtc auto-start survives a failed start" "rg -c 'HYPHA-PATCH-024' src/main/frontend/handler/db_based/rtc_background_tasks.cljs" "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
