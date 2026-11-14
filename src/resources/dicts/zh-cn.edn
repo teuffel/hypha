@@ -880,6 +880,7 @@
  :help.shortcuts/title "完整快捷键"
  :help.shortcuts/triggers "触发"
 
+ :hypha.capture/insert-failed "部分捕获内容未能添加到图谱。Hypha 会在下次启动时重试。"
  :hypha.capture/waiting-for-graph "捕获内容已保存，打开图谱后会自动添加。"
 
  :hypha.login/access-code-placeholder "访问码"

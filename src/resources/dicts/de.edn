@@ -820,6 +820,7 @@
  :help.shortcuts/title "Tastaturbefehl"
  :help.shortcuts/triggers "Auslöser"
 
+ :hypha.capture/insert-failed "Einige Erfassungen konnten nicht in den Graphen eingefügt werden. Hypha versucht es beim nächsten Start erneut."
  :hypha.capture/waiting-for-graph "Die Erfassung ist gespeichert und wird eingefügt, sobald ein Graph geöffnet ist."
 
  :icon/emojis-count "Emojis ({1})"

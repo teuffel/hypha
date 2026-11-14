@@ -75,24 +75,34 @@
   `frontend.quick-capture` creates the target page and inserts a block, so
   both need a loaded graph. There is no single ready-flag to watch: the
   boot sequence runs auth → remote-graph list → download → DB restore, so
-  the precondition itself is polled below."
+  the precondition itself is polled below.
+
+  `:db/restoring?` starts out nil and turns false only after a restore has
+  finished, so nil must not count as restored: on a returning session
+  `:git/current-repo` is set from localStorage before anything is loaded."
   []
   (and (some? (state/get-current-repo))
-       (not (:db/restoring? @state/state))))
+       (false? (:db/restoring? @state/state))))
+
+(defn- signed-in?
+  "The capture inbox needs a token, and the session is restored
+  asynchronously on boot."
+  []
+  (some? (state/get-auth-id-token)))
 
 (def ^:private ready-poll-interval-ms 250)
 (def ^:private ready-timeout-ms 60000)
 (def ^:private late-ready-poll-interval-ms 2000)
 
-(defn- <wait-for-graph!
-  "Resolve true once `graph-ready?`, or false if it stays false for
-  `timeout-ms`. Without `timeout-ms` it waits until a graph is ready."
-  [poll-interval-ms timeout-ms]
+(defn- <wait-until!
+  "Resolve true once `(ready?)` holds, or false if it stays false for
+  `timeout-ms`. Without `timeout-ms` it waits for as long as it takes."
+  [ready? poll-interval-ms timeout-ms]
   (let [deadline (when timeout-ms (+ (js/Date.now) timeout-ms))
         result (p/deferred)]
     (letfn [(poll []
               (cond
-                (graph-ready?) (p/resolve! result true)
+                (ready?) (p/resolve! result true)
                 (and deadline (> (js/Date.now) deadline)) (p/resolve! result false)
                 :else (js/setTimeout poll poll-interval-ms)))]
       (poll))
@@ -108,11 +118,17 @@
 
 (def ^:no-doc local-store
   "localStorage as the `{:read :write!}` pair the fns below take. Tests
-  pass an in-memory one."
+  pass an in-memory one.
+
+  A value that does not parse reads as nil: it cannot be recovered, and
+  failing every later read would block all captures behind it."
   {:read (fn [k]
-           (some-> (.getItem js/localStorage k)
-                   js/JSON.parse
-                   (js->clj :keywordize-keys true)))
+           (when-let [raw (.getItem js/localStorage k)]
+             (try
+               (js->clj (js/JSON.parse raw) :keywordize-keys true)
+               (catch :default e
+                 (log/error :hypha/capture-store-corrupt {:key k :error e})
+                 nil))))
    :write! (fn [k v]
              (.setItem js/localStorage k (js/JSON.stringify (clj->js v))))})
 
@@ -127,16 +143,34 @@
   [store args]
   ((:write! store) parked-key (conj (read-vec store parked-key) args)))
 
+(defn- unpark-capture!
+  "Drop one parked copy of `args`."
+  [store args]
+  (let [[before from-match] (split-with #(not= args %) (read-vec store parked-key))]
+    ((:write! store) parked-key (vec (concat before (rest from-match))))))
+
 (defn <deliver-parked!
-  "File every parked capture, oldest first. A capture leaves the store
-  only after `<dispatch` resolved for it, so a failed insert is retried on
-  the next boot."
+  "File every parked capture, oldest first. Resolves `{:delivered :failed}`.
+
+  A capture leaves the store only after `<dispatch` resolved for it. One
+  that fails stays parked for the next boot and does not hold up the ones
+  behind it."
   [store <dispatch]
-  (p/loop []
-    (when-let [args (first (read-vec store parked-key))]
-      (p/let [_ (<dispatch args)]
-        ((:write! store) parked-key (vec (rest (read-vec store parked-key))))
-        (p/recur)))))
+  (p/loop [pending (read-vec store parked-key)
+           delivered 0
+           failed 0]
+    (if-let [args (first pending)]
+      (p/let [inserted? (-> (<dispatch args)
+                            (p/then (constantly true))
+                            (p/catch (fn [e]
+                                       (log/error :hypha/capture-parked-insert-failed {:error e})
+                                       false)))]
+        (when inserted?
+          (unpark-capture! store args))
+        (p/recur (rest pending)
+                 (if inserted? (inc delivered) delivered)
+                 (if inserted? failed (inc failed))))
+      {:delivered delivered :failed failed})))
 
 ;; ---------------------------------------------------------------------------
 ;; Capture inbox — clips posted by the Firefox / Thunderbird extensions.
@@ -177,15 +211,27 @@
                              :oauth-token (state/get-auth-id-token)}))
 
 (defn ^:no-doc <dispatch-clip-default
-  "Hand one set of capture args to upstream quick capture. Resolves once
-  the block is inserted and rejects when the insert fails: the event's
-  promise settles with the handler's."
+  "Hand one set of capture args to upstream quick capture. Resolves with
+  the inserted block and rejects when nothing was inserted.
+
+  `state/pub-event!` resolves as soon as the handler has returned, with the
+  handler's promise as its value (promesa does not adopt it). Binding that
+  value a second time is what waits for the insert.
+
+  Quick capture also resolves on paths that insert nothing (no journal
+  title, a missing or recycled target page), so the result is checked.
+  `:append` keeps it from typing the capture into a block the user happens
+  to be editing: a capture always becomes its own block."
   [args]
-  (state/pub-event! [:editor/quick-capture (clj->js args)]))
+  (p/let [insert-promise (state/pub-event! [:editor/quick-capture (clj->js (assoc args :append true))])
+          block insert-promise]
+    (if (:block/uuid block)
+      block
+      (throw (ex-info "quick capture inserted no block" {:args args})))))
 
 (defn <drain-inbox!
-  "Insert every pending clip, then ack them. Resolves the number of clips
-  inserted.
+  "Insert every pending clip, then ack the inserted ones. Resolves
+  `{:inserted :failed}`.
 
   A clip is acked only after its block was inserted, so a browser that
   dies mid-drain replays clips on the next boot instead of losing them.
@@ -193,8 +239,8 @@
   with a 200, so a failed ack (401, 5xx, offline) is retried on the next
   drain without inserting the clips again.
 
-  Any failure resolves 0 — the clips are the user's only copy, so
-  retrying next boot beats surfacing an error here.
+  A clip whose insert fails stays in the inbox for the next boot. It does
+  not hold up the clips behind it, and they are acked without it.
 
   The four-arg form injects the HTTP calls, the dispatch and the store
   for tests."
@@ -205,31 +251,45 @@
          (if (not= 200 (:status resp))
            (do (log/info :hypha/capture-inbox-fetch-failed
                          {:status (:status resp)})
-               0)
+               {:inserted 0 :failed 0})
            (let [clips (get-in resp [:body :clips])
-                 clip-ids (mapv :id clips)
+                 clip-ids (set (map :id clips))
                  ;; Ids the server no longer lists are done; drop them.
-                 inserted-ids (filterv (set clip-ids) (read-vec store inserted-clip-ids-key))
+                 inserted-ids (filterv clip-ids (read-vec store inserted-clip-ids-key))
                  new-clips (remove (comp (set inserted-ids) :id) clips)]
              ((:write! store) inserted-clip-ids-key inserted-ids)
-             (if (empty? clips)
-               0
-               (p/let [_ (reduce (fn [chain clip]
-                                   (p/let [_ chain
-                                           _ (<dispatch (clip->capture-args clip))]
-                                     ((:write! store) inserted-clip-ids-key
-                                                      (conj (read-vec store inserted-clip-ids-key) (:id clip)))))
-                                 (p/resolved nil)
-                                 new-clips)
-                       ack-resp (<chan->promise (<ack clip-ids))]
-                 (if (= 200 (:status ack-resp))
-                   ((:write! store) inserted-clip-ids-key [])
-                   (log/warn :hypha/capture-inbox-ack-failed
-                             {:status (:status ack-resp)}))
-                 (count new-clips))))))
+             (p/let [failed (p/loop [remaining new-clips
+                                     failed 0]
+                              (if-let [clip (first remaining)]
+                                (p/let [inserted? (-> (<dispatch (clip->capture-args clip))
+                                                      (p/then (constantly true))
+                                                      (p/catch (fn [e]
+                                                                 (log/error :hypha/capture-clip-insert-failed
+                                                                            {:id (:id clip) :error e})
+                                                                 false)))]
+                                  (when inserted?
+                                    ((:write! store) inserted-clip-ids-key
+                                                     (conj (read-vec store inserted-clip-ids-key) (:id clip))))
+                                  (p/recur (rest remaining) (if inserted? failed (inc failed))))
+                                failed))
+                     ids-to-ack (read-vec store inserted-clip-ids-key)
+                     ack-resp (when (seq ids-to-ack)
+                                (<chan->promise (<ack ids-to-ack)))]
+               (cond
+                 (nil? ack-resp)
+                 nil
+
+                 (= 200 (:status ack-resp))
+                 ((:write! store) inserted-clip-ids-key
+                                  (vec (remove (set ids-to-ack) (read-vec store inserted-clip-ids-key))))
+
+                 :else
+                 (log/warn :hypha/capture-inbox-ack-failed
+                           {:status (:status ack-resp)}))
+               {:inserted (- (count new-clips) failed) :failed failed}))))
        (p/catch (fn [e]
                   (log/error :hypha/capture-inbox-drain-failed {:error e})
-                  0)))))
+                  {:inserted 0 :failed 0})))))
 
 (defn <start!
   "Boot entry point: file a share-target/bookmarklet capture from the URL
@@ -238,26 +298,45 @@
   URL params are stripped immediately — before the graph is even ready —
   so a reload cannot replay the capture. The capture is parked in
   localStorage instead and filed once a graph is ready, in this session
-  or a later one. Both paths share one wait for the graph, because both
-  insert blocks.
+  or a later one. Parked captures only need the graph; the inbox also
+  needs the session, which is restored asynchronously.
 
   On an ordinary boot there are no URL params and the inbox is empty, so
   this costs one request once the graph is up."
   []
-  (let [args (parse-capture-params js/window.location.search)]
-    (when args
-      (park-capture! local-store args)
-      (.replaceState js/window.history nil ""
-                     (strip-capture-params js/window.location.href)))
-    (p/let [ready? (<wait-for-graph! ready-poll-interval-ms ready-timeout-ms)
-            _ (when-not ready?
-                ;; Fresh login or a graph that is still downloading. Tell
-                ;; the user their capture is not lost, then keep waiting.
-                (when (seq (read-vec local-store parked-key))
-                  (log/warn :hypha/capture-parked {:reason "no graph ready before timeout"})
-                  (notification/show! (t :hypha.capture/waiting-for-graph) :warning))
-                (<wait-for-graph! late-ready-poll-interval-ms nil))
-            _ (-> (<deliver-parked! local-store <dispatch-clip-default)
-                  (p/catch (fn [e]
-                             (log/error :hypha/capture-deliver-parked-failed {:error e}))))]
-      (<drain-inbox!))))
+  (let [args (parse-capture-params js/window.location.search)
+        _ (when args
+            (.replaceState js/window.history nil ""
+                           (strip-capture-params js/window.location.href)))
+        ;; This runs inside app boot, where a throw would abort it. If
+        ;; localStorage refuses the capture (quota, disabled), keep it in
+        ;; memory for this session at least.
+        unparked-args (when args
+                        (try
+                          (park-capture! local-store args)
+                          nil
+                          (catch :default e
+                            (log/error :hypha/capture-park-failed {:error e})
+                            args)))]
+    (-> (p/let [ready? (<wait-until! graph-ready? ready-poll-interval-ms ready-timeout-ms)
+                _ (when-not ready?
+                    ;; Fresh login or a graph that is still downloading. Tell
+                    ;; the user their capture is not lost, then keep waiting.
+                    (when (or unparked-args (seq (read-vec local-store parked-key)))
+                      (log/warn :hypha/capture-parked {:reason "no graph ready before timeout"})
+                      (notification/show! (t :hypha.capture/waiting-for-graph) :warning))
+                    (<wait-until! graph-ready? late-ready-poll-interval-ms nil))
+                unparked-failed (if unparked-args
+                                  (-> (<dispatch-clip-default unparked-args)
+                                      (p/then (constantly 0))
+                                      (p/catch (fn [e]
+                                                 (log/error :hypha/capture-unparked-insert-failed {:error e})
+                                                 1)))
+                                  0)
+                parked (<deliver-parked! local-store <dispatch-clip-default)
+                _ (<wait-until! signed-in? late-ready-poll-interval-ms nil)
+                drained (<drain-inbox!)]
+          (when (pos? (+ unparked-failed (:failed parked) (:failed drained)))
+            (notification/show! (t :hypha.capture/insert-failed) :warning)))
+        (p/catch (fn [e]
+                   (log/error :hypha/capture-start-failed {:error e}))))))
