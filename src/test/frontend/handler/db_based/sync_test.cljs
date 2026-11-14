@@ -454,8 +454,8 @@
                                util/electron? (fn [] false)
                                state/<invoke-db-worker (fn [& args]
                                                          (swap! worker-calls conj args)
-                                                         (p/resolved (if (= :thread-api/list-db (first args))
-                                                                       []
+                                                         (p/resolved (if (= :thread-api/db-exists (first args))
+                                                                       false
                                                                        :ok)))
                                state/set-state! (fn [& _] nil)
                                state/pub-event! (fn [& _] nil)]
@@ -482,8 +482,8 @@
                                user-handler/task--ensure-id&access-token (fn [resolve _reject]
                                                                            (resolve true))
                                state/<invoke-db-worker (fn [op & _]
-                                                         (p/resolved (if (= :thread-api/list-db op)
-                                                                       []
+                                                         (p/resolved (if (= :thread-api/db-exists op)
+                                                                       false
                                                                        :ok)))
                                state/pub-event! (fn [& _] nil)
                                state/set-state! (fn [k v]
@@ -567,8 +567,8 @@
                                                                           :initial-data []}))
                                state/<invoke-db-worker (fn [& args]
                                                          (swap! worker-calls conj args)
-                                                         (p/resolved (if (= :thread-api/list-db (first args))
-                                                                       []
+                                                         (p/resolved (if (= :thread-api/db-exists (first args))
+                                                                       false
                                                                        :ok)))
                                state/pub-event! (fn [& _] nil)
                                state/set-state! (fn [& _] nil)]
@@ -576,7 +576,7 @@
                (p/then (fn [_]
                          ;; Electron-only fetch-init-data path stays skipped on web.
                          (is (empty? @runtime-rebind-calls))
-                         (is (= [[:thread-api/list-db]
+                         (is (= [[:thread-api/db-exists "logseq_db_db1"]
                                  [:thread-api/create-or-open-db
                                   "logseq_db_db1"
                                   {:sync-download-graph? true}]]
@@ -590,8 +590,8 @@
 
 (defn- <failed-web-download-worker-ops
   "Run a web download that fails in the worker and resolve the worker ops
-  that were invoked. `existing-dbs` is what :thread-api/list-db reports."
-  [existing-dbs]
+  that were invoked. `existed?` is what :thread-api/db-exists reports."
+  [existed?]
   (let [worker-ops (atom [])]
     (-> (p/with-redefs [db-sync/http-base (fn [] "http://base")
                         user-handler/task--ensure-id&access-token (fn [resolve _reject]
@@ -600,8 +600,8 @@
                         state/<invoke-db-worker (fn [op & _args]
                                                   (swap! worker-ops conj op)
                                                   (case op
-                                                    :thread-api/list-db
-                                                    (p/resolved existing-dbs)
+                                                    :thread-api/db-exists
+                                                    (p/resolved existed?)
 
                                                     :thread-api/db-sync-download-graph-by-id
                                                     (p/rejected (ex-info "download cancelled" {}))
@@ -620,8 +620,8 @@
 ;; survive a failed download as an empty graph with the remote's name.
 (deftest rtc-download-graph-unlinks-db-it-created-when-download-fails-test
   (async done
-         (-> (p/let [created-ops (<failed-web-download-worker-ops [])
-                     existing-ops (<failed-web-download-worker-ops [{:name "logseq_db_db1"}])]
+         (-> (p/let [created-ops (<failed-web-download-worker-ops false)
+                     existing-ops (<failed-web-download-worker-ops true)]
                (is (= :thread-api/unsafe-unlink-db (last created-ops)))
                (is (not-any? #{:thread-api/unsafe-unlink-db} existing-ops)
                    "a db that existed before the download is kept"))
@@ -643,16 +643,23 @@
                                db-sync/<rtc-start! (fn [repo]
                                                      (swap! calls conj [:start repo])
                                                      (p/resolved nil))
+                               ;; like the event loop: resolves at once with the
+                               ;; handler's (still pending) promise as value
                                state/pub-event! (fn [event]
                                                   (swap! calls conj [:event event])
-                                                  (p/resolved nil))]
+                                                  (let [d (p/deferred)]
+                                                    (p/resolve! d (p/let [_ (p/delay 10)]
+                                                                    (swap! calls conj [:switched])))
+                                                    d))]
                  (db-sync/<rtc-replace-local-with-remote! "logseq_db_db1" "db1" "graph-1" nil))
                (p/then (fn [_]
                          (is (= [[:download "db1" "graph-1" false]
-                                 [:get-remote-graphs]
                                  [:event [:graph/switch "logseq_db_db1" {:rtc-download? true}]]
+                                 [:switched]
+                                 [:get-remote-graphs]
                                  [:start "logseq_db_db1"]]
-                                @calls))))
+                                @calls)
+                             "the graph switch finishes before anything else runs")))
                (p/catch (fn [error]
                           (is false (str error))))
                (p/finally done)))))
