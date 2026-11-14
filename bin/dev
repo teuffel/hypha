@@ -31,9 +31,11 @@ export HOST_GID="$(id -g)"
 COMPOSE=(docker compose -f docker-compose.dev.yml)
 
 # Build image if missing. Detected by image label, not by image name alone,
-# so a stale cache doesn't get treated as fresh.
-if ! docker image inspect hypha-dev:local --format '{{ index .Config.Labels "org.hypha.toolchain.node" }}' \
-       >/dev/null 2>&1; then
+# so a stale cache doesn't get treated as fresh. The OCaml label is the
+# newest toolchain entry; images built before it lack the cli/ toolchain.
+ocaml_label="$(docker image inspect hypha-dev:local \
+                 --format '{{ index .Config.Labels "org.hypha.toolchain.ocaml" }}' 2>/dev/null || true)"
+if [[ -z "$ocaml_label" || "$ocaml_label" == "<no value>" ]]; then
   echo ">> First-time setup: building Hypha dev container..."
   echo "   (Takes ~5 minutes. Subsequent runs are instant.)"
   "${COMPOSE[@]}" build dev

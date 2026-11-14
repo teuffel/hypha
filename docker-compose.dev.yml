@@ -39,6 +39,8 @@ services:
       # Without this, every `bin/dev` invocation lands in a fresh container
       # and would re-download the browser. Added in M4.
       - hypha-cache:/home/dev/.cache
+      # opam root with the OCaml switch and the cli/ packages.
+      - hypha-opam:/home/dev/.opam
     environment:
       HOME: /home/dev
       # Forward shadow-cljs's default nrepl port for editor connections
@@ -72,3 +74,4 @@ volumes:
   hypha-m2:
   hypha-gitlibs:
   hypha-cache:
+  hypha-opam:
