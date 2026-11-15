@@ -11,6 +11,7 @@
  *   - / (statics root)
  */
 
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 
@@ -111,7 +112,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   await app.register(fastifyCookie);
 
-  const sessions = new SessionStore(opts.config.sessionTtlSeconds);
+  const sessions = new SessionStore(
+    opts.config.sessionTtlSeconds,
+    join(opts.config.dataDir, "sessions.json"),
+  );
 
   const pluginCache = opts.pluginUpstream
     ? new PluginCache(opts.pluginUpstream.cacheMaxEntries ?? DEFAULT_PLUGIN_CACHE_MAX_ENTRIES)
