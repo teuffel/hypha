@@ -292,13 +292,20 @@
                     {:repo repo :delay delay :attempt attempt :reason reason}))))))
 
 (defn- attach-ws-handlers!
-  [repo client ws url]
-  (set! (.-onmessage ws)
-        (fn [event]
-          (touch-last-ws-message! client)
-          (enqueue-receive-message! client
-                                    (fn []
-                                      (sync-handle-message/handle-message! repo client (.-data event))))))
+  "`on-first-message` runs once, on the first message from the server. The
+  socket opening is no proof that the server took the connection: the proxy
+  in front of db-sync completes the browser handshake before the upstream
+  accepts, and closes it again when the upstream rejects."
+  [repo client ws url on-first-message]
+  (let [*confirmed? (atom false)]
+    (set! (.-onmessage ws)
+          (fn [event]
+            (when (compare-and-set! *confirmed? false true)
+              (on-first-message))
+            (touch-last-ws-message! client)
+            (enqueue-receive-message! client
+                                      (fn []
+                                        (sync-handle-message/handle-message! repo client (.-data event)))))))
   (set! (.-onerror ws) (fn [error] (log/error :db-sync/ws-error error)))
   (set! (.-onclose ws)
         (fn [_]
@@ -496,24 +503,20 @@
   (when-let [token' (or token (auth-token))]
     (let [ws (platform/websocket-connect (platform/current) (sync-transport/append-token url token'))
           updated (assoc client :ws ws)]
-      (attach-ws-handlers! repo updated ws url)
+      (attach-ws-handlers! repo updated ws url
+                           (fn []
+                             ;; A socket the wedge watchdog keeps killing
+                             ;; answers fine every time. Keep its backoff and
+                             ;; its error until sync moves again.
+                             (when-not (wedge-limit-reached? updated)
+                               (reset-reconnect! updated)
+                               (sync-util/clear-last-sync-error! updated))))
+      ;; Asset sync starts from the server's hello reply (handle-hello!).
       (set! (.-onopen ws)
             (fn [_]
-              ;; A socket the wedge watchdog keeps killing opens fine every
-              ;; time. Keep its backoff and its error until sync moves again.
-              (when-not (wedge-limit-reached? updated)
-                (reset-reconnect! updated))
               (touch-last-ws-message! updated)
               (set-ws-state! updated :open)
-              (when-not (wedge-limit-reached? updated)
-                (sync-util/clear-last-sync-error! updated))
-              (send! ws {:type "hello" :client repo})
-              (sync-assets/enqueue-asset-sync!
-               repo updated
-               {:enqueue-asset-task-f sync-assets/enqueue-asset-task!
-                :current-client-f current-client
-                :broadcast-rtc-state!-f broadcast-rtc-state!
-                :fail-fast-f fail-fast})))
+              (send! ws {:type "hello" :client repo})))
       (close-stale-ws-loop updated ws url)
       (start-sync-watchdog-loop updated ws))))
 
