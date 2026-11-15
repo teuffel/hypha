@@ -143,15 +143,46 @@
     (mark-asset-write-finish! repo asset-id)
     nil))
 
+(defn- <put-asset!
+  "PUT `payload` to `url`; resolves to {:ok? :status}. `fetch` reports no
+  upload progress, so the browser worker uses XMLHttpRequest and calls
+  `on-progress` with (loaded total) bytes. Node (db-worker-node) has no
+  XMLHttpRequest and uploads without intermediate progress."
+  [url headers payload on-progress]
+  (if (exists? js/XMLHttpRequest)
+    (p/create
+     (fn [resolve reject]
+       (let [xhr (js/XMLHttpRequest.)]
+         (.open xhr "PUT" url)
+         (doseq [[k v] headers]
+           (.setRequestHeader xhr (name k) v))
+         (set! (.. xhr -upload -onprogress)
+               (fn [^js e]
+                 (when (.-lengthComputable e)
+                   (on-progress (.-loaded e) (.-total e)))))
+         (set! (.-onload xhr)
+               (fn []
+                 (let [status (.-status xhr)]
+                   (resolve {:ok? (<= 200 status 299) :status status}))))
+         (set! (.-onerror xhr) (fn [] (reject (js/Error. "asset upload network error"))))
+         (set! (.-onabort xhr) (fn [] (reject (js/Error. "asset upload aborted"))))
+         (.send xhr payload))))
+    (p/let [^js resp (js/fetch url (clj->js {:method "PUT"
+                                             :headers headers
+                                             :body payload}))]
+      {:ok? (.-ok resp) :status (.-status resp)})))
+
 (defn upload-remote-asset!
   [repo graph-id asset-uuid asset-type checksum]
-  (let [base (sync-auth/http-base-url @worker-state/*db-sync-config)]
+  (let [base (sync-auth/http-base-url @worker-state/*db-sync-config)
+        asset-id (str asset-uuid)
+        ;; set once the 0% event went out, so a failure can close the bar
+        *total (atom nil)]
     (if (and (seq base) (seq graph-id) (seq asset-type) (seq checksum))
       (-> (p/let [aes-key (graph-aes-key
                            repo graph-id
                            (fn [tag data]
                              (throw (ex-info (name tag) data))) )
-                  asset-id (str asset-uuid)
                   put-url (sync-large-title/asset-url base graph-id asset-id asset-type)
                   asset-bytes (->
                                (<read-asset-bytes repo asset-id asset-type)
@@ -169,22 +200,30 @@
                               (ldb/write-transit-str encrypted-bytes)))
                   total (payload-size payload)
                   _ (notify-asset-progress! repo asset-id :upload 0 total)
+                  _ (reset! *total total)
                   headers (merge (sync-auth/auth-headers (worker-state/get-id-token))
                                  {"x-amz-meta-checksum" checksum
                                   "x-amz-meta-type" asset-type})
-                  ^js resp (js/fetch put-url
-                                     (clj->js {:method "PUT"
-                                               :headers headers
-                                               :body payload}))
-                  status (.-status resp)
+                  *last-percent (atom 0)
+                  {:keys [ok? status]}
+                  (<put-asset! put-url headers payload
+                               (fn [loaded total']
+                                 ;; one broadcast per whole percent, not per chunk
+                                 (let [percent (int (* 100 (/ loaded total')))]
+                                   (when (> percent @*last-percent)
+                                     (reset! *last-percent percent)
+                                     (notify-asset-progress! repo asset-id :upload loaded total')))))
                   _ (notify-asset-progress! repo asset-id :upload total total)]
-            (when-not (.-ok resp)
+            (when-not ok?
               (throw (ex-info "upload-asset failed"
                               {:type :rtc.exception/upload-asset-failed
                                :data {:status status}})))
             nil)
           (p/catch
            (fn [e]
+             ;; close the bar, or it keeps showing the last percent
+             (when-let [total @*total]
+               (notify-asset-progress! repo asset-id :upload total total))
              (if (contains? #{:rtc.exception/read-asset-failed
                               :rtc.exception/upload-asset-failed}
                             (:type (ex-data e)))
