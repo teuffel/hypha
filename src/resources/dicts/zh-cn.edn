@@ -937,8 +937,10 @@
  :hypha.capture/waiting-for-graph "捕获内容已保存，打开图谱后会自动添加。"
 
  :hypha.login/access-code-placeholder "访问码"
+ :hypha.login/hide-access-code "隐藏访问码"
  :hypha.login/invalid-code "访问码无效"
  :hypha.login/network-error "无法连接到服务器，请重试。"
+ :hypha.login/show-access-code "显示访问码"
 
  :icon/emojis-count "表情符号（{1}）"
  :icon/icons-count "图标（{1}）"

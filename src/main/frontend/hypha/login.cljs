@@ -36,6 +36,7 @@
 (hsx/defc modal-inner
   []
   (let [[code set-code!] (hooks/use-state "")
+        [code-visible? set-code-visible!] (hooks/use-state false)
         [error set-error!] (hooks/use-state nil)
         [submitting? set-submitting!] (hooks/use-state false)
         submit!
@@ -61,13 +62,30 @@
      {:on-submit (fn [e]
                    (.preventDefault e)
                    (submit!))}
-     (shui/input
-      {:type "password"
-       :autoFocus true
-       :disabled submitting?
-       :value code
-       :on-change #(set-code! (.. % -target -value))
-       :placeholder (t :hypha.login/access-code-placeholder)})
+     [:div.relative
+      (shui/input
+       {:type (if code-visible? "text" "password")
+        :class "pr-9"
+        :autoFocus true
+        :disabled submitting?
+        :value code
+        :on-change #(set-code! (.. % -target -value))
+        :placeholder (t :hypha.login/access-code-placeholder)})
+      (let [label (t (if code-visible?
+                       :hypha.login/hide-access-code
+                       :hypha.login/show-access-code))]
+        (shui/button
+         {:type "button"
+          :variant :ghost
+          :size :icon
+          :class "absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 opacity-70 hover:opacity-100"
+          :title label
+          :aria-label label
+          :aria-pressed code-visible?
+          ;; Keep the focus in the input, so typing continues after a click.
+          :on-pointer-down #(.preventDefault %)
+          :on-click #(set-code-visible! (not code-visible?))}
+         (shui/tabler-icon (if code-visible? "eye-off" "eye") {:size 16})))]
      (when error
        [:div.text-sm.text-error error])
      (shui/button
