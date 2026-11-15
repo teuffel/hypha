@@ -34,6 +34,7 @@
   (:require [cljs-http.client :as http]
             [cljs.core.async :refer [<! go]]
             [frontend.config :as config]
+            [frontend.handler.db-based.rtc-flows :as rtc-flows]
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
             [frontend.hypha.asset-cache :as asset-cache]
@@ -114,11 +115,18 @@
   worker-side code reached by <get-remote-graphs (notably crypt/
   <resolve-user-uuid) sees a valid :auth/id-token. Without that push,
   the worker fails with 'worker auth refresh requires refresh token'
-  because Hypha's auth model has no refresh-token."
+  because Hypha's auth model has no refresh-token.
+
+  Then starts sync for the current graph when it is a remote one, like
+  upstream's :user/fetch-info-and-graphs: the login trigger fires before
+  the graph list arrives, so its start is skipped (graph not in the remote
+  list) and nothing else would start it."
   []
-  (-> (p/do
-        (<push-auth-to-db-worker!)
-        (rtc-handler/<get-remote-graphs))
+  (-> (p/let [_ (<push-auth-to-db-worker!)
+              _ (rtc-handler/<get-remote-graphs)]
+        (when-let [repo (state/get-current-repo)]
+          (when (some #(= repo (:url %)) (state/get-rtc-graphs))
+            (rtc-flows/trigger-rtc-start repo))))
       (p/catch (fn [e]
                  (log/error :hypha/initial-graph-fetch-failed
                             {:error e})))))
