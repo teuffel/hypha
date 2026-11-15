@@ -1888,6 +1888,42 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #26 — Paged pull
+
+- **ID**: HYPHA-PATCH-026
+- **Introduced**: Deploy of v0.2.0.0, 2026-11-15
+- **Files**:
+  - `deps/db-sync/src/logseq/db_sync/storage.cljs` (`fetch-tx-page`)
+  - `deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
+    (`pull-response`, `pull-page-max-txs`, `pull-page-max-bytes`)
+  - `src/main/frontend/worker/sync/handle_message.cljs` (`handle-pull-ok!`)
+- **Patch form**:
+  ```clojure
+  ;; server: at most 2000 txs / 8 MiB per pull/ok; :t is the page end and
+  ;; :checksum is sent only with the last page
+  ;; client: after applying a page
+  (when (and (number? head-tx) (< remote-tx head-tx))
+    (request-pull! client remote-tx))
+  ```
+- **Rationale**: A pull/ok is one WebSocket message and the ws library caps a
+  message at 100 MiB. After the 2026-11-13 loop (#25) a browser 18,982 txs
+  behind got a 101.5 MB pull/ok, the proxy closed the socket, and the client
+  reconnected and pulled again about once a second without catching up.
+- **Additive alternatives considered**: raise `maxPayload`: moves the limit,
+  keeps 100 MB messages in browser and iPad memory.
+- **Break signal — structural**: `pull-response` or `handle-pull-ok!` is
+  restructured.
+- **Break signal — semantic**: upstream pages the pull itself → drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-026' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-026' src/main/frontend/worker/sync/handle_message.cljs` ⇒ `1`
+  - Regression guards: `pull-response-is-paged-test`,
+    `pull-ok-page-behind-the-head-pulls-the-next-page-test`.
+- **On break**: re-anchor; drop when upstream pages the pull.
+
+---
+
 ## Retired patches
 
 - **#17 ISO-8601 parsing for datetime properties** and **#19 `rename page`**

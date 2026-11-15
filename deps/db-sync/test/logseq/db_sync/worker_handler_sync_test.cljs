@@ -228,6 +228,34 @@
         (is (= [tx-a tx-b tx-c]
                (mapv :tx-id (storage/fetch-tx-since sql 0))))))))
 
+(deftest pull-response-is-paged-test
+  ;; HYPHA-PATCH-026: a client 19k txs behind got a 101 MB pull/ok, over the
+  ;; 100 MiB WebSocket message limit, so the connection closed on every pull.
+  (with-memory-sql
+    (fn [sql]
+      (let [conn (storage/open-conn sql)
+            self #js {:sql sql :conn conn :schema-ready true}
+            entry (fn [title]
+                    {:tx-id (random-uuid) :outliner-op :save-block
+                     :tx (protocol/tx->transit [{:block/uuid (random-uuid) :block/title title}])})]
+        (with-redefs [ws/broadcast! (fn [& _] nil)]
+          (doseq [[t title] (map-indexed vector ["a" "b" "c"])]
+            (sync-handler/handle-tx-batch! self nil [(entry title)] t)))
+        (with-redefs [sync-handler/pull-page-max-txs 2]
+          (let [page-1 (sync-handler/pull-response self 0)
+                page-2 (sync-handler/pull-response self (:t page-1))]
+            (testing "a page ends at its last tx and carries no head checksum"
+              (is (= [1 2] (mapv :t (:txs page-1))))
+              (is (= 2 (:t page-1)))
+              (is (not (contains? page-1 :checksum))))
+            (testing "the last page ends at the head"
+              (is (= [3] (mapv :t (:txs page-2))))
+              (is (= 3 (:t page-2)))
+              (is (string? (:checksum page-2))))))
+        (with-redefs [sync-handler/pull-page-max-bytes 1]
+          (is (= [1] (mapv :t (:txs (sync-handler/pull-response self 0))))
+              "a page holds at least one tx, however large"))))))
+
 (deftest pull-http-json-serializes-tx-id-as-string-and-round-trips-test
   (async done
          (with-memory-sql-async

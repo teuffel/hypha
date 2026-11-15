@@ -117,6 +117,9 @@ check "patch-22: web download binds runtime" "rg -c 'HYPHA-PATCH-022' src/main/f
 check "patch-25a: server confirms journaled tx-ids" "rg -c 'HYPHA-PATCH-025' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" "1"
 check "patch-25b: client acks its own tx-ids in pull/ok" "rg -c 'HYPHA-PATCH-025' src/main/frontend/worker/sync/apply_txs.cljs" "1"
 
+check "patch-26a: server pages the pull" "rg -c 'HYPHA-PATCH-026' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" "1"
+check "patch-26b: client pulls the next page" "rg -c 'HYPHA-PATCH-026' src/main/frontend/worker/sync/handle_message.cljs" "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
