@@ -136,6 +136,14 @@ async function buildPluginApp(
       cacheMaxEntries,
     },
   });
+  // The plugin routes need a session; log in once and send the cookie with
+  // every inject unless the test passes its own headers.
+  const login = await app.inject({ method: "POST", url: "/auth/login", payload: { code: "ignored" } });
+  const session = login.cookies.find((c) => c.name === "hypha-session");
+  assert.ok(session, "test login must set the session cookie");
+  const inject = app.inject.bind(app) as (opts: Record<string, unknown>) => ReturnType<typeof app.inject>;
+  (app as unknown as { inject: typeof inject }).inject = (opts) =>
+    inject({ ...opts, headers: (opts.headers as object | undefined) ?? { cookie: `hypha-session=${session.value}` } });
   return app;
 }
 
@@ -233,6 +241,65 @@ test("/plugin-market/packages/* — rejects path traversal with 400 invalid_path
     await app.close();
     await market.close();
     await cdn.close();
+  }
+});
+
+// The proxied plugin HTML/JS is served from the Hypha origin; without a
+// session nobody (and no cross-site navigation) may load it.
+test("plugin proxies — require a session, no upstream call without one", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    for (const url of [
+      "/plugin-market/plugins.json",
+      "/plugin-market/packages/x/icon.png",
+      "/plugin-cdn/r2/org/plugin",
+      "/plugin-cdn/assets/org/plugin/1.0.0/index.html",
+    ]) {
+      for (const headers of [{}, { cookie: "hypha-session=not-a-session" }]) {
+        const res = await app.inject({ method: "GET", url, headers });
+        assert.equal(res.statusCode, 401, `${url} ${JSON.stringify(headers)}`);
+      }
+    }
+    assert.equal(market.calls.length + cdn.calls.length + assets.calls.length, 0);
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
+  }
+});
+
+// A double-encoded dot segment survives the router's single decode as
+// %2e%2e, and fetch() resolves that as "..": the request would leave the
+// marketplace prefix and fetch any file on the upstream host, served from
+// the Hypha origin.
+test("plugin proxies — reject double-encoded traversal, no upstream call", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  const assets = await startFakeUpstream();
+  const app = await buildPluginApp(market, cdn, 64, assets);
+  try {
+    for (const url of [
+      "/plugin-market/packages/%252e%252e/%252e%252e/attacker/repo/main/evil.svg",
+      "/plugin-cdn/r2/%252e%252e/other/path.json",
+      "/plugin-cdn/assets/%252e%252e/elsewhere/index.html",
+      "/plugin-cdn/assets/a/%252E%252e/b/index.html",
+    ]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.equal(res.statusCode, 400, url);
+      assert.deepEqual(res.json(), { error: "invalid_path" }, url);
+    }
+    assert.equal(market.calls.length, 0);
+    assert.equal(cdn.calls.length, 0);
+    assert.equal(assets.calls.length, 0);
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
+    await assets.close();
   }
 });
 

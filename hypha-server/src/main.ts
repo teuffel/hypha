@@ -79,6 +79,9 @@ const runner = new DbSyncRunner({
   jwtAudience: config.jwtAudience,
   jwksUrl,
   logger: app.log,
+  // Sync is dead without the adapter; exit so the restart policy brings
+  // the whole server back instead of serving a UI that cannot sync.
+  onUnexpectedExit: () => process.exit(1),
 });
 
 // Graceful shutdown: stop accepting new connections first, then kill the

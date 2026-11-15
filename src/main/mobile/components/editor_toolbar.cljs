@@ -3,16 +3,18 @@
   (:require [frontend.commands :as commands]
             [frontend.context.i18n :refer [t]]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.editor.format :as editor-format]
             [frontend.handler.history :as history]
             [frontend.mobile.camera :as mobile-camera]
             [frontend.mobile.haptics :as haptics]
             [frontend.mobile.util :as mobile-util]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.util.cursor :as cursor]
             [goog.dom :as gdom]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.shui.hooks :as hooks]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn- blur-if-compositing
   "Call blur on the textarea if it is in composition mode so IME can commit composing text."
@@ -39,7 +41,7 @@
   (when (state/get-edit-input-id)
     (let [input (state/get-input)]
       (state/clear-editor-action!)
-      (let [selection (editor-handler/get-selection-and-format)
+      (let [selection (editor-format/get-selection-and-format)
             {:keys [selection-start selection-end selection]} selection]
         (if (and input selection)
           (do
@@ -200,7 +202,7 @@
   [main trailing]
   (into {} (map (juxt :id :handler) (concat main (when trailing [trailing])))))
 
-(rum/defc native-toolbar
+(hsx/defc native-toolbar
   [show? {:keys [main trailing]}]
   (let [handlers-ref (hooks/use-ref nil)
         native-actions (mapv action->native main)
@@ -236,10 +238,10 @@
 
     [:<>]))
 
-(rum/defc mobile-bar < rum/reactive
+(hsx/defc mobile-bar
   []
-  (let [editing? (state/sub :editor/editing?)
-        code-block? (state/sub :editor/code-block-context)
+  (let [editing? (rfx/use-sub [:editor/editing?])
+        code-block? (rfx/use-sub [:editor/code-block-context])
         show? (and (not code-block?)
                    editing?)
         actions (toolbar-actions)]

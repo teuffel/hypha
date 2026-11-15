@@ -8,14 +8,18 @@
 
 (def ^:api js-files
   "js files from publishing release build"
-  (->> ["main.js" "code-editor.js"]
-       ;; Add source maps for all js files as it doesn't affect initial load time
-       (mapcat #(vector % (str % ".map")))
-       vec))
+  ["main.js" "code-editor.js"])
 
 (def ^:api static-dirs
   "dirs under static dir to copy over"
-  ["css" "fonts" "icons" "img" "js"])
+  ["css" "icons" "img" "js"])
+
+(defn- remove-js-source-maps
+  [output-static-dir]
+  (let [js-dir (node-path/join output-static-dir "js")]
+    (doseq [file (fs/readdirSync js-dir)]
+      (when (.endsWith file ".map")
+        (fs/rmSync (node-path/join js-dir file) #js {:force true})))))
 
 (defn- default-notification
   [msg]
@@ -23,11 +27,49 @@
     (js/console.log (:payload msg))
     (js/console.error (:payload msg))))
 
+(defn- throw-copy-failed!
+  [from to e]
+  (throw (js/Error. (str "Failed to copy " from " -> " to ": " (.-message e)))))
+
+(defn- copy-file!
+  "Copy a file by reading and writing bytes.
+
+  Do not use fs.copyFile / copyFileSync (or fs-extra copy) for sources that may
+  live inside Electron's app.asar. The asar fs wrapper implements copyFile by
+  extracting the source once to $TMPDIR and caching that path for the process
+  lifetime. macOS deletes unused $TMPDIR files after ~3 days, so later copies
+  fail with ENOENT on the stale temp path. Read+write uses the asar-aware read
+  path and does not depend on that cache."
+  [from to]
+  (try
+    (fs/mkdirSync (node-path/dirname to) #js {:recursive true})
+    (fs/writeFileSync to (fs/readFileSync from))
+    (catch :default e
+      (throw-copy-failed! from to e))))
+
+(defn- copy-path!
+  [from to]
+  (let [stat (try
+               (fs/statSync from)
+               (catch :default e
+                 (throw-copy-failed! from to e)))]
+    (cond
+      (.isDirectory stat)
+      (do
+        (fs/mkdirSync to #js {:recursive true})
+        (doseq [entry (fs/readdirSync from)]
+          (copy-path! (node-path/join from entry)
+                      (node-path/join to entry))))
+
+      (.isFile stat)
+      (copy-file! from to))))
+
 (defn- cleanup-js-dir
   "Moves used js files to the correct dir and removes unused js files"
   [output-static-dir source-static-dir {:keys [dev?]}]
   (let [publishing-dir (node-path/join output-static-dir "js" "publishing")]
-    (p/let [_ (p/all (map (fn [file]
+    (p/let [_ (when-not dev? (remove-js-source-maps output-static-dir))
+            _ (p/all (map (fn [file]
                             (fs/rmSync (node-path/join output-static-dir "js" file) #js {:force true}))
                           js-files))
             _ (when dev?
@@ -55,24 +97,22 @@
         assets-to-dir (node-path/join output-dir "assets")
         output-static-dir (node-path/join output-dir "static")]
     (p/let [_ (fs/mkdirSync assets-to-dir #js {:recursive true})
-            _ (p/all (concat
-                      [(fse/copy (node-path/join static-dir "404.html") (node-path/join output-dir "404.html"))]
-
-                      (map
-                       (fn [filename]
-                         (-> (fse/copy (node-path/join assets-from-dir filename) (node-path/join assets-to-dir filename))
-                             (p/catch
-                              (fn [e]
-                                (log-error-fn "Failed to copy"
-                                              (str {:from (node-path/join assets-from-dir filename)
-                                                    :to (node-path/join assets-to-dir filename)})
-                                              e)))))
-                       asset-filenames)
-
-                      (map
-                       (fn [part]
-                         (fse/copy (node-path/join static-dir part) (node-path/join output-static-dir part)))
-                       static-dirs)))])))
+            _ (copy-path! (node-path/join static-dir "404.html")
+                          (node-path/join output-dir "404.html"))
+            _ (doseq [part static-dirs]
+                (copy-path! (node-path/join static-dir part)
+                            (node-path/join output-static-dir part)))
+            _ (p/all
+               (map
+                (fn [filename]
+                  (-> (fse/copy (node-path/join assets-from-dir filename) (node-path/join assets-to-dir filename))
+                      (p/catch
+                       (fn [e]
+                         (log-error-fn "Failed to copy"
+                                       (str {:from (node-path/join assets-from-dir filename)
+                                             :to (node-path/join assets-to-dir filename)})
+                                       e)))))
+                asset-filenames))])))
 
 (defn create-export
   "Given a graph's directory, the generated html and the directory containing

@@ -3,27 +3,26 @@
   (:require [clojure.string :as string]
             [frontend.components.select :as component-select]
             [frontend.date :as date]
-            [frontend.db :as db]
-            [frontend.db-mixins :as db-mixins]
             [frontend.db.async :as db-async]
-            [frontend.db.model :as db-model]
+            [frontend.db.hooks :as db-hooks]
             [frontend.db.query-dsl :as query-dsl]
             [frontend.context.i18n :refer [t]]
+            [frontend.handler.db-based.property.util :as db-pu]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.query.builder :as query-builder]
-            [frontend.mixins :as mixins]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
-            [frontend.util.ref :as ref]
             [logseq.common.util :as common-util]
             [logseq.common.util.page-ref :as page-ref]
+            [logseq.common.uuid :as common-uuid]
             [logseq.db :as ldb]
+            [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.property :as db-property]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn- select
   ([items on-chosen]
@@ -60,39 +59,96 @@
     "not" (t :query.builder/operator-not-label)
     value))
 
-(rum/defcs search < (rum/local nil ::input-value)
-  (mixins/event-mixin
-   (fn [state]
-     (mixins/on-key-down
-      state
-      {;; enter
-       13 (fn [state e]
-            (let [input-value (get state ::input-value)]
-              (when-not (string/blank? @input-value)
-                (util/stop e)
-                (let [on-submit (first (:rum/args state))]
-                  (on-submit @input-value))
-                (reset! input-value nil))))
-       ;; escape
-       27 (fn [_state _e]
-            (let [[_on-submit on-cancel] (:rum/args state)]
-              (on-cancel)))})))
-  [state _on-submit _on-cancel]
-  (let [*input-value (::input-value state)]
+(hsx/defc search
+  [on-submit on-cancel]
+  (let [*input-value (hooks/use-memo #(atom nil) [])]
     [:input#query-builder-search.form-input.block.sm:text-sm.sm:leading-5
      {:auto-focus true
       :placeholder (t :search/full-text-placeholder)
       :aria-label (t :search/full-text-placeholder)
+      :on-key-down (fn [e]
+                     (case (.-keyCode e)
+                       13 (when-not (string/blank? @*input-value)
+                            (util/stop e)
+                            (on-submit @*input-value)
+                            (reset! *input-value nil))
+                       27 (on-cancel)
+                       nil))
       :on-change #(reset! *input-value (util/evalue %))}]))
 
 (defonce *between-dates (atom {}))
-(rum/defcs datepicker < rum/reactive
-  (rum/local nil ::input-value)
-  {:will-unmount (fn [state]
-                   (swap! *between-dates dissoc (first (:rum/args state)))
-                   state)}
-  [state id placeholder {:keys [on-select]}]
-  (let [*input-value (::input-value state)]
+
+(defn- built-in-property
+  [ident]
+  (when-let [{:keys [title schema]} (get db-property/built-in-properties ident)]
+    (let [closed-values (db-pu/get-closed-property-values ident)]
+      (cond-> {:db/ident ident
+               :block/title title
+               :logseq.property/type (:type schema)}
+        (seq closed-values)
+        (assoc :property/closed-values closed-values)))))
+
+(defn- closed-value-choice-items
+  [closed-values]
+  (keep (fn [value]
+          (when-let [label (or (db-property/closed-value-content value)
+                               (:block/title value))]
+            {:value (str label)}))
+        closed-values))
+
+(hsx/defc closed-values-multi-select
+  [*tree opts loc property-ident clause-head]
+  (let [[values set-values!] (hooks/use-state nil)
+        repo (state/get-current-repo)]
+    (hooks/use-effect!
+     (fn []
+       (p/let [closed (db-async/<get-property-closed-values repo property-ident)]
+         (set-values! (closed-value-choice-items closed))))
+     [property-ident])
+    (select values
+            (constantly nil)
+            {:multiple-choices? true
+             ;; Need the existing choices later to improve the UX
+             :selected-choices #{}
+             :extract-chosen-fn :value
+             :prompt-key :select/default-select-multiple
+             :close-modal? false
+             :loading? (nil? values)
+             :on-apply (fn [choices]
+                         (when (seq choices)
+                           (append-tree! *tree opts loc (vec (cons clause-head choices)))))})))
+
+(defn- property-value-choice-items
+  [closed-values used-values]
+  (if (seq closed-values)
+    (keep (fn [value]
+            (when-let [label (or (db-property/closed-value-content value)
+                                 (:block/title value))]
+              {:value (str label)}))
+          closed-values)
+    (map (fn [{:keys [label]}]
+           {:label label
+            :value label})
+         used-values)))
+
+(hsx/defc loaded-property-title
+  [ident fallback]
+  (let [title (db-hooks/use-resource [:entity-title ident])]
+    (or title fallback)))
+
+(defn- property-title
+  [ident]
+  (or (:block/title (built-in-property ident))
+      [loaded-property-title ident (name ident)]))
+
+(hsx/defc datepicker
+  [id placeholder {:keys [on-select]}]
+  (let [*input-value (hooks/use-memo #(atom nil) [])
+        [input-value] (hooks/use-atom *input-value)]
+    (hooks/use-effect!
+     (fn []
+       #(swap! *between-dates dissoc id))
+     [id])
     (shui/button
      {:variant :secondary
       :size :sm
@@ -112,12 +168,10 @@
                                     {:id :query-datepicker
                                      :content-props {:class "p-0"}
                                      :align :start}))}
-     (or (first @*input-value) placeholder))))
+     (or (first input-value) placeholder))))
 
-(rum/defcs between <
-  (rum/local nil ::start)
-  (rum/local nil ::end)
-  [state {:keys [tree loc] :as opts}]
+(hsx/defc between
+  [{:keys [tree loc] :as opts}]
   [:div.between-date.p-4 {:on-pointer-down (fn [e] (util/stop-propagation e))}
    [:div.flex.flex-row.items-center.gap-2
     (datepicker :start (t :query.builder/between-start-label)
@@ -136,11 +190,12 @@
                                  (append-tree! tree opts loc clause)
                                  (reset! *between-dates {}))))))]])
 
-(rum/defc property-select
+(hsx/defc property-select
   [*mode *property *private-property?]
-  (let [[properties set-properties!] (rum/use-state nil)
+  (let [[properties set-properties!] (hooks/use-state nil)
+        [private-property?] (hooks/use-atom *private-property?)
         properties (cond->> properties
-                     (not @*private-property?)
+                     (not private-property?)
                      (remove ldb/built-in?))]
     (hooks/use-effect!
      (fn []
@@ -155,8 +210,8 @@
        (t :query.builder/show-built-in-properties)]
       (shui/checkbox
        {:id "built-in"
-        :value @*private-property?
-        :on-checked-change #(reset! *private-property? (not @*private-property?))})]
+        :checked private-property?
+        :on-checked-change #(reset! *private-property? (boolean %))})]
      (select (map #(hash-map :db/ident (:db/ident %)
                              :value (:block/title %))
                   properties)
@@ -164,45 +219,44 @@
                (reset! *mode "property-value")
                (reset! *property db-ident)))]))
 
-(rum/defc property-value-select-inner
-  < rum/reactive db-mixins/query
+(hsx/defc property-value-select-inner
   [*property *private-property? *tree opts loc values]
   (let [select-all-label (t :view.table/select-all)
-        values' (cons {:label select-all-label
-                       :value select-all-label}
-                      (map #(hash-map :value (str (:value %))
-                                      ;; Preserve original-value as non-string values like boolean do not display in select
-                                      :original-value (:value %))
-                           values))]
-    (select values'
-            (fn [{:keys [value original-value]}]
-              (let [k (if @*private-property? :private-property :property)
-                    x (if (= value select-all-label)
-                        [k @*property]
-                        [k @*property original-value])]
-                (reset! *property nil)
-                (append-tree! *tree opts loc x))))))
+           values' (cons {:label select-all-label
+                          :value select-all-label}
+                         (map #(hash-map :value (str (:value %))
+                                         ;; Preserve original-value as non-string values like boolean do not display in select
+                                         :original-value (:value %))
+                              values))]
+       (select values'
+               (fn [{:keys [value original-value]}]
+                 (let [k (if @*private-property? :private-property :property)
+                       x (if (= value select-all-label)
+                           [k @*property]
+                           [k @*property original-value])]
+                   (reset! *property nil)
+                   (append-tree! *tree opts loc x))))))
 
-(rum/defc property-value-select
+(hsx/defc property-value-select
   [*property *private-property? *tree opts loc]
-  (let [[values set-values!] (rum/use-state nil)]
+  (let [[values set-values!] (hooks/use-state nil)
+        repo (state/get-current-repo)]
     (hooks/use-effect!
-     (fn [_property]
-       (p/let [result (p/let [result (db-async/<get-property-values @*property)]
-                        (map (fn [{:keys [label]}]
-                               {:label label
-                                :value label})
-                             result))]
-         (set-values! result)))
+     (fn []
+       (p/let [closed (db-async/<get-property-closed-values repo @*property)
+               used (when-not (seq closed)
+                      (db-async/<get-property-values @*property))]
+         (set-values! (property-value-choice-items closed used))))
      [@*property])
     (property-value-select-inner *property *private-property? *tree opts loc values)))
 
-(rum/defc tags
+(hsx/defc tags
   [repo *tree opts loc]
-  (let [[values set-values!] (rum/use-state nil)]
+  (let [[values set-values!] (hooks/use-state nil)]
     (hooks/use-effect!
      (fn []
-       (let [result (db-model/get-all-readable-classes repo {:except-root-class? true})]
+       (p/let [result (db-async/<get-all-classes repo {:except-root-class? true
+                                                        :except-private-tags? false})]
          (set-values! result)))
      [])
     (let [items (->> (sort-by :block/title values)
@@ -214,7 +268,7 @@
                 (append-tree! *tree opts loc [:tags (str value)]))
               {:extract-fn :label}))))
 
-(rum/defc page-search
+(hsx/defc page-search
   [on-chosen]
   (let [[result set-result!] (hooks/use-state nil)
         [loading? set-loading!] (hooks/use-state nil)]
@@ -228,11 +282,8 @@
     (select result on-chosen {:loading? loading?})))
 
 (defn- db-based-query-filter-picker
-  [state *tree loc clause opts]
-  (let [*mode (::mode state)
-        *property (::property state)
-        *private-property? (::private-property? state)
-        repo (state/get-current-repo)]
+  [*mode *property *private-property? *tree loc clause opts]
+  (let [repo (state/get-current-repo)]
     [:div
      (case @*mode
        "property"
@@ -250,33 +301,10 @@
        (tags repo *tree opts loc)
 
        "task"
-       (let [items (let [values (:property/closed-values (db/entity :logseq.property/status))]
-                     (mapv db-property/property-value-content values))]
-         (select items
-                 (constantly nil)
-                 {:multiple-choices? true
-                ;; Need the existing choices later to improve the UX
-                  :selected-choices #{}
-                  :extract-chosen-fn :value
-                  :prompt-key :select/default-select-multiple
-                  :close-modal? false
-                  :on-apply (fn [choices]
-                              (when (seq choices)
-                                (append-tree! *tree opts loc (vec (cons :task choices)))))}))
+       (closed-values-multi-select *tree opts loc :logseq.property/status :task)
 
        "priority"
-       (select
-        (let [values (:property/closed-values (db/entity :logseq.property/priority))]
-          (mapv db-property/property-value-content values))
-        (constantly nil)
-        {:multiple-choices? true
-         :selected-choices #{}
-         :extract-chosen-fn :value
-         :prompt-key :select/default-select-multiple
-         :close-modal? false
-         :on-apply (fn [choices]
-                     (when (seq choices)
-                       (append-tree! *tree opts loc (vec (cons :priority choices)))))})
+       (closed-values-multi-select *tree opts loc :logseq.property/priority :priority)
 
        "page"
        (page-search (fn [{:keys [value]}]
@@ -300,15 +328,12 @@
 
        nil)]))
 
-(rum/defcs picker < rum/reactive
-  {:will-mount (fn [state]
-                 (state/clear-selection!)
-                 state)}
-  (rum/local nil ::mode)                ; pick mode
-  (rum/local nil ::property)
-  (rum/local false ::private-property?)
-  [state *tree loc clause opts]
-  (let [*mode (::mode state)
+(hsx/defc picker
+  [*tree loc clause opts]
+  (let [*mode (hooks/use-memo #(atom nil) []) ; pick mode
+        *property (hooks/use-memo #(atom nil) [])
+        *private-property? (hooks/use-memo #(atom false) [])
+        [mode] (hooks/use-atom *mode)
         filters query-builder/db-based-block-filters
         filters-and-ops (concat filters query-builder/operators)
         operator? #(contains? query-builder/operators-set (keyword %))
@@ -316,10 +341,14 @@
                              {:value value
                               :label (filter-label value)})
                            (map name filters-and-ops))]
+    (hooks/use-effect!
+     (fn []
+       (state/clear-selection!))
+     [])
     [:div.query-builder-picker
-     (if @*mode
-       (when-not (operator? @*mode)
-         (db-based-query-filter-picker state *tree loc clause opts))
+     (if mode
+       (when-not (operator? mode)
+         (db-based-query-filter-picker *mode *property *private-property? *tree loc clause opts))
        [:div
         (select
          select-items
@@ -336,7 +365,7 @@
                           value))
           :input-default-placeholder (t :query.builder/add-filter-or-operator-placeholder)})])]))
 
-(rum/defc add-filter
+(hsx/defc add-filter
   [*tree loc clause]
   (shui/button
    {:class "jtrigger !px-1 h-6 add-filter text-muted-foreground"
@@ -353,11 +382,58 @@
 
 (declare clauses-group)
 
-(defn- uuid->page-title
+(def ^:private built-in-uuid->entity
+  (into {}
+        (concat
+         (keep (fn [[ident {:keys [title]}]]
+                 (when title
+                   [(common-uuid/gen-uuid :db-ident-block-uuid ident)
+                    {:db/ident ident
+                     :block/title title}]))
+               db-class/built-in-classes)
+         (keep (fn [[ident {:keys [title]}]]
+                 (when title
+                   [(common-uuid/gen-uuid :db-ident-block-uuid ident)
+                    {:db/ident ident
+                     :block/title title}]))
+               db-property/built-in-properties)
+         (mapcat (fn [[_ {:keys [closed-values]}]]
+                   (keep (fn [{:keys [db-ident value uuid]}]
+                           (when (and uuid value)
+                             [uuid {:db/ident db-ident
+                                    :block/title value}]))
+                         closed-values))
+                 db-property/built-in-properties))))
+
+(defn- coerce-uuid
   [s]
-  (if (and (string? s) (common-util/uuid-string? s))
-    (:block/title (db/entity [:block/uuid (uuid s)]))
-    s))
+  (cond
+    (uuid? s) s
+    (symbol? s) (coerce-uuid (str s))
+    (string? s) (parse-uuid s)
+    :else nil))
+
+(defn- built-in-title
+  [s]
+  (when-let [entity (some-> (coerce-uuid s) built-in-uuid->entity)]
+    (or (db-property/built-in-display-title entity t)
+        (:block/title entity))))
+
+(hsx/defc loaded-page-title
+  [block-uuid fallback]
+  (let [entity (db-hooks/use-block block-uuid)]
+    (or (:block/title entity) fallback)))
+
+(defn- page-title
+  [s]
+  (if-let [block-uuid (coerce-uuid s)]
+    (or (built-in-title block-uuid)
+        (loaded-page-title block-uuid (str s)))
+    (str s)))
+
+(defn- page-title-string
+  [s]
+  (or (built-in-title s) (str s)))
 
 (defn- dsl-human-output
   [clause]
@@ -370,32 +446,31 @@
       (t :query.builder/search-label clause)
 
       (= (keyword f) :page-ref)
-      (ref/->page-ref (uuid->page-title (second clause)))
+      [:span page-ref/left-brackets (page-title (second clause)) page-ref/right-brackets]
 
       (contains? #{:tags} (keyword f))
-      (cond
-        (string? (second clause))
-        (str "#" (uuid->page-title (second clause)))
-        (symbol? (second clause))
-        (str "#" (uuid->page-title  (str (second clause))))
-        :else
-        (str "#" (uuid->page-title (second (second clause)))))
+      [:span "#" (page-title (cond
+                               (string? (second clause))
+                               (second clause)
+                               (symbol? (second clause))
+                               (str (second clause))
+                               :else
+                               (second (second clause))))]
 
       (contains? #{:property :private-property} (keyword f))
-      (str (if (qualified-keyword? (second clause))
-             (:block/title (db/entity (second clause)))
-             (some-> (second clause) name))
-           ": "
-           (uuid->page-title
-            (cond
-              (and (vector? (last clause)) (= :page-ref (first (last clause))))
-              (second (last clause))
+      [:span (if (qualified-keyword? (second clause))
+               (property-title (second clause))
+               (some-> (second clause) name))
+       ": "
+       (cond
+         (and (vector? (last clause)) (= :page-ref (first (last clause))))
+         (page-title (second (last clause)))
 
-              (= 2 (count clause))
-              "ALL"
+         (= 2 (count clause))
+         (t :query.builder/all-values-label)
 
-              :else
-              (last clause))))
+         :else
+         (page-title (last clause)))]
 
       ;; between timestamp start (optional end)
       (and (= (keyword f) :between) (query-dsl/get-timestamp-property clause))
@@ -409,16 +484,16 @@
                         (symbol? end))
                   (name end)
                   (second end))]
-        (str (cond
-               (= k :block/created-at)
-               (t :query.builder/created-label)
-               (= k :block/updated-at)
-               (t :query.builder/updated-label)
-               :else
-               (or (:block/title (db/entity k)) (name k)))
-             " " start
-             (when end
-               (str " ~ " end))))
+        [:span (cond
+                 (= k :block/created-at)
+                 (t :query.builder/created-label)
+                 (= k :block/updated-at)
+                 (t :query.builder/updated-label)
+                 :else
+                 (property-title k))
+               " " start
+               (when end
+                 (str " ~ " end))])
 
       ;; between journal start end
       (= (keyword f) :between)
@@ -430,7 +505,7 @@
                         (symbol? (last clause)))
                   (name (last  clause))
                   (second (last clause)))]
-        (t :query.builder/between-journal-label (uuid->page-title start) (uuid->page-title end)))
+        (t :query.builder/between-journal-label (page-title-string start) (page-title-string end)))
 
       (contains? #{:task :priority} (keyword f))
       (str (name f) ": "
@@ -447,7 +522,7 @@
       :else
       (str (query-builder/->dsl clause)))))
 
-(rum/defc clause-inner
+(hsx/defc clause-inner
   [*tree loc clause & {:keys [operator?]}]
   (let [popup [:div.p-4.flex.flex-col.gap-2
                [:a {:title (t :ui/delete)
@@ -499,7 +574,7 @@
        [:a.flex.query-clause {:on-click #(shui/popup-show! (.-target %) popup {:align :start})}
         (dsl-human-output clause)]])))
 
-(rum/defc clause
+(hsx/defc clause
   [*tree *find loc clauses]
   (when (seq clauses)
     [:div.query-builder-clause
@@ -512,7 +587,7 @@
           [:div.clause-bracket ")"]]
          (clause-inner *tree loc clauses)))]))
 
-(rum/defc clauses-group
+(hsx/defc clauses-group
   [*tree *find loc kind clauses]
   (let [parens? (and (= loc [0]) (or (not= kind :and) (> (count clauses) 1)))]
     [:div.clauses-group
@@ -533,9 +608,9 @@
      (when (not= loc [0])
        (add-filter *tree loc []))]))
 
-(rum/defc clause-tree < rum/reactive
+(hsx/defc clause-tree
   [*tree *find]
-  (let [tree (rum/react *tree)
+  (let [[tree] (hooks/use-atom *tree)
         kind ((set query-builder/operators) (first tree))
         [kind' clauses] (if kind
                           [kind (rest tree)]
@@ -559,55 +634,54 @@
                   (:block/title block)
                   "")))
 
-(rum/defcs builder <
-  (rum/local nil ::find)
-  {:init (fn [state]
-           (let [block (first (:rum/args state))
-                 q-str (get-q block)
-                 query (common-util/safe-read-string
-                        query-dsl/custom-readers
-                        (query-dsl/pre-transform-query q-str))
-                 query' (cond
-                          (contains? #{'and 'or 'not} (first query))
-                          query
+(hsx/defc builder
+  [_block _option]
+  (let [*find (hooks/use-memo #(atom nil) [])
+        *tree (hooks/use-memo
+               #(let [q-str (get-q _block)
+                      query (common-util/safe-read-string
+                             query-dsl/custom-readers
+                             (query-dsl/pre-transform-query q-str))
+                      query' (cond
+                               (contains? #{'and 'or 'not} (first query))
+                               query
 
-                          query
-                          [:and query]
+                               query
+                               [:and query]
 
-                          :else
-                          [:and])
-                 tree (query-builder/from-dsl query')
-                 *tree (atom tree)]
-             (add-watch *tree :updated (fn [_ _ _old _new]
-                                         (when block
-                                           (let [q (if (= [:and] @*tree)
-                                                     ""
-                                                     (let [result (query-builder/->dsl @*tree)]
-                                                       (if (string? result)
-                                                         (util/format "\"%s\"" result)
-                                                         (str result))))
-                                                 repo (state/get-current-repo)
-                                                 block (db/entity [:block/uuid (:block/uuid block)])]
-                                             (editor-handler/save-block! repo (:block/uuid block) q)))))
-             (assoc state ::tree *tree)))
-   :will-mount (fn [state]
-                 (let [q-str (get-q (first (:rum/args state)))
-                       blocks-query? (:blocks? (query-dsl/parse-query q-str (db/get-db)))
-                       find-mode (cond
-                                   blocks-query?
-                                   :block
-                                   (false? blocks-query?)
-                                   :page
-                                   :else
-                                   nil)]
-                   (when find-mode (reset! (::find state) find-mode))
-                   state))}
-  [state _block _option]
-  (let [*find (::find state)
-        *tree (::tree state)]
+                               :else
+                               [:and])]
+                  (atom (query-builder/from-dsl query')))
+               [_block])
+        [tree] (hooks/use-atom *tree)]
+	    (hooks/use-effect!
+	     (fn []
+	       (let [q-str (get-q _block)
+	             blocks-query? (some? (re-find #"(between|property|private-property|todo|task|priority|page|\"[^\"]+\")" q-str))
+	             find-mode (cond
+                         blocks-query?
+                         :block
+                         (false? blocks-query?)
+                         :page
+                         :else
+                         nil)]
+         (when find-mode (reset! *find find-mode)))
+       (add-watch *tree :updated
+                  (fn [_ _ _old _new]
+                    (when _block
+                      (let [q (if (= [:and] @*tree)
+                                ""
+                                (let [result (query-builder/->dsl @*tree)]
+                                  (if (string? result)
+                                    (util/format "\"%s\"" result)
+                                    (str result))))
+                            repo (state/get-current-repo)]
+                        (editor-handler/save-block! repo (:block/uuid _block) q)))))
+       #(remove-watch *tree :updated))
+     [_block *tree])
     [:div.cp__query-builder
      [:div.cp__query-builder-filter
-      (when (and (seq @*tree)
-                 (not= @*tree [:and]))
+      (when (and (seq tree)
+                 (not= tree [:and]))
         (clause-tree *tree *find))
       (add-filter *tree [0] [])]]))

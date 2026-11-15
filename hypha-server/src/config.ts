@@ -8,7 +8,7 @@
  * with defaults (per AGENTS.md "Error handling and compatibility").
  */
 
-import { generateKeyPair, exportJWK, type JWK, type KeyLike } from "jose";
+import { generateKeyPair, exportJWK, SignJWT, type JWK, type KeyLike } from "jose";
 
 export interface HyphaConfig {
   port: number;
@@ -63,6 +63,37 @@ function requireEnv(name: string): string {
   return v;
 }
 
+/** bcrypt hash as produced by bin/hypha-gen-access-hash (60 chars). */
+const BCRYPT_HASH = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
+
+function requireBcryptHash(name: string, value: string): string {
+  if (!BCRYPT_HASH.test(value)) {
+    // bcrypt.compare() answers false for anything else, so every login
+    // would fail with "invalid access code" and nothing would say why. The
+    // usual cause is an unquoted hash in .env: docker compose expands the
+    // "$2b$12$..." segments as variables.
+    throw new Error(
+      `${name} is not a bcrypt hash (expected 60 characters starting with $2a$/$2b$/$2y$). ` +
+        `In .env, quote it with single quotes: ${name}='$2b$12$...'`,
+    );
+  }
+  return value;
+}
+
+function parseIntEnv(name: string, value: string, min: number): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min) {
+    throw new Error(`${name} must be an integer >= ${min} (got "${value}")`);
+  }
+  return n;
+}
+
+function parseBoolEnv(name: string, value: string): boolean {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be "true" or "false" (got "${value}")`);
+}
+
 function envOr(name: string, fallback: string): string {
   const v = process.env[name];
   return v && v.length > 0 ? v : fallback;
@@ -78,20 +109,28 @@ function envOr(name: string, fallback: string): string {
  */
 export async function loadConfig(): Promise<HyphaRuntime> {
   const config: HyphaConfig = {
-    port: Number(envOr("PORT", "3000")),
+    port: parseIntEnv("PORT", envOr("PORT", "3000"), 0),
     host: envOr("HOST", "0.0.0.0"),
     username: envOr("HYPHA_USERNAME", "hypha-user"),
     userUuid: envOr("HYPHA_USER_UUID", "00000000-0000-0000-0000-000000000001"),
     email: envOr("HYPHA_USER_EMAIL", "user@hypha.local"),
-    accessCodeHash: requireEnv("HYPHA_ACCESS_CODE_HASH"),
+    accessCodeHash: requireBcryptHash("HYPHA_ACCESS_CODE_HASH", requireEnv("HYPHA_ACCESS_CODE_HASH")),
     jwtIssuer: requireEnv("HYPHA_JWT_ISSUER"),
     jwtAudience: requireEnv("HYPHA_JWT_AUDIENCE"),
     jwtTtl: envOr("HYPHA_JWT_TTL", "30d"),
-    sessionTtlSeconds: Number(envOr("HYPHA_SESSION_TTL_SECONDS", "2592000")),
-    cookieSecure: envOr("HYPHA_COOKIE_SECURE", "false") === "true",
+    sessionTtlSeconds: parseIntEnv(
+      "HYPHA_SESSION_TTL_SECONDS",
+      envOr("HYPHA_SESSION_TTL_SECONDS", "2592000"),
+      1,
+    ),
+    // Unset: Secure whenever the public URL (the issuer) is https.
+    cookieSecure: parseBoolEnv(
+      "HYPHA_COOKIE_SECURE",
+      envOr("HYPHA_COOKIE_SECURE", requireEnv("HYPHA_JWT_ISSUER").startsWith("https://") ? "true" : "false"),
+    ),
     signingKid: envOr("HYPHA_SIGNING_KID", "hypha-key-1"),
     staticDirs: [],
-    dbSyncInternalPort: Number(envOr("HYPHA_DB_SYNC_PORT", "8787")),
+    dbSyncInternalPort: parseIntEnv("HYPHA_DB_SYNC_PORT", envOr("HYPHA_DB_SYNC_PORT", "8787"), 0),
     dataDir: requireEnv("HYPHA_DATA_DIR"),
   };
 
@@ -102,6 +141,16 @@ export async function loadConfig(): Promise<HyphaRuntime> {
   publicJwk.kid = config.signingKid;
   publicJwk.use = "sig";
   publicJwk.alg = "RS256";
+
+  // An invalid HYPHA_JWT_TTL would otherwise only fail at the first login.
+  try {
+    await new SignJWT({})
+      .setProtectedHeader({ alg: "RS256" })
+      .setExpirationTime(config.jwtTtl)
+      .sign(privateKey);
+  } catch {
+    throw new Error(`HYPHA_JWT_TTL is not a valid duration (got "${config.jwtTtl}", e.g. "30d" or "1h")`);
+  }
 
   return {
     ...config,

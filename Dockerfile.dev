@@ -14,6 +14,7 @@
 #   - Clojure CLI       1.12.4.1618 (CI CLOJURE_VERSION)
 #   - Babashka          1.12.215     (CI BABASHKA_VERSION)
 #   - pnpm              10.33.0      (root package.json packageManager)
+#   - OCaml             5.1.1        (CI OCAML_VERSION, builds the cli/ CLI)
 #
 # This is the DEV image. Production images live in Dockerfile.hypha (M3,
 # different concern). They are intentionally separate so dev tooling does
@@ -33,6 +34,7 @@ ARG NODE_MAJOR=24
 ARG CLOJURE_VERSION=1.12.4.1618
 ARG BABASHKA_VERSION=1.12.215
 ARG PNPM_VERSION=10.33.0
+ARG OCAML_VERSION=5.1.1
 ARG USER_UID=1000
 ARG USER_GID=1000
 
@@ -60,6 +62,8 @@ RUN apt-get update \
         build-essential rlwrap procps \
         python3 \
         libsecret-1-dev \
+        # opam + OCaml compiler build deps for the cli/ (OCaml/Melange) CLI.
+        opam m4 unzip rsync patch pkg-config \
         # Playwright headless-chromium runtime deps (M4 headless-auth smoke).
         # Mirrors `npx playwright install-deps chromium` on Ubuntu 22.04 so
         # operators can run the spec without sudo inside the container.
@@ -116,13 +120,26 @@ RUN if ! getent group ${USER_GID} >/dev/null 2>&1; then groupadd --gid ${USER_GI
 WORKDIR /workspace
 USER dev
 
-ENV HOME=/home/dev
+ENV HOME=/home/dev \
+    OPAMROOT=/home/dev/.opam \
+    OPAMYES=1
+
+# --- OCaml switch for cli/ -------------------------------------------------
+#
+# The compiler lives in the image; the CLI's opam packages are installed into
+# the hypha-opam volume on first use (Docker seeds the empty volume from this
+# directory), via `bin/dev bash -c 'cd cli && opam install . --deps-only --with-test'`.
+# No sandboxing: bubblewrap needs privileges the dev container does not have.
+RUN opam init --bare --disable-sandboxing --no-setup \
+ && opam switch create default ${OCAML_VERSION} \
+ && opam clean --all-switches --download-cache --logs
 
 # Smoke labels for sanity-checking the built image
 LABEL org.hypha.toolchain.node="${NODE_MAJOR}.x" \
       org.hypha.toolchain.clojure="${CLOJURE_VERSION}" \
       org.hypha.toolchain.babashka="${BABASHKA_VERSION}" \
-      org.hypha.toolchain.pnpm="${PNPM_VERSION}"
+      org.hypha.toolchain.pnpm="${PNPM_VERSION}" \
+      org.hypha.toolchain.ocaml="${OCAML_VERSION}"
 
 # Default: interactive shell. Compose / bin/dev overrides this per call.
 CMD ["bash"]

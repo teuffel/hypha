@@ -29,30 +29,40 @@
                   (is (= "fresh-jwt" (state/get-auth-id-token)))
                   (state/set-auth-id-token orig-token))))))
 
-(deftest-async refresh-hypha-id-token-resolves-nil-on-non-200
+(deftest-async refresh-hypha-id-token-resolves-nil-on-session-loss
   (let [orig-token (state/get-auth-id-token)
-        stub-fetch (fn [] (async-resp {:status 401
-                                       :body {:error "unauthorized"}}))]
+        statuses (atom [401 403])
+        stub-fetch (fn [] (async-resp {:status (first @statuses)
+                                       :body {:error "no_session"}}))]
     (state/set-auth-id-token "pre-existing")
-    (-> (hypha-auth/<refresh-hypha-id-token! stub-fetch)
-        (p/then (fn [result]
-                  (is (nil? result)
-                      "401 → resolves nil; caller decides whether to surface login")
-                  (is (= "pre-existing" (state/get-auth-id-token))
-                      "401 must not clear the existing token")
-                  (state/set-auth-id-token orig-token))))))
+    (p/let [on-401 (hypha-auth/<refresh-hypha-id-token! stub-fetch)
+            _ (swap! statuses rest)
+            on-403 (hypha-auth/<refresh-hypha-id-token! stub-fetch)]
+      (is (nil? on-401)
+          "401 → resolves nil; caller decides whether to surface login")
+      (is (nil? on-403))
+      (is (= "pre-existing" (state/get-auth-id-token))
+          "session loss must not clear the existing token")
+      (state/set-auth-id-token orig-token))))
 
-(deftest-async refresh-hypha-id-token-resolves-nil-when-body-missing-id-token
-  (let [orig-token (state/get-auth-id-token)
-        stub-fetch (fn [] (async-resp {:status 200
-                                       :body {}}))]
-    (state/set-auth-id-token nil)
-    (-> (hypha-auth/<refresh-hypha-id-token! stub-fetch)
-        (p/then (fn [result]
-                  (is (nil? result)
-                      "200 without id-token → treat as session-lost")
-                  (is (nil? (state/get-auth-id-token)))
-                  (state/set-auth-id-token orig-token))))))
+(defn- <refresh-outcome
+  [resp]
+  (-> (hypha-auth/<refresh-hypha-id-token! (fn [] (async-resp resp)))
+      (p/then (fn [v] {:resolved v}))
+      (p/catch (fn [e] {:rejected (ex-data e)}))))
+
+(deftest-async refresh-hypha-id-token-rejects-when-session-state-is-unknown
+  (let [orig-token (state/get-auth-id-token)]
+    (state/set-auth-id-token "pre-existing")
+    (p/let [offline (<refresh-outcome {:status 0 :error-text "net::ERR_INTERNET_DISCONNECTED"})
+            server-error (<refresh-outcome {:status 502 :body "bad gateway"})
+            missing-token (<refresh-outcome {:status 200 :body {}})]
+      (is (= {:rejected {:code :hypha-refresh-failed :status 0}} offline)
+          "offline is not a session loss")
+      (is (= {:rejected {:code :hypha-refresh-failed :status 502}} server-error))
+      (is (= {:rejected {:code :hypha-refresh-failed :status 200}} missing-token))
+      (is (= "pre-existing" (state/get-auth-id-token)))
+      (state/set-auth-id-token orig-token))))
 
 (deftest-async start-refresh-loop-is-idempotent
   (let [intervals-set (atom 0)
@@ -72,3 +82,24 @@
     (set! js/setInterval orig-set-interval)
     (set! js/clearInterval orig-clear-interval)
     (p/resolved nil)))
+
+(defn- jwt-for-sub
+  [sub n]
+  (str "h." (js/btoa (js/JSON.stringify #js {:sub sub :n n})) ".s"))
+
+(deftest-async refresh-hypha-id-token-keeps-the-session-of-the-same-user
+  (let [orig-token (state/get-auth-id-token)
+        orig-graphs (state/get-state :rtc/graphs)
+        first-token (jwt-for-sub "user-1" 1)
+        graphs [{:graph-uuid "g1"}]]
+    (state/set-auth-id-token nil)
+    (-> (p/let [_ (hypha-auth/<refresh-hypha-id-token!
+                   (fn [] (async-resp {:status 200 :body {:id-token first-token}})))
+                _ (state/set-state! :rtc/graphs graphs)
+                _ (hypha-auth/<refresh-hypha-id-token!
+                   (fn [] (async-resp {:status 200 :body {:id-token (jwt-for-sub "user-1" 2)}})))]
+          (is (= graphs (state/get-state :rtc/graphs))
+              "a re-minted token of the same user is not a user switch"))
+        (p/finally (fn []
+                     (state/set-auth-id-token orig-token)
+                     (state/set-state! :rtc/graphs orig-graphs))))))

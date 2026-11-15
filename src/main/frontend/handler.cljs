@@ -5,6 +5,7 @@
             [electron.ipc :as ipc]
             [electron.listener :as el]
             [frontend.components.block :as block]
+            [frontend.components.block.breadcrumb :as block-breadcrumb]
             [frontend.components.content :as cp-content]
             [frontend.components.editor :as editor]
             [frontend.components.page :as page]
@@ -12,7 +13,6 @@
             [frontend.components.user.login :as user.login]
             [frontend.config :as config]
             [frontend.context.i18n :as i18n]
-            [frontend.db.react :as react]
             [frontend.db.restore :as db-restore]
             [frontend.error :as error]
             [frontend.handler.command-palette :as command-palette]
@@ -52,17 +52,11 @@
           (when-not (error/ignored? message)
             (log/error :exception error)))))
 
-(defn- watch-for-date!
-  []
-  (let [f (fn []
-            (page-handler/create-today-journal!))]
-    (f)
-    (js/setInterval f 3000)))
-
 (defn restore-and-setup!
   [repo]
   (when repo
     (-> (p/let [_ (db-restore/restore-graph! repo)
+                _ (repo-handler/<restore-date-formatter! repo)
                 _ (graph-handler/<upsert-current-graph-registry!)]
           (graph-handler/remember-current-graph-id-in-tab!)
           (repo-config-handler/start {:repo repo}))
@@ -89,7 +83,7 @@
 
            (page-handler/init-commands!)
 
-           (watch-for-date!)))
+           (page-handler/watch-for-date!)))
         (p/catch (fn [error]
                    (log/error :exception error))))))
 
@@ -110,7 +104,7 @@
   (state/set-component! :block/linked-references reference/references)
   (state/set-component! :block/container block/block-container)
   (state/set-component! :block/inline-title block/inline-title)
-  (state/set-component! :block/breadcrumb block/breadcrumb)
+  (state/set-component! :block/breadcrumb block-breadcrumb/breadcrumb)
   (state/set-component! :block/reference block/block-reference)
   (state/set-component! :block/blocks-container block/blocks-container)
   (state/set-component! :block/properties-cp block/db-properties-cp)
@@ -149,85 +143,85 @@
 
 (defn start!
   [render]
-  (let [t1 (util/time-ms)]
-    (p/do!
-     (idb/start)
-     (get-system-info)
-     (plugin-handler/setup!)
-     (render))
+  (state/set-db-restoring! true)
+  (let [t1 (util/time-ms)
+        ui-ready (p/do!
+                  (idb/start)
+                  (get-system-info)
+                  (plugin-handler/setup!)
+                  (render))]
 
-    (set-global-error-notification!)
+      (set-global-error-notification!)
 
-    (register-components-fns!)
-    (user-handler/restore-tokens-from-localstorage)
-    (when hypha-config/hypha-mode?
-      (hypha-init/start!))
-    (user.login/setup-configure!)
-    (state/set-db-restoring! true)
-    (when (util/electron?)
-      (el/listen!))
+      (register-components-fns!)
+      (user-handler/restore-tokens-from-localstorage)
+      (when hypha-config/hypha-mode?
+        (hypha-init/start!))
+      (user.login/setup-configure!)
+      (when (util/electron?)
+        (el/listen!))
 
-    (i18n/start)
-    (instrument/init)
+      (i18n/start)
+      (instrument/init)
 
-    (react/run-custom-queries-when-idle!)
+      (events/run!)
 
-    (events/run!)
+      (log/info ::start-web-worker {})
 
-    (log/info ::start-web-worker {})
+      (-> ui-ready
+          (p/then
+           (fn []
+             (p/let [t2 (util/time-ms)
+                     _ (persist-db/<start-runtime!)
+                     _ (log/info ::db-worker-spent-time (- (util/time-ms) t2))
+                     repos (repo-handler/get-repos)
+                     _ (state/set-repos! repos)
+                     _ (mobile-util/hide-splash) ;; hide splash as early as ui is stable
+                     url-target (current-url-target)
+                     registry (graph-handler/<get-graph-registry)
+                     target-repo (when (seq url-target)
+                                   (:repo (graph-handler/resolve-registry-target
+                                           (concat registry
+                                                   (graph-handler/registry-from-repo-summaries repos))
+                                           url-target)))
+                     _ (when (and (seq (:graph-id url-target)) (nil? target-repo))
+                         (log/warn :url-target/unresolved-graph-id url-target))
+                     repo (graph-handler/resolve-startup-repo
+                           registry
+                           repos
+                           url-target
+                           (graph-handler/get-tab-graph)
+                           (state/get-current-repo))
+                     ;; HYPHA-PATCH-014: in Hypha mode, skip the demo-graph
+                     ;; auto-create when there are no local repos. Stock Logseq
+                     ;; assumes "no repos" means "first-run user, give them the
+                     ;; tutorial". In Hypha that assumption is wrong: a fresh
+                     ;; browser session typically already has remote graphs on
+                     ;; the user's own server. Auto-creating a demo-graph
+                     ;; sticks the user into a graph with tutorial contents
+                     ;; that they may mistake for theirs, and the next upload
+                     ;; attempt hits the Patch #13 name-collision dialog.
+                     ;; Letting the graph-picker render empty (briefly) is the
+                     ;; correct UX — frontend.hypha.init/start! fires
+                     ;; <fetch-remote-graphs-after-login! in parallel and
+                     ;; populates :rtc/graphs within a second or two.
+                     _ (cond
+                         (and (empty? repos) (not hypha-config/hypha-mode?))
+                         (repo-handler/new-db! config/demo-repo)
 
-    (p/do!
-     (-> (p/let [t2 (util/time-ms)
-                 _ (persist-db/<start-runtime!)
-                 _ (log/info ::db-worker-spent-time (- (util/time-ms) t2))
-                 repos (repo-handler/get-repos)
-                 _ (state/set-repos! repos)
-                 _ (mobile-util/hide-splash) ;; hide splash as early as ui is stable
-                 url-target (current-url-target)
-                 registry (graph-handler/<get-graph-registry)
-                 target-repo (when (seq url-target)
-                               (:repo (graph-handler/resolve-registry-target
-                                       (concat registry
-                                               (graph-handler/registry-from-repo-summaries repos))
-                                       url-target)))
-                 _ (when (and (seq (:graph-id url-target)) (nil? target-repo))
-                     (log/warn :url-target/unresolved-graph-id url-target))
-                 repo (graph-handler/resolve-startup-repo
-                       registry
-                       repos
-                       url-target
-                       (graph-handler/get-tab-graph)
-                       (state/get-current-repo))
-                 ;; HYPHA-PATCH-014: in Hypha mode, skip the demo-graph
-                 ;; auto-create when there are no local repos. Stock Logseq
-                 ;; assumes "no repos" means "first-run user, give them the
-                 ;; tutorial". In Hypha that assumption is wrong: a fresh
-                 ;; browser session typically already has remote graphs on
-                 ;; the user's own server. Auto-creating a demo-graph
-                 ;; sticks the user into a graph with tutorial contents
-                 ;; that they may mistake for theirs, and the next upload
-                 ;; attempt hits the Patch #13 name-collision dialog.
-                 ;; Letting the graph-picker render empty (briefly) is the
-                 ;; correct UX — frontend.hypha.init/start! fires
-                 ;; <fetch-remote-graphs-after-login! in parallel and
-                 ;; populates :rtc/graphs within a second or two.
-                 _ (cond
-                     (and (empty? repos) (not hypha-config/hypha-mode?))
-                     (repo-handler/new-db! config/demo-repo)
-
-                     (seq repos)
-                     (restore-and-setup! repo))
-                 _ (when target-repo
-                     (apply-url-target-route! url-target))]
-           (set-network-watcher!)
-           (when (mobile-util/native-platform?)
-             (state/restore-mobile-theme!)))
-         (p/catch (fn [e]
-                    (js/console.error "Error while restoring repos: " e)))
-         (p/finally (fn []
-                      (state/set-db-restoring! false)
-                      (p/resolve! state/app-ready-promise true)
-                      (log/info ::app-init-spent-time (- (util/time-ms) t1))))))))
+                         (seq repos)
+                         (restore-and-setup! repo))
+                     _ (when target-repo
+                         (apply-url-target-route! url-target))]
+               (set-network-watcher!)
+               (when (mobile-util/native-platform?)
+                 (state/restore-mobile-theme!)))))
+          (p/catch (fn [e]
+                     (js/console.error "Error while restoring repos: " e)))
+          (p/finally (fn []
+                       (state/set-db-restoring! false)
+                       (p/resolve! state/app-ready-promise true)
+                       (log/info ::app-init-spent-time (- (util/time-ms) t1)))))))
 
 (defn quit-and-install-new-version!
   []

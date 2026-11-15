@@ -1,45 +1,47 @@
 (ns frontend.components.reference-filters
   "References filters"
   (:require [clojure.string :as string]
-            [datascript.impl.entity :as de]
             [frontend.context.i18n :refer [t]]
-            [frontend.db :as db]
-            [frontend.db-mixins :as db-mixins]
             [frontend.handler.page :as page-handler]
             [frontend.search :as search]
+            [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [io.factorhouse.hsx.core :as hsx]
             [logseq.db.common.reference :as db-reference]
             [logseq.shui.hooks :as hooks]
-            [promesa.core :as p]
-            [rum.core :as rum]))
+            [promesa.core :as p]))
 
 (defn- frequencies-sort
   [references]
   (sort-by second #(> %1 %2) references))
 
-(rum/defc ref-button
+(hsx/defc ref-button
   [page filters ref-name ref-count]
   (let [lc-reference (string/lower-case ref-name)]
     (ui/button
-     [:span
-      ref-name
-      (when ref-count [:sup " " ref-count])]
-     :on-click (fn [e]
-                 (let [includes (set (map :block/name (:included filters)))
-                       excludes (set (map :block/name (:excluded filters)))
-                       included? (includes lc-reference)
-                       not-in-filters? (and (not included?) (not (excludes lc-reference)))
-                       shift? (.-shiftKey e)]
-                   (page-handler/db-based-save-filter! page (:db/id (db/get-page lc-reference))
-                                                       {:add? not-in-filters?
-                                                        :include? (if not-in-filters? (not shift?) included?)})))
+	     [:span
+	      ref-name
+	      (when ref-count [:sup " " ref-count])]
+	     :on-click (fn [e]
+	                 (let [includes (set (map :block/name (:included filters)))
+	                       excludes (set (map :block/name (:excluded filters)))
+	                       included? (includes lc-reference)
+	                       not-in-filters? (and (not included?) (not (excludes lc-reference)))
+	                       shift? (.-shiftKey e)]
+	                   (p/let [ref-page (state/<invoke-db-worker :thread-api/pull
+	                                                             (state/get-current-repo)
+	                                                             [:db/id]
+	                                                             [:block/name lc-reference])]
+	                     (page-handler/db-based-save-filter! page (:db/id ref-page)
+	                                                         {:add? not-in-filters?
+	                                                          :include? (if not-in-filters? (not shift?) included?)}))))
      :small? true
      :variant :outline)))
 
 (defn filtered-refs
   [page filters filtered-references* virtual?]
-  (let [filtered-references (if (de/entity? (first filtered-references*))
+  (let [filtered-references (if (:db/id (first filtered-references*))
                               (map (fn [e] [(:block/title e)]) filtered-references*)
                               filtered-references*)]
     (if (and (> (count filtered-references) 100)
@@ -58,10 +60,10 @@
        {:style {:width 500
                 :max-width 500}}
        (for [[ref-name ref-count] filtered-references]
-         (rum/with-key (ref-button page filters ref-name ref-count)
-           (str "ref-" ref-name)))])))
+         ^{:key (str "ref-" ref-name)}
+         [ref-button page filters ref-name ref-count])])))
 
-(rum/defc filter-dialog-aux
+(hsx/defc filter-dialog-aux
   [page-entity references]
   (let [[filter-search set-filter-search!] (hooks/use-state "")
         [filtered-references set-filtered-references!] (hooks/use-state references)
@@ -112,7 +114,6 @@
          [:div.mt-4
           (filtered-refs page-entity filters refs true)]))]))
 
-(rum/defc filter-dialog < rum/reactive db-mixins/query
+(hsx/defc filter-dialog
   [page references]
-  (let [page-entity (db/sub-block (:db/id page))]
-    (filter-dialog-aux page-entity references)))
+  (filter-dialog-aux page references))

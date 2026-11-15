@@ -1,7 +1,6 @@
 (ns mobile.components.selection-toolbar
   "Selection action bar, activated when swipe on a block"
   (:require [frontend.components.block.comments-model :as comments-model]
-            [frontend.db :as db]
             [frontend.context.i18n :refer [t]]
             [frontend.handler.comments :as comments-handler]
             [frontend.handler.editor :as editor-handler]
@@ -10,7 +9,7 @@
             [frontend.state :as state]
             [frontend.util.url :as url-util]
             [logseq.shui.hooks :as hooks]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn- dismiss-action-bar!
   []
@@ -25,9 +24,8 @@
 
 (defn- selected-blocks
   []
-  (->> (state/get-selection-block-ids)
-       (keep (fn [id]
-               (db/entity [:block/uuid id])))))
+  (->> (state/get-selection-blocks)
+       (filter :block/uuid)))
 
 (defn- selection-actions
   []
@@ -103,7 +101,7 @@
                    (state/clear-selection!)
                    (close!))}]))))
 
-(rum/defc action-bar
+(hsx/defc action-bar
   []
   (let [actions (selection-actions)
         action-ids (mapv :id actions)

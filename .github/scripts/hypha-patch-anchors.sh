@@ -19,9 +19,11 @@ check() {
   local expected="$3"
   local result
   result=$(bash -c "$cmd" 2>&1)
-  # Numerical comparison: -eq tolerates trailing whitespace (rg -c "1\n"),
-  # and falls through to FAIL when result is non-numeric (e.g. rg error).
-  if [[ "$result" -eq "$expected" ]] 2>/dev/null; then
+  # rg -c prints nothing when there is no match. Anything that is not a plain
+  # count (e.g. an rg error for a missing file) is a FAIL; it must not reach
+  # the arithmetic comparison, where a syntax error aborts the whole script.
+  result="${result:-0}"
+  if [[ "$result" =~ ^[0-9]+$ ]] && (( result == expected )); then
     echo "PASS: $name"
   else
     echo "FAIL: $name (expected '$expected', got '$result')"
@@ -30,8 +32,8 @@ check() {
 }
 
 # === Patch #1 ===
-check "patch-1: :user/login multimethod exists" \
-      "rg -c 'defmethod events/handle :user/login' src/main/frontend/handler/events/ui.cljs" \
+check "patch-1: :user/login event exists" \
+      "rg -c 'defevent! :user/login' src/main/frontend/handler/events/ui.cljs" \
       "1"
 
 # === Patch #2 ===
@@ -46,7 +48,7 @@ check "patch-3: logged-in? defn exists in handler/user.cljs" \
 
 # === Patch #4 ===
 check "patch-4: new-db-graph-inner component exists in components/repo.cljs" \
-      "rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
+      "rg -c '(rum|hsx)/defc new-db-graph-inner' src/main/frontend/components/repo.cljs" \
       "1"
 
 # === Patch #5 ===
@@ -89,6 +91,34 @@ check "patch-8: hypha-aware e2ee default in normalize-graph-e2ee?" \
 check "patch-9: local-uploadable-graph? defends against stale :remote? flag" \
       "rg -c 'HYPHA-PATCH-009' src/main/frontend/components/repo.cljs" \
       "1"
+
+# === Patches #10-#22 (counts measured 2026-11-14) ===
+check "patch-10: e2ee password persistence secret" "rg -c 'HYPHA-PATCH-010' src/main/frontend/worker/sync/crypt.cljs" "1"
+check "patch-11: back/forward buttons in installed PWA" "rg -c 'HYPHA-PATCH-011' src/main/frontend/components/header.cljs" "1"
+check "patch-12a: Hypha token refresh + logout in handler/user" "rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs" "2"
+check "patch-12b: worker refresh via ui-request" "rg -c 'HYPHA-PATCH-012' src/main/frontend/worker/sync/auth.cljs" "1"
+check "patch-12c: :hypha-refresh-id-token ui-action" "rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/worker.cljs" "1"
+check "patch-13a: enriched graph-already-exists error" "rg -c 'HYPHA-PATCH-013' src/main/frontend/worker/sync/upload.cljs" "1"
+check "patch-13b: name-collision catch + take-over handler" "rg -c 'HYPHA-PATCH-013' src/main/frontend/handler/db_based/sync.cljs" "2"
+check "patch-13c: resolve dialog event" "rg -c 'HYPHA-PATCH-013' src/main/frontend/handler/events/rtc.cljs" "1"
+check "patch-14a: no demo graph in Hypha mode" "rg -c 'HYPHA-PATCH-014' src/main/frontend/handler.cljs" "1"
+check "patch-14b: name-collision banner" "rg -c 'HYPHA-PATCH-014' src/main/frontend/components/repo.cljs" "3"
+check "patch-15a: literal-slash define" "rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs" "3"
+check "patch-15b: literal-slash in outliner validate" "rg -cF 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs" "2"
+check "patch-15c: literal-slash in bin/hypha-build" "rg -c 'HYPHA-LITERAL-SLASH' bin/hypha-build" "2"
+check "patch-16a: upsert page --parent in OCaml CLI" "rg -c 'HYPHA-PATCH-016' cli/lib/upsert.ml" "3"
+check "patch-16b: parent fields in the upsert spec" "rg -c 'remove_parent' cli/spec/commands/upsert.mli" "2"
+check "patch-18: :date by journal-day in OCaml CLI" "rg -c 'HYPHA-PATCH-018' cli/lib/upsert.ml" "1"
+check "patch-20: enable-history toggle" "rg -c ':property.built-in/enable-history' src/main/frontend/components/property/config.cljs" "1"
+check "patch-21a: property-history viewer" "rg -c 'property-history-cp' src/main/frontend/components/content.cljs" "2"
+check "patch-21b: property-history i18n" "rg -c ':block/property-history' src/resources/dicts/en.edn" "1"
+check "patch-22: web download binds runtime" "rg -c 'HYPHA-PATCH-022' src/main/frontend/handler/db_based/sync.cljs" "1"
+
+check "patch-25a: server confirms journaled tx-ids" "rg -c 'HYPHA-PATCH-025' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" "1"
+check "patch-25b: client acks its own tx-ids in pull/ok" "rg -c 'HYPHA-PATCH-025' src/main/frontend/worker/sync/apply_txs.cljs" "1"
+
+check "patch-26a: server pages the pull" "rg -c 'HYPHA-PATCH-026' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" "1"
+check "patch-26b: client pulls the next page" "rg -c 'HYPHA-PATCH-026' src/main/frontend/worker/sync/handle_message.cljs" "1"
 
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 

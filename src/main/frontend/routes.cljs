@@ -13,13 +13,37 @@
             [frontend.components.settings :as settings]
             [frontend.components.user.login :as login]
             [frontend.config :as config]
+            [io.factorhouse.hsx.core :as hsx]
             [logseq.shui.demo :as shui]))
 
 ;; http://localhost:3000/#?anchor=fn.1
+(hsx/defc home-route
+  [_route-match]
+  (home/home))
+
+(hsx/defc page-route
+  [route-match]
+  (page/page-cp (assoc route-match :current-page? true)))
+
+(def ^:private page-route-names #{:page :page-block})
+
+(defn use-route-paint
+  "Page routes resolve their first-paint snapshots inside the view tree; every
+   other route paints synchronously."
+  [route-match]
+  (let [option (when (contains? page-route-names (get-in route-match [:data :name]))
+                 route-match)]
+    (page/use-page-paint option)))
+
+(defn use-route-paint-ready?
+  "True once the route can paint; page routes wait for first-paint snapshots."
+  [route-match]
+  (not= :loading (:status (use-route-paint route-match))))
+
 (def routes
   [["/"
     {:name :home
-     :view home/home}]
+     :view home-route}]
 
    ["/graphs"
     {:name :graphs
@@ -27,12 +51,11 @@
 
    ["/page/:name"
     {:name :page
-     :view (fn [route-match]
-             (page/page-cp (assoc route-match :current-page? true)))}]
+     :view page-route}]
 
    ["/page/:name/block/:block-route-name"
     {:name :page-block
-     :view page/page-cp}]
+     :view page-route}]
 
    ["/all-pages"
     {:name :all-pages

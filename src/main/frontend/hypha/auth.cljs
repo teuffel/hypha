@@ -23,9 +23,8 @@
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
 
-(defn- parse-jwt-exp-ms
-  "Extract the exp claim (seconds) from a JWT payload and convert to ms.
-  Returns nil on any parse failure or missing claim."
+(defn- parse-jwt-payload
+  "The JWT payload as a keywordized map, or nil when `token` is not a JWT."
   [token]
   (when (string? token)
     (try
@@ -39,13 +38,18 @@
                               ""))
                 json-str (js/atob (-> padded
                                       (.replace (js/RegExp. "-" "g") "+")
-                                      (.replace (js/RegExp. "_" "g") "/")))
-                payload (js->clj (js/JSON.parse json-str) :keywordize-keys true)
-                exp (:exp payload)]
-            (when (number? exp)
-              (* exp 1000)))))
+                                      (.replace (js/RegExp. "_" "g") "/")))]
+            (js->clj (js/JSON.parse json-str) :keywordize-keys true))))
       (catch :default _
         nil))))
+
+(defn- parse-jwt-exp-ms
+  "Extract the exp claim (seconds) from a JWT payload and convert to ms.
+  Returns nil on any parse failure or missing claim."
+  [token]
+  (let [exp (:exp (parse-jwt-payload token))]
+    (when (number? exp)
+      (* exp 1000))))
 
 (defn ^:no-doc <fetch-session-default
   "Production /auth/session call. Wrapped so callers can pass a stub
@@ -57,9 +61,13 @@
 (defn <refresh-hypha-id-token!
   "Re-mint the id-token via /auth/session. Returns a promesa promise that
   resolves to the fresh id-token string on success, or nil when the
-  session is no longer valid (cookie expired/cleared). On nil the caller
-  is responsible for surfacing the login UI; we do not pub-event here so
-  background callers can decide quietly.
+  session is no longer valid (401/403: cookie expired/cleared). On nil the
+  caller is responsible for surfacing the login UI; we do not pub-event
+  here so background callers can decide quietly.
+
+  Any other outcome (offline `:status 0`, 5xx, malformed body) says
+  nothing about the session, so the promise rejects and the refresh loop
+  retries on its next tick.
 
   Optional `fetch-fn` overrides the /auth/session call (tests only)."
   ([]
@@ -67,18 +75,30 @@
   ([fetch-fn]
    (let [deferred (p/deferred)]
      (go
-       (let [resp (<! (fetch-fn))]
+       (let [resp (<! (fetch-fn))
+             status (:status resp)
+             id-token (get-in resp [:body :id-token])]
          (cond
-           (and (= 200 (:status resp))
-                (some? (get-in resp [:body :id-token])))
-           (let [id-token (get-in resp [:body :id-token])]
-             (state/set-auth-id-token id-token)
+           (and (= 200 status) (some? id-token))
+           (do
+             ;; The user id keys the graph session. Without it the token
+             ;; itself is the id, and every re-mint looks like a user switch
+             ;; that drops the remote graph list.
+             (state/set-auth-id-token id-token (:sub (parse-jwt-payload id-token)))
              (p/resolve! deferred id-token))
+
+           (contains? #{401 403} status)
+           (do
+             (log/info :hypha/refresh-session-lost {:status status})
+             (p/resolve! deferred nil))
 
            :else
            (do
-             (log/info :hypha/refresh-failed {:status (:status resp)})
-             (p/resolve! deferred nil)))))
+             (log/warn :hypha/refresh-failed {:status status
+                                              :error-text (:error-text resp)})
+             (p/reject! deferred (ex-info "hypha id-token refresh failed"
+                                          {:code :hypha-refresh-failed
+                                           :status status}))))))
      deferred)))
 
 ;; Tick the refresh check every 5 minutes; refresh when remaining TTL is
@@ -116,6 +136,23 @@
                                                {:error e}))))))
                   refresh-tick-ms)]
       (reset! *refresh-loop-handle handle))))
+
+(declare stop-refresh-loop!)
+
+(defn <logout!
+  "End the server session (the HttpOnly cookie cannot be cleared from
+  script) and stop refreshing. Without this a logout in the app left the
+  session alive: the next page load, or the refresh loop within minutes,
+  logged the user back in."
+  []
+  (stop-refresh-loop!)
+  (let [done (p/deferred)]
+    (go
+      (let [resp (<! (http/post "/auth/logout" {:with-credentials? true}))]
+        (when-not (= 204 (:status resp))
+          (log/warn :hypha/logout-failed {:status (:status resp)}))
+        (p/resolve! done nil)))
+    done))
 
 (defn stop-refresh-loop!
   "Stop the periodic JWT-refresh tick. Used for test cleanup and the

@@ -2,12 +2,13 @@
   "Unit tests for the Hypha Phase-1.6.1 asset cache eviction algorithm.
 
   Covers the testable core: `<evict-until!` sorts by mtime ascending,
-  stops at the byte target, and continues past unlink failures.
+  stops at the byte target, and continues past unlink failures;
+  `<evict-pass!` only runs above the quota threshold and only touches the
+  files it is handed as evictable.
 
-  `<maybe-evict!` depends on `navigator.storage.estimate()`, which is
-  unavailable in Node — that wrapper is exercised manually via the
-  Phase-1.6.1 sign-off browser smoke."
-  (:require [cljs.test :refer [is]]
+  Which assets are evictable is decided in the worker, see
+  `frontend.worker.sync.assets-test`."
+  (:require [cljs.test :refer [deftest is]]
             [frontend.hypha.asset-cache :as asset-cache]
             [frontend.test.helper :as test-helper :include-macros true
              :refer [deftest-async]]
@@ -66,3 +67,47 @@
         (p/then (fn [freed]
                   (is (= [] @calls))
                   (is (= 0 freed)))))))
+
+(deftest asset-path-matches-the-storage-layer
+  ;; frontend.worker.platform.browser stores assets under the URL-encoded
+  ;; graph name; see frontend.worker.platform-browser-test.
+  (is (= "/Lambda%20RTC/assets/69fb07e1-852f-4896-9d30-761843368fdb.png"
+         (asset-cache/asset-path {:repo "logseq_db_Lambda RTC"
+                                  :file-name "69fb07e1-852f-4896-9d30-761843368fdb.png"})))
+  (is (= "/example.org/assets/x.pdf"
+         (asset-cache/asset-path {:repo "logseq_db_example.org" :file-name "x.pdf"}))))
+
+(defn- estimate-of
+  [usage quota]
+  (fn [] (p/resolved {:usage usage :quota quota})))
+
+(deftest-async evict-pass-frees-nothing-when-no-asset-is-evictable
+  (let [calls (atom [])
+        pfs (success-pfs calls)]
+    ;; 90% used, but every asset on disk belongs to a local-only graph or
+    ;; was never uploaded, so the worker reports no candidates.
+    (-> (asset-cache/<evict-pass! pfs (estimate-of 900 1000) (fn [_pfs] (p/resolved [])))
+        (p/then (fn [freed]
+                  (is (= 0 freed))
+                  (is (= [] @calls) "nothing is unlinked"))))))
+
+(deftest-async evict-pass-evicts-only-the-files-it-is-given
+  (let [calls (atom [])
+        pfs (success-pfs calls)
+        files [{:path "/g/assets/uploaded.png" :mtime 1 :size 400}]]
+    (-> (asset-cache/<evict-pass! pfs (estimate-of 900 1000) (fn [_pfs] (p/resolved files)))
+        (p/then (fn [freed]
+                  (is (= 400 freed))
+                  (is (= ["/g/assets/uploaded.png"] @calls)))))))
+
+(deftest-async evict-pass-skips-enumeration-below-threshold
+  (let [calls (atom [])
+        files-requested? (atom false)
+        pfs (success-pfs calls)]
+    (-> (asset-cache/<evict-pass! pfs (estimate-of 500 1000) (fn [_pfs]
+                                                               (reset! files-requested? true)
+                                                               (p/resolved [])))
+        (p/then (fn [freed]
+                  (is (nil? freed))
+                  (is (false? @files-requested?))
+                  (is (= [] @calls)))))))

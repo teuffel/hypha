@@ -2,14 +2,13 @@
   (:require [clojure.string :as string]
             [frontend.config :as config]
             [frontend.context.i18n :as i18n :refer [t]]
-            [frontend.db :as db]
             [frontend.db.async :as db-async]
-            [frontend.db.model :as db-model]
             [frontend.extensions.lightbox :as lightbox]
             [frontend.extensions.pdf.windows :as pdf-windows]
             [frontend.fs :as fs]
             [frontend.handler.assets :as assets-handler]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.editor.assets :as editor-assets]
             [frontend.handler.notification :as notification]
             [frontend.handler.property :as property-handler]
             [frontend.handler.route :as route-handler]
@@ -19,9 +18,10 @@
             [frontend.util.ref :as ref]
             [logseq.common.config :as common-config]
             [logseq.graph-parser.exporter :as gp-exporter]
+            [logseq.shui.hooks :as hooks]
             [promesa.core :as p]
             [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn get-in-repo-assets-full-filename
   [url]
@@ -36,10 +36,17 @@
   [original-path & {:keys [href block]}]
   (let [web-link? (string/starts-with? original-path "http")
         protocol-link? (common-config/protocol-path? href)
+        local-asset-link? (common-config/local-protocol-asset? href)
         filename (util/node-path.basename original-path)
         ext-name "pdf"
-        url (if protocol-link?
+        url (cond
+              local-asset-link?
+              (assets-handler/normalize-asset-resource-url (fs/asset-path-normalize href))
+
+              protocol-link?
               href
+
+              :else
               (assets-handler/normalize-asset-resource-url original-path))
         filename' (if protocol-link?
                     filename
@@ -60,21 +67,28 @@
        :hls-file      (str "assets/" key ".edn")
        :original-path original-path})))
 
+(defn <highlight-color-id
+  [repo color]
+  (when color
+    (p/let [closed-values (db-async/<get-property-closed-values repo :logseq.property.pdf/hl-color)]
+      (some (fn [color-block]
+              (when (= (:block/title color-block) color)
+                (:db/id color-block)))
+            closed-values))))
+
 (defn db-based-ensure-ref-block!
   [pdf-current {:keys [id content page properties] :as hl} insert-opts]
   (when-let [pdf-block (:block pdf-current)]
-    (let [ref-block (db-model/query-block-by-uuid id)]
+    (p/let [ref-block (db-async/<get-block (state/get-current-repo) id {:children? false})]
       (if (:block/title ref-block)
         (do
           (println "[existed ref block]" ref-block)
           ref-block)
-        (let [ref-asset-id (:image content)
-              image? (not (nil? ref-asset-id))
-              text (if image? (i18n/locale-format-date (js/Date.))
-                       (:text content))
-              colors (:property/closed-values (db/entity :logseq.property.pdf/hl-color))
-              color-id (some (fn [color] (when (= (:block/title color) (:color properties))
-                                           (:db/id color))) colors)]
+        (p/let [ref-asset-id (:image content)
+                image? (not (nil? ref-asset-id))
+                text (if image? (i18n/locale-format-date (js/Date.))
+                         (:text content))
+                color-id (<highlight-color-id (state/get-current-repo) (:color properties))]
           (when color-id
             (let [properties (cond->
                               {:block/tags #{:logseq.class/Pdf-annotation}
@@ -113,10 +127,9 @@
                             '[:find (pull ?e [*])
                               :in $ ?ref-id
                               :where [?e :logseq.property/asset ?ref-id]]
-                            ref-id)
-          block-entity (db/entity ref-id)]
+                            ref-id)]
     (let [highlights (some->> data (flatten) (map #(:logseq.property.pdf/hl-value %)) (vec))
-          extra {:page (:logseq.property.asset/last-visit-page block-entity)}]
+          extra {:page (:logseq.property.asset/last-visit-page block)}]
       {:highlights highlights
        :extra (when (some #(not (nil? (% extra))) [:page]) extra)})))
 
@@ -127,7 +140,7 @@
 (defn- db-based-persist-hl-area-image
   [repo png]
   (let [file (js/File. #js [png] "pdf area highlight.png")]
-    (editor-handler/db-based-save-assets! repo [file] {:pdf-area? true})))
+    (editor-assets/db-based-save-assets! repo [file] {:pdf-area? true})))
 
 (defn- persist-hl-area-image
   [repo-url _repo-dir _current _new-hl _old-hl png]
@@ -168,13 +181,13 @@
 
 (defn update-hl-block!
   [highlight]
-  (when-let [block (db-model/get-block-by-uuid (:id highlight))]
-    (when-let [color (get-in highlight [:properties :color])]
-      (let [k :logseq.property.pdf/hl-color
-            color' (let [colors (:property/closed-values (db/entity :logseq.property.pdf/hl-color))]
-                     (some (fn [color-block] (when (= (:block/title color-block) color)
-                                               (:db/id color-block))) colors))]
-        (property-handler/set-block-property! (:block/uuid block) k color')))))
+  (when-let [repo (state/get-current-repo)]
+    (p/let [block (db-async/<get-block repo (:id highlight) {:children? false})]
+      (when-let [color (get-in highlight [:properties :color])]
+        (p/let [color-id (<highlight-color-id repo color)]
+          (property-handler/set-block-property! (:block/uuid block)
+                                                :logseq.property.pdf/hl-color
+                                                color-id))))))
 
 (defn unlink-hl-area-image$
   [^js _viewer current hl]
@@ -190,8 +203,10 @@
 
 (defn del-ref-block!
   [{:keys [id]}]
-  (when-let [block (db-model/get-block-by-uuid id)]
-    (editor-handler/delete-block-aux! block)))
+  (when-let [repo (state/get-current-repo)]
+    (p/let [block (db-async/<get-block repo id {:children? false})]
+      (when block
+        (editor-handler/delete-block-aux! block)))))
 
 (defn copy-hl-ref!
   [highlight ^js viewer]
@@ -203,7 +218,7 @@
 
 (defn get-zotero-local-pdf-path
   [path & {:keys [id]}]
-  (let [zotero-config (get-in (state/sub-config) [:zotero/settings-v2 "default"])
+  (let [zotero-config (get-in (state/get-config) [:zotero/settings-v2 "default"])
         zotero-data-directory (:zotero-data-directory zotero-config)
         zotero-linked-attachment-base-directory (:zotero-linked-attachment-base-directory zotero-config)
         relative-path (subs path 14)]
@@ -274,15 +289,16 @@
     (when (seq images)
       (lightbox/preview-images! images))))
 
-(rum/defcs area-display <
-  (rum/local nil ::src)
-  [state block]
-  (let [*src (::src state)]
+(hsx/defc area-display
+  [block]
+  (let [[src set-src!] (hooks/use-state nil)]
     (when-let [asset-path' (and block (assets-handler/get-area-block-asset-url block))]
-      (when (nil? @*src)
-        (p/let [asset-path (assets-handler/<make-asset-url asset-path')]
-          (reset! *src asset-path)))
-      (when @*src
+      (hooks/use-effect!
+       (fn []
+         (p/let [asset-path (assets-handler/<make-asset-url asset-path')]
+           (set-src! asset-path)))
+       [asset-path'])
+      (when src
         (let [asset-block (some-> block (:logseq.property.pdf/hl-image))
               resize-metadata (some-> asset-block :logseq.property.asset/resize-metadata)
               style (when-let [w (:width resize-metadata)] {:style {:width w}})]
@@ -305,7 +321,7 @@
                  :on-pointer-down util/stop
                  :on-click (fn [e]
                              (util/stop e)
-                             (-> (util/copy-image-to-clipboard (common-config/remove-asset-protocol @*src))
+                             (-> (util/copy-image-to-clipboard (common-config/remove-asset-protocol src))
                                  (p/then #(notification/show! (t :notification/copied) :success))))}
                 (ui/icon "copy")])
 
@@ -316,4 +332,4 @@
                :on-click open-lightbox!}
 
               (ui/icon "maximize")]]
-            [:img.w-full {:src @*src}]]])))))
+            [:img.w-full {:src src}]]])))))

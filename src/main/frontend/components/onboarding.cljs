@@ -27,7 +27,7 @@
 
           {:title (t :help/development-title)
            :children [[(t :help/roadmap) "https://discuss.logseq.com/t/logseq-product-roadmap/34267"]
-                      [(t :help/bug) "https://github.com/logseq/logseq/issues/new?labels=from:in-app&template=bug_report.yaml"]
+                      [(t :help/bug) "https://github.com/logseq/db-test/issues/new?labels=from:in-app&template=bug_report.yaml"]
                       [(t :help/feature) "https://discuss.logseq.com/c/feedback/feature-requests/"]
                       [(t :help/changelog) "https://docs.logseq.com/#/page/changelog"]]}
 
@@ -38,13 +38,16 @@
            :children [[(t :help/privacy) "https://blog.logseq.com/privacy-policy/"]
                       [(t :help/terms) "https://blog.logseq.com/terms/"]]}]]
 
-     (map (fn [sublist]
-            [[:p.mt-4.mb-1 [:b (:title sublist)]]
+     (map (fn [{:keys [title children]}]
+            ^{:key title}
+            [:<>
+             [:p.mt-4.mb-1 [:b title]]
              [:ul
-              (map (fn [[title href]]
-                     [:li
-                      (if href
-                        [:a {:href href :target "_blank"} title]
-                        title)])
-                   (:children sublist))]])
+              (map-indexed
+               (fn [idx [title href]]
+                 [:li {:key idx}
+                  (if href
+                    [:a {:href href :target "_blank"} title]
+                    title)])
+               children)]])
           list))])

@@ -8,7 +8,8 @@
             [frontend.state :as state]
             [frontend.util :as util]
             [goog.object :as gobj]
-            [rum.core :as rum]))
+            [logseq.shui.hooks :as hooks]
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defn- load-yt-script []
   (js/console.log "load yt script")
@@ -30,41 +31,32 @@
 (defn- use-youtube-wrapper? []
   (mobile-util/native-platform?))
 
-(defn register-player [state]
+(defn register-player [id node]
   (try
-    (let [id   (first (:rum/args state))
-          node (rum/dom-node state)]
-      (when node
-        (let [*player (atom nil)
-              player (js/window.YT.Player.
-                      node
-                      (clj->js
-                       {:events
-                        {"onReady"
-                         (fn [_e]
-                           (state/update-state! [:youtube/players]
-                                                (fn [players]
-                                                  (assoc players id @*player)))
-                           (js/console.log id " ready"))}}))]
-          (reset! *player player)
-          player)))
+    (when node
+      (let [*player (atom nil)
+            player (js/window.YT.Player.
+                    node
+                    (clj->js
+                     {:events
+                      {"onReady"
+                       (fn [_e]
+                         (state/update-state! [:youtube/players]
+                                              (fn [players]
+                                                (assoc players id @*player)))
+                         (js/console.log id " ready"))}}))]
+        (reset! *player player)
+        player))
     (catch :default _e
       nil)))
 
-(rum/defcs youtube-video <
-  rum/reactive
-  (rum/local nil ::player)
-  {:did-mount
-   (fn [state]
-     (when-not (use-youtube-wrapper?)
-       (go
-         (<! (load-youtube-api))
-         (register-player state)))
-     state)}
-  [state id {:keys [width height start] :as _opts}]
-  (let [width  (or width (min (- (util/get-width) 96)
-                              560))
-        height (or height (int (* width (/ 315 560))))
+(def ^:private default-video-width 560)
+(def ^:private default-video-height 315)
+
+(hsx/defc youtube-video
+  [id {:keys [width height start iframe-only?] :as _opts}]
+  (let [width (or width default-video-width)
+        height (or height default-video-height)
         origin (.. js/window -location -origin)
         origin-valid? (and (string? origin)
                            (re-matches #"^https?://.+" origin))
@@ -80,17 +72,31 @@
         wrapper-url (if start
                       (str wrapper-url "&start=" start)
                       wrapper-url)
-        url (if (use-youtube-wrapper?) wrapper-url direct-url)]
-    [:iframe.aspect-video
-     {:id                (str "youtube-player-" id)
-      :allow-full-screen "allowfullscreen"
-      :allow             "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-      :referrer-policy   "strict-origin-when-cross-origin"
-      :referer           "https://logseq.com"
-      :frame-border      "0"
-      :src               url
-      :height            height
-      :width             width}]))
+        url (if (use-youtube-wrapper?) wrapper-url direct-url)
+        *iframe-ref (hooks/use-ref nil)]
+    (hooks/use-effect!
+     (fn []
+       (when-not (use-youtube-wrapper?)
+         (go
+           (<! (load-youtube-api))
+           (register-player id (hooks/deref *iframe-ref)))))
+     [id])
+    (let [iframe [:iframe
+                  {:id                (str "youtube-player-" id)
+                   :ref               *iframe-ref
+                   :allow-full-screen "allowfullscreen"
+                   :allow             "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                   :referrer-policy   "strict-origin-when-cross-origin"
+                   :referer           "https://logseq.com"
+                   :frame-border      "0"
+                   :src               url}]]
+      (if iframe-only?
+        iframe
+        [:div.video-embed-shell
+         [:div.video-embed-frame
+          {:style {:width width
+                   :height height}}
+          iframe]]))))
 
 (defn seconds->display [seconds]
   (let [seconds (int seconds)
@@ -125,7 +131,7 @@
                            last)]
       (let [id (gobj/get iframe "id" "")
             id (string/replace-first id #"youtube-player-" "")]
-        (get (get @state/state :youtube/players) id)))))
+        (get (state/get-state :youtube/players) id)))))
 
 (defn- notify-timestamp-unavailable! []
   (notification/show!
@@ -137,9 +143,9 @@
   (let [f (gobj/get player method)]
     (when (fn? f) f)))
 
-(rum/defc timestamp
+(hsx/defc timestamp
   [seconds]
-  [:a.svg-small.youtube-timestamp
+  [:a.youtube-timestamp
    {:on-click (fn [e]
                 (util/stop e)
                 (if (use-youtube-wrapper?)
@@ -151,8 +157,8 @@
                        (t :youtube/player-not-ready)
                        :warning
                        false)))))}
-   svg/clock
-   (seconds->display seconds)])
+   [:span.youtube-timestamp-icon svg/clock]
+   [:span.youtube-timestamp-label (seconds->display seconds)]])
 
 (defn gen-youtube-ts-macro []
   (if (use-youtube-wrapper?)

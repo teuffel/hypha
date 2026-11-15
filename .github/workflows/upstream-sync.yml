@@ -87,6 +87,7 @@ jobs:
         if: steps.merge.outputs.result == 'clean'
         id: anchors
         run: |
+          command -v rg >/dev/null || (sudo apt-get update && sudo apt-get install -y ripgrep)
           bash .github/scripts/hypha-patch-anchors.sh > anchor-report.txt
           if grep -q "FAIL" anchor-report.txt; then
             echo "result=fail" >> $GITHUB_OUTPUT

@@ -4,7 +4,6 @@ const cp = require('child_process')
 const exec = utils.promisify(cp.exec)
 const path = require('path')
 const gulp = require('gulp')
-const replace = require('gulp-replace')
 
 const outputPath = path.join(__dirname, 'static')
 const outputJsPath = path.join(outputPath, 'js')
@@ -31,6 +30,7 @@ const staticCleanKeep = new Set([
   'package.json',
   'pnpm-lock.yaml',
 ])
+const staticInstallCommand = 'pnpm install --ignore-workspace --frozen-lockfile'
 
 const css = {
   watchCSS () {
@@ -114,21 +114,10 @@ const common = {
         'node_modules/marked/lib/marked.umd.js',
         'node_modules/@highlightjs/cdn-assets/highlight.min.js',
         'node_modules/@isomorphic-git/lightning-fs/dist/lightning-fs.min.js',
-        'packages/ui/dist/ui.js',
         'node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm',
-        'node_modules/react/umd/react.production.min.js',
-        'node_modules/react/umd/react.development.js',
-        'node_modules/react-dom/umd/react-dom.production.min.js',
-        'node_modules/react-dom/umd/react-dom.development.js',
         'node_modules/prop-types/prop-types.min.js',
         'node_modules/dompurify/dist/purify.js',
       ]).pipe(gulp.dest(path.join(outputPath, 'js'))),
-      () => gulp.src([
-        'node_modules/@tabler/icons-react/dist/umd/tabler-icons-react.min.js',
-      ]).
-        pipe(replace('"@tabler/icons-react"]={},a.react,',
-          '"tablerIcons"]={},a.React,')).
-        pipe(gulp.dest(path.join(outputPath, 'js'))),
       () => rawCopySrc([
         'node_modules/@glidejs/glide/dist/glide.min.js',
         'node_modules/@glidejs/glide/dist/css/glide.core.min.css',
@@ -156,14 +145,9 @@ const common = {
         'node_modules/marked/lib/marked.umd.js',
         'node_modules/@highlightjs/cdn-assets/highlight.min.js',
         'node_modules/@isomorphic-git/lightning-fs/dist/lightning-fs.min.js',
-        'node_modules/react/umd/react.production.min.js',
-        'node_modules/react/umd/react.development.js',
-        'node_modules/react-dom/umd/react-dom.production.min.js',
-        'node_modules/react-dom/umd/react-dom.development.js',
         'node_modules/prop-types/prop-types.min.js',
         'node_modules/interactjs/dist/interact.min.js',
         'node_modules/photoswipe/dist/umd/*.js',
-        'packages/ui/dist/ui.js',
         'node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm',
       ]).pipe(gulp.dest(path.join(outputPath, 'mobile', 'js'))),
       () => rawCopySrc([
@@ -255,28 +239,22 @@ const common = {
     cb()
   },
 
-  switchReactDevelopmentMode (cb) {
-    try {
-      const reactFrom = path.join(outputPath, 'js', 'react.development.js')
-      const reactTo = path.join(outputPath, 'js', 'react.production.min.js')
-      fs.renameSync(reactFrom, reactTo)
-
-      const reactDomFrom = path.join(outputPath, 'js',
-        'react-dom.development.js')
-      const reactDomTo = path.join(outputPath, 'js',
-        'react-dom.production.min.js')
-      fs.renameSync(reactDomFrom, reactDomTo)
-
-      cb()
-    } catch (err) {
-      console.error('Error during switchReactDevelopmentMode:', err)
-      cb(err)
+  pruneDesktopPackageFiles () {
+    for (const entry of ['mobile', 'android', 'ios']) {
+      fs.rmSync(path.join(outputPath, entry), {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      })
     }
+
+    return Promise.resolve()
   },
 }
 
 exports.electron = () => {
-  cp.execSync('pnpm install --frozen-lockfile', {
+  cp.execSync(staticInstallCommand, {
     cwd: outputPath,
     stdio: 'inherit',
   })
@@ -287,8 +265,17 @@ exports.electron = () => {
   })
 }
 
-exports.electronMaker = async () => {
+const prepareElectronMaker = async () => {
   cp.execSync('pnpm cljs:release-electron', {
+    stdio: 'inherit',
+  })
+  cp.execSync('pnpm db-worker-node:bundle', {
+    stdio: 'inherit',
+  })
+  cp.execSync('pnpm webpack-app-build', {
+    stdio: 'inherit',
+  })
+  cp.execSync('pnpm cli:release', {
     stdio: 'inherit',
   })
   cp.execSync('pnpm desktop:prepare-runtime-js', {
@@ -309,24 +296,38 @@ exports.electronMaker = async () => {
   pkg.version = version
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2))
 
+  await common.pruneDesktopPackageFiles()
+
   if (!fs.existsSync(path.join(outputPath, 'node_modules'))) {
-    cp.execSync('pnpm install --frozen-lockfile', {
+    cp.execSync(staticInstallCommand, {
       cwd: outputPath,
       stdio: 'inherit',
     })
   }
+}
 
-  cp.execSync('pnpm electron:make', {
+const runStaticScript = (script) => {
+  cp.execSync(`pnpm ${script}`, {
     cwd: outputPath,
     stdio: 'inherit',
   })
+}
+
+exports.electronMaker = async () => {
+  await prepareElectronMaker()
+  runStaticScript('electron:make')
+}
+
+exports.electronMakerUnsigned = async () => {
+  await prepareElectronMaker()
+  runStaticScript('electron:make-unsigned')
 }
 
 exports.cap = common.runCapWithLocalDevServerEntry
 exports.clean = common.clean
 exports.watch = gulp.series(
   common.syncResourceFile,
-  common.syncAssetFiles, common.switchReactDevelopmentMode,
+  common.syncAssetFiles,
   gulp.parallel(common.keepSyncResourceFile, css.watchCSS))
 exports.watchMobile = gulp.series(
   common.syncResourceFile, common.syncAssetFiles,

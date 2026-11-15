@@ -23,6 +23,7 @@
 (def snapshot-upload-max-bytes 1000000)
 (def snapshot-frame-header-bytes 4)
 (def ignored-oversized-upload-attrs #{:logseq.property.tldraw/page})
+(def snapshot-local-only-attrs #{:block/tx-id})
 (def snapshot-content-type "application/transit+json")
 (def snapshot-content-encoding "gzip")
 (def snapshot-text-encoder (js/TextEncoder.))
@@ -178,7 +179,8 @@
 (defn <prepare-upload-temp-sqlite!
   [repo graph-id source-conn aes-key update-progress]
   (p/let [temp (sync-temp-sqlite/<create-temp-sqlite-conn (d/schema @source-conn) [])
-          datoms (d/datoms @source-conn :eavt)
+          datoms (remove #(contains? snapshot-local-only-attrs (:a %))
+                         (d/datoms @source-conn :eavt))
           large-title-eids (into #{}
                                  (keep (fn [datom]
                                          (when (sync-large-title/large-title-datom? datom)
@@ -215,29 +217,23 @@
 
 (defn- normalize-graph-e2ee?
   [graph-e2ee?]
-  (if (nil? graph-e2ee?)
-    ;; HYPHA-PATCH-008: hypha-aware default for graphs with no explicit
-    ;; e2ee state (imported folder graphs, or graphs created before M9.3).
-    ;; A custom http-base (self-hosted Hypha) defaults such graphs to NO
-    ;; e2ee, so upload-graph! skips the e2ee preflight that crashed with a
-    ;; JSON.parse-on-key-decrypt error in Phase 1.6 V10. Stock Logseq.com
-    ;; (no custom http-base) keeps the safer default of true. graph-e2ee?
-    ;; itself stays a pure kv passthrough so upstream's
-    ;; graph-e2ee-preserves-nil/false-kv-value tests hold.
-    (not (seq (:http-base @worker-state/*db-sync-config)))
-    (true? graph-e2ee?)))
+  ;; HYPHA-PATCH-008: graphs with no explicit e2ee state (imported folder
+  ;; graphs, or graphs created before M9.3) are NOT e2ee, so upload-graph!
+  ;; skips the e2ee preflight that crashed with a JSON.parse-on-key-decrypt
+  ;; error in Phase 1.6 V10. Stock Logseq defaults nil to true. graph-e2ee?
+  ;; itself stays a pure kv passthrough so upstream's
+  ;; graph-e2ee-preserves-nil/false-kv-value tests hold.
+  (true? graph-e2ee?))
 
 (defn- graph-id->uuid
   [repo graph-id]
   (when-not (seq graph-id)
     (fail-fast :db-sync/missing-field {:repo repo :field :graph-id}))
-  (try
-    (uuid graph-id)
-    (catch :default e
+  ;; cljs `uuid` accepts any string; `parse-uuid` returns nil for a non-uuid
+  (or (parse-uuid graph-id)
       (fail-fast :db-sync/invalid-field {:repo repo
                                          :field :graph-id
-                                         :value graph-id
-                                         :error e}))))
+                                         :value graph-id})))
 
 (defn- set-graph-sync-metadata!
   [repo graph-id graph-e2ee?]
@@ -278,7 +274,8 @@
       :else
       (do
         (sync-util/require-auth-token! {:repo repo :field :auth-token})
-        (p/let [_ (sync-crypt/ensure-user-rsa-keys! {:ensure-server? true})
+        (p/let [_ (when graph-e2ee?
+                    (sync-crypt/ensure-user-rsa-keys! {:ensure-server? true}))
                 body (coerce-http-request :graphs/create
                                           {:graph-name graph-name
                                            :schema-version schema-version
@@ -318,11 +315,11 @@
 
 ;; HYPHA-PATCH-013: enrich the graph-already-exists error with the
 ;; remote graph's id, e2ee flag, and updated-at so the frontend's
-;; resolve dialog can offer a "Rebind to existing remote graph" action
+;; resolve dialog can offer to take over the existing remote graph
 ;; instead of leaving the user stuck. Stock Logseq throws only the
 ;; graph-name; that is enough to render an error toast but not enough
-;; to rebind. The enriched fields are additive: any caller that only
-;; reads `:graph-name` keeps working.
+;; to download the remote graph. The enriched fields are additive: any
+;; caller that only reads `:graph-name` keeps working.
 (defn- fail-upload-graph-already-exists!
   [repo {:keys [graph-id graph-name remote-graph-id remote-graph-e2ee? remote-updated-at]}]
   (throw (ex-info "remote graph already exists; delete it before uploading again"
@@ -371,30 +368,6 @@
             (<create-remote-graph-aux! repo {:graph-e2ee? graph-e2ee?
                                              :graph-ready-for-use? graph-ready-for-use?})))))))
 
-;; HYPHA-PATCH-013: rebind a local-only graph to an existing remote graph
-;; that shares its name. The frontend calls this when the user chose
-;; "verbinden" in the name-collision dialog. No upload happens — the
-;; KV bindings are written so the next RTC start treats this graph as
-;; remote, and RTC's normal merge logic reconciles local client_ops with
-;; the server. Used to avoid the Phase-1.6.2 dead-end where a local-only
-;; graph with the same name as an existing remote graph could not be
-;; uploaded (name collision) nor rebind (no UI path).
-(defn rebind-to-remote-graph!
-  [repo remote-graph-id remote-graph-e2ee?]
-  (cond
-    (not (seq repo))
-    (fail-fast :db-sync/missing-field {:field :repo})
-
-    (not (seq remote-graph-id))
-    (fail-fast :db-sync/missing-field {:repo repo :field :remote-graph-id})
-
-    :else
-    (do
-      (set-graph-sync-metadata! repo remote-graph-id (boolean remote-graph-e2ee?))
-      (ensure-client-graph-uuid! repo remote-graph-id)
-      {:graph-id remote-graph-id
-       :graph-e2ee? (boolean remote-graph-e2ee?)})))
-
 (defn upload-graph!
   [repo]
   (let [base (http-base-url)
@@ -413,8 +386,9 @@
                             (sync-crypt/<ensure-graph-aes-key repo graph-id))
                   _ (when (and graph-e2ee? (nil? aes-key))
                       (fail-fast :db-sync/missing-field {:repo repo :field :aes-key}))]
-            (let [snapshot-checksum (sync-checksum/recompute-checksum @source-conn)]
-              (client-op/update-local-checksum repo snapshot-checksum)
+            (let [db @source-conn
+                  snapshot-checksum (sync-checksum/recompute-checksum db)]
+              (client-op/update-local-checksum repo snapshot-checksum (:max-tx db))
               (p/let [_ (update-progress {:sub-type :upload-progress
                                           :message (if graph-e2ee? "Encrypting..." "Preparing...")})
                       {:keys [db] :as temp} (<prepare-upload-temp-sqlite!

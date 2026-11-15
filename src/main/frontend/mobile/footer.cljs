@@ -1,25 +1,29 @@
 (ns frontend.mobile.footer
   (:require [clojure.string :as string]
-            [frontend.db :as db]
+            [frontend.db.async :as db-async]
             [frontend.handler.editor :as editor-handler]
             [frontend.mobile.util :as mobile-util]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]
+            [promesa.core :as p]))
 
-(rum/defc mobile-bar-command [command-handler icon]
+(hsx/defc mobile-bar-command [command-handler icon]
   [:button.bottom-action
    {:on-pointer-down (fn [e]
                        (util/stop e)
                        (command-handler))}
    (ui/icon icon {:size 24})])
 
-(rum/defc footer < rum/reactive
+(hsx/defc footer
   []
-  (when (and (#{:page :home} (state/sub [:route-match :data :name]))
+  (let [route-name (rfx/use-sub [:route-match :data :name])
+        show-tabbar? (rfx/use-sub [:mobile/show-tabbar?])]
+    (when (and (#{:page :home} route-name)
              (not (state/editing?))
-             (state/sub :mobile/show-tabbar?)
+             show-tabbar?
              (state/get-current-repo))
     [:div.cp__footer.w-full.bottom-0.justify-between
      (mobile-bar-command
@@ -29,11 +33,12 @@
       "search")
      (mobile-bar-command state/toggle-document-mode! "notes")
      (mobile-bar-command
-      #(let [page (or (state/get-current-page)
-                      (string/lower-case (db/get-today-journal-title)))]
+      #(p/let [today-page-title (db-async/<get-today-journal-title (state/get-current-repo))
+               page (or (state/get-current-page)
+                        (string/lower-case today-page-title))]
          (editor-handler/api-insert-new-block!
           ""
           {:page page
            :edit-block? true
            :replace-empty-target? true}))
-      "edit")]))
+      "edit")])))

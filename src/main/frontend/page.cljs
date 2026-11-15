@@ -9,12 +9,17 @@
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.search :as search-handler]
+            [frontend.rfx :as rfx]
+            [frontend.routes :as routes]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [io.factorhouse.hsx.core :as hsx]
+            [logseq.shui.hooks :as hooks]
+            [logseq.shui.toaster.core :as shui-toaster]
             [logseq.shui.ui :as shui]
             [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            ))
 
 (defn- setup-fns!
   []
@@ -25,7 +30,7 @@
     (catch :default _e
       nil)))
 
-(rum/defc helpful-default-error-screen
+(hsx/defc helpful-default-error-screen
   "This screen is displayed when the UI has crashed hard. It provides the user
   with basic troubleshooting steps to get them back to a working state. This
   component is purposefully stupid simple as it needs to render under any number
@@ -111,10 +116,10 @@
                 (interpolate-sentence
                  (t :page/open-issue-desc)
                  :links
-                 [{:href "https://github.com/logseq/logseq/issues/new?labels=from:in-app&template=bug_report.yaml"}])]]]]]]]]]]
-     (ui/notification)]))
+                 [{:href "https://github.com/logseq/db-test/issues/new?labels=from:in-app&template=bug_report.yaml"}])]]]]]]]]]]
+     (shui-toaster/install-toaster)]))
 
-(rum/defc not-found
+(hsx/defc not-found
   []
   [:div {:class "flex flex-col items-center justify-center min-h-screen bg-background"}
    [:h1 {:class "text-6xl font-bold text-gray-12 mb-4"} "404"]
@@ -124,29 +129,50 @@
                  :variant :outline}
                 (shui/tabler-icon "home") (t :page/go-back-home))])
 
-(rum/defc current-page < rum/reactive
-  {:did-mount    (fn [state]
-                   (state/set-root-component! (:rum/react-component state))
-                   (state/setup-electron-updater!)
-                   (state/load-app-user-cfgs)
-                   (ui/inject-document-devices-envs!)
-                   (ui/inject-dynamic-style-node!)
-                   (plugin-handler/host-mounted!)
-                   (assoc state ::teardown (setup-fns!)))
-   :will-unmount (fn [state]
-                   (when-let [teardown (::teardown state)]
-                     (teardown)))}
+(defn route-view-key
+  "React key for the painted route view. Title and path strings change while
+   typing; the resolved page or zoomed-block uuid does not."
+  [route-match paint]
+  (or (some-> (get-in paint [:page :block/uuid]) str)
+      (:path route-match)
+      (get-in route-match [:data :name])))
+
+(hsx/defc route-view
+  "A route switch unmounts the previous view at once. Keep it on screen until
+   the next route can paint in a single commit instead of flashing an empty
+   main area while its snapshots load."
+  [route-match]
+  (let [paint (routes/use-route-paint route-match)
+        ready? (not= :loading (:status paint))
+        [held set-held!] (hooks/use-state nil)
+        current (when ready?
+                  {:route-match route-match
+                   :key (route-view-key route-match paint)})]
+    (when (and current (not= current held))
+      (set-held! current))
+    (when-let [painted (or current held)]
+      ^{:key (:key painted)}
+      [(:view (:data (:route-match painted))) (:route-match painted)])))
+
+(hsx/defc current-page
   []
-  (if-let [route-match (state/sub :route-match)]
-    (when-let [view (:view (:data route-match))]
-      (rum/with-key
-        (ui/catch-error-and-notify
-         (helpful-default-error-screen)
-         [:<>
-          (container/root-container
-           route-match
-           (view route-match))
-          (when config/lsp-enabled?
-            (plugin/hook-daemon-renderers))])
-        (:path route-match)))
+  (hooks/use-effect!
+   (fn []
+     (state/setup-electron-updater!)
+     (state/load-app-user-cfgs)
+     (ui/inject-document-devices-envs!)
+     (ui/inject-dynamic-style-node!)
+     (plugin-handler/host-mounted!)
+     (setup-fns!))
+   [])
+  (if-let [route-match (rfx/use-sub [:route-match])]
+    (when (:view (:data route-match))
+      (ui/catch-error-and-notify
+       (helpful-default-error-screen)
+       [:<>
+        (container/root-container
+         route-match
+         (route-view route-match))
+        (when config/lsp-enabled?
+          (plugin/hook-daemon-renderers))]))
     (not-found)))

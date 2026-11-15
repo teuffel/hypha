@@ -1,9 +1,22 @@
 (ns frontend.worker.sync.upload-test
   (:require [cljs.test :refer [async deftest is]]
+            [datascript.core :as d]
             [frontend.worker.sync.crypt :as sync-crypt]
+            [frontend.worker.sync.temp-sqlite :as sync-temp-sqlite]
+            [frontend.worker.sync.util :as sync-util]
             [frontend.worker.sync.upload :as sync-upload]
+            [logseq.db.frontend.schema :as db-schema]
             [promesa.core :as p]
             [clojure.string :as string]))
+
+(deftest graph-id->uuid-rejects-an-id-that-is-not-a-uuid-test
+  (is (= #uuid "6f1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+         (#'sync-upload/graph-id->uuid "repo" "6f1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")))
+  (let [error (try (#'sync-upload/graph-id->uuid "repo" "not-a-uuid")
+                   nil
+                   (catch :default e e))]
+    (is (= :graph-id (:field (ex-data error))))
+    (is (= "not-a-uuid" (:value (ex-data error))))))
 
 (deftest split-snapshot-rows-by-max-bytes-splits-rows-into-byte-capped-batches-test
   (let [sizes {:a 4
@@ -93,6 +106,41 @@
                 :bytes 1500000}
                (first dropped)))))))
 
+(deftest snapshot-upload-excludes-local-block-revisions-test
+  (async done
+         (let [source-conn (d/create-conn db-schema/schema)
+               first-uuid (random-uuid)
+               second-uuid (random-uuid)]
+           (d/transact! source-conn
+                        [{:block/uuid first-uuid
+                          :block/title "first"
+                          :block/tx-id 41}
+                         {:block/uuid second-uuid
+                          :block/title "second"
+                          :block/tx-id 42}])
+           (-> (p/with-redefs [sync-temp-sqlite/<create-temp-sqlite-conn
+                               (fn [schema _datoms]
+                                 (p/resolved {:conn (d/create-conn schema)}))]
+                 (#'sync-upload/<prepare-upload-temp-sqlite!
+                  "repo"
+                  "graph-id"
+                  source-conn
+                  nil
+                  (fn [& _] nil)))
+               (p/then
+                (fn [{:keys [conn]}]
+                  (is (= "first"
+                         (:block/title (d/entity @conn [:block/uuid first-uuid]))))
+                  (is (= "second"
+                         (:block/title (d/entity @conn [:block/uuid second-uuid]))))
+                  (is (empty? (filter #(= :block/tx-id (:a %))
+                                      (d/datoms @conn :eavt)))
+                      "Snapshot transport must not copy worker-local block revisions.")))
+               (p/catch
+                (fn [error]
+                  (is false (str error))))
+               (p/finally done)))))
+
 (deftest create-remote-graph-creates-new-remote-graph-when-no-remote-match-test
   (async done
          (let [calls* (atom [])]
@@ -115,6 +163,49 @@
                                  [:preflight true]
                                  [:create-aux "repo-1" {:graph-e2ee? true
                                                         :graph-ready-for-use? false}]]
+                                @calls*))))
+               (p/catch (fn [error]
+                          (is false (str "unexpected error: " error))))
+               (p/finally done)))))
+
+(deftest create-remote-graph-aux-skips-rsa-keys-for-non-e2ee-graph-test
+  (async done
+         (let [calls* (atom [])]
+           (-> (p/with-redefs [sync-crypt/<preflight-upload-e2ee! (fn [_repo graph-e2ee?]
+                                                                    (swap! calls* conj [:preflight graph-e2ee?])
+                                                                    (p/resolved nil))
+                               sync-upload/list-remote-graphs! (fn []
+                                                                  (swap! calls* conj [:list-remote-graphs])
+                                                                  (p/resolved []))
+                               sync-upload/http-base-url (fn [] "https://sync.example.test")
+                               sync-util/require-auth-token! (fn [context]
+                                                               (swap! calls* conj [:require-auth context]))
+                               sync-crypt/ensure-user-rsa-keys! (fn [opts]
+                                                                  (swap! calls* conj [:ensure-rsa opts])
+                                                                  (p/resolved nil))
+                               sync-util/fetch-json (fn [url request _opts]
+                                                      (swap! calls* conj [:fetch url request])
+                                                      (p/resolved {:graph-id "new-graph-id"
+                                                                   :graph-e2ee? false}))
+                               sync-upload/persist-upload-graph-identity! (fn [repo graph-id graph-e2ee?]
+                                                                            (swap! calls* conj [:persist repo graph-id graph-e2ee?])
+                                                                            {:graph-id graph-id
+                                                                             :graph-e2ee? graph-e2ee?})]
+                 (sync-upload/create-remote-graph! "repo-1" {:graph-e2ee? false
+                                                              :graph-ready-for-use? false}))
+               (p/then (fn [identity]
+                         (is (= {:graph-id "new-graph-id"
+                                 :graph-e2ee? false}
+                                identity))
+                         (is (not-any? #(= :ensure-rsa (first %)) @calls*))
+                         (is (= [[:list-remote-graphs]
+                                 [:preflight false]
+                                 [:require-auth {:repo "repo-1" :field :auth-token}]
+                                 [:fetch "https://sync.example.test/graphs"
+                                  {:method "POST"
+                                   :headers {"content-type" "application/json"}
+                                   :body "{\"graph-name\":\"repo-1\",\"schema-version\":null,\"graph-e2ee?\":false,\"graph-ready-for-use?\":false}"}]
+                                 [:persist "repo-1" "new-graph-id" false]]
                                 @calls*))))
                (p/catch (fn [error]
                           (is false (str "unexpected error: " error))))
@@ -147,59 +238,13 @@
                             (is (= "repo-1" (:graph-name data)))
                             ;; HYPHA-PATCH-013: enriched fields surface
                             ;; the remote identity so the frontend's
-                            ;; resolve dialog can rebind without a
-                            ;; second list-remote-graphs round-trip.
+                            ;; resolve dialog can download it without
+                            ;; a second list-remote-graphs round-trip.
                             (is (= "remote-uuid-1" (:remote-graph-id data)))
                             (is (false? (:remote-graph-e2ee? data)))
                             (is (= 1700000000000 (:remote-updated-at data))))
                           (is (false? @create-aux-called?))))
                (p/finally done)))))
-
-;; HYPHA-PATCH-013: rebind happy path — KV bindings get written and the
-;; client-op graph-uuid index updated. No HTTP call, no upload.
-(deftest rebind-to-remote-graph-writes-kv-bindings-test
-  (async done
-         (let [kv-writes (atom [])
-               client-op-graph-uuid-updates (atom [])]
-           (try
-             (-> (p/with-redefs [sync-upload/set-graph-sync-metadata!
-                                 (fn [repo graph-id graph-e2ee?]
-                                   (swap! kv-writes conj {:repo repo
-                                                          :graph-id graph-id
-                                                          :graph-e2ee? graph-e2ee?}))
-                                 sync-upload/ensure-client-graph-uuid!
-                                 (fn [repo graph-id]
-                                   (swap! client-op-graph-uuid-updates conj
-                                          {:repo repo :graph-id graph-id}))]
-                   (sync-upload/rebind-to-remote-graph! "repo-1" "remote-uuid-1" false))
-                 (p/then (fn [result]
-                           (is (= "remote-uuid-1" (:graph-id result)))
-                           (is (false? (:graph-e2ee? result)))
-                           (is (= [{:repo "repo-1"
-                                    :graph-id "remote-uuid-1"
-                                    :graph-e2ee? false}] @kv-writes))
-                           (is (= [{:repo "repo-1"
-                                    :graph-id "remote-uuid-1"}] @client-op-graph-uuid-updates))))
-                 (p/catch (fn [error]
-                            (is false (str "unexpected error: " error))))
-                 (p/finally done))
-             (catch :default e
-               (is false (str "unexpected throw: " e))
-               (done))))))
-
-(deftest rebind-to-remote-graph-fails-fast-on-empty-remote-graph-id-test
-  (async done
-         (let [kv-writes (atom 0)]
-           (try
-             (sync-upload/rebind-to-remote-graph! "repo-1" "" false)
-             (is false "expected fail-fast")
-             (catch :default error
-               (let [data (ex-data error)]
-                 ;; fail-fast puts (name tag) in ex-message and the rest in ex-data
-                 (is (= "missing-field" (ex-message error)))
-                 (is (= :remote-graph-id (:field data)))
-                 (is (zero? @kv-writes))))
-             (finally (done))))))
 
 (deftest create-remote-graph-missing-e2ee-password-does-not-create-remote-graph-test
   (async done

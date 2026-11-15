@@ -1,14 +1,15 @@
 (ns mobile.components.settings
   "Mobile settings"
   (:require [clojure.string :as string]
-            [frontend.common.missionary :as c.m]
             [frontend.components.dnd :as dnd]
+            [frontend.components.email :as email-component]
             [frontend.components.user.login :as login]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.dicts :as dicts]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.user :as user-handler]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.storage :as storage]
             [frontend.ui :as ui]
@@ -17,14 +18,13 @@
             [logseq.common.version :as build-version]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
-            [missionary.core :as m]
             [mobile.bottom-tabs :as bottom-tabs]
             [mobile.state :as mobile-state]
             [mobile.tabs :as mobile-tabs]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc user-profile
+(hsx/defc user-profile
   [login?]
   (let [username (user-handler/username)
         email (user-handler/email)
@@ -48,7 +48,9 @@
           initial]
          [:div.flex.flex-col.items-start
           [:span.text-base.font-semibold (or username (t :mobile.settings/account))]
-          [:span.text-xs email]]]])]))
+          (email-component/email-address {:email email
+                                          :class "text-xs"
+                                          :tooltip? false})]]])]))
 
 (defn theme-select
   [{:keys [value on-change]}]
@@ -80,16 +82,17 @@
   (state/pub-event! [:init/commands])
   (ui-handler/re-render-root!))
 
-(rum/defc log
+(hsx/defc log
   []
   (let [[error-only? set-error-only!]       (hooks/use-state false)
         [reversed? set-reversed!]           (hooks/use-state false)
         [show-worker-log? set-show-worker-log!] (hooks/use-state false)
         [worker-records set-worker-records!] (hooks/use-state [])]
     (hooks/use-effect!
-     #(c.m/run-task*
-       (m/sp
-        (set-worker-records! (c.m/<? (state/<invoke-db-worker :thread-api/mobile-logs)))))
+     #(do
+        (p/let [records (state/<invoke-db-worker :thread-api/mobile-logs)]
+          (set-worker-records! records))
+        nil)
      [])
     [:div.flex.flex-col.gap-1.p-2.ls-debug-log
      [:div.flex.flex-row.justify-between
@@ -167,7 +170,7 @@
      :disabled disabled?
      :on-checked-change #(toggle-tab! id %)})])
 
-(rum/defc mobile-tabs-picker
+(hsx/defc mobile-tabs-picker
   []
   (let [[custom-tab-ids set-custom-tab-ids!] (hooks/use-state
                                               (storage/get :ls-mobile-tabs))
@@ -223,13 +226,13 @@
           :sortable? false
           :toggle-tab! toggle-tab!}))]]))
 
-(rum/defc page < rum/reactive
+(hsx/defc page
   []
-  (let [login? (and (state/sub :auth/id-token)
+  (let [login? (and (rfx/use-sub [:auth/id-token])
                     (user-handler/logged-in?))
-        theme (state/sub :ui/theme)
-        system-theme? (state/sub :ui/system-theme?)
-        preferred-language (state/sub :preferred-language)
+        theme (rfx/use-sub [:ui/theme])
+        system-theme? (rfx/use-sub [:ui/system-theme?])
+        preferred-language (rfx/use-sub [:preferred-language])
         theme-value (if system-theme?
                       "system"
                       (or theme "system"))]
