@@ -937,8 +937,10 @@
  :hypha.capture/waiting-for-graph "Your capture is saved. It will be added once a graph is open."
 
  :hypha.login/access-code-placeholder "Access code"
+ :hypha.login/hide-access-code "Hide access code"
  :hypha.login/invalid-code "Invalid access code"
  :hypha.login/network-error "Could not reach the server. Please try again."
+ :hypha.login/show-access-code "Show access code"
 
  :icon/emojis-count "Emojis ({1})"
  :icon/icons-count "Icons ({1})"

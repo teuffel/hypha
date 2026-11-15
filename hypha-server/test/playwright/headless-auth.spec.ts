@@ -70,6 +70,22 @@ test.describe("Hypha headless auth smoke", () => {
     await expect(page.locator(HYPHA_LOGIN_FORM)).toBeVisible({ timeout: 25_000 });
   });
 
+  test("eye button shows and hides the typed access code", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(HYPHA_LOGIN_FORM)).toBeVisible({ timeout: 25_000 });
+    const input = page.locator(`${HYPHA_LOGIN_FORM} input`);
+    await input.fill(ACCESS_CODE);
+    await expect(input).toHaveAttribute("type", "password");
+
+    await page.getByRole("button", { name: "Show access code" }).click();
+    await expect(input).toHaveAttribute("type", "text");
+    await expect(input).toHaveValue(ACCESS_CODE);
+    await expect(input).toBeFocused();
+
+    await page.getByRole("button", { name: "Hide access code" }).click();
+    await expect(input).toHaveAttribute("type", "password");
+  });
+
   test("login modal accepts the access code and closes on success", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(HYPHA_LOGIN_FORM)).toBeVisible({ timeout: 25_000 });
