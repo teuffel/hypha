@@ -343,9 +343,11 @@
       (require-non-negative remote-tx {:repo repo :type "pull/ok"})
       (require-seq txs {:repo repo :type "pull/ok" :field :txs})
       (let [remote-txs (mapv (fn [data]
-                               {:t (:t data)
-                                :outliner-op (:outliner-op data)
-                                :tx-data (parse-transit (:tx data) {:repo repo :type "pull/ok"})})
+                               (cond-> {:t (:t data)
+                                        :outliner-op (:outliner-op data)
+                                        :tx-data (parse-transit (:tx data) {:repo repo :type "pull/ok"})}
+                                 ;; HYPHA-PATCH-025: lets apply-remote-txs! recognize its own txs.
+                                 (:tx-id data) (assoc :tx-id (:tx-id data))))
                              txs)]
         ;; (log/info ::handle-pull-remote-txs-count {:count (count remote-txs)})
         (when (seq remote-txs)

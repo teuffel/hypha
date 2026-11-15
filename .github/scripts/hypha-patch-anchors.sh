@@ -114,6 +114,9 @@ check "patch-21a: property-history viewer" "rg -c 'property-history-cp' src/main
 check "patch-21b: property-history i18n" "rg -c ':block/property-history' src/resources/dicts/en.edn" "1"
 check "patch-22: web download binds runtime" "rg -c 'HYPHA-PATCH-022' src/main/frontend/handler/db_based/sync.cljs" "1"
 
+check "patch-25a: server confirms journaled tx-ids" "rg -c 'HYPHA-PATCH-025' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs" "1"
+check "patch-25b: client acks its own tx-ids in pull/ok" "rg -c 'HYPHA-PATCH-025' src/main/frontend/worker/sync/apply_txs.cljs" "1"
+
 # Future patches: add new check() lines here, parallel to HYPHA_PATCHES.md.
 
 exit $exit_code
