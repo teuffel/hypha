@@ -11,7 +11,7 @@
      (via `frontend.config/set-custom-sync-server-url!`).
   2. Calls GET `/auth/session` to exchange the HttpOnly Hypha session cookie
      for a fresh JWT; on success, the JWT is placed into
-     `state/state[:auth/id-token]` and `flows/*current-login-user` so the rest
+     `:auth/id-token` and `:auth/current-login-user` so the rest
      of the app sees an authenticated user.
   3. On 401 it dispatches `[:user/login]`, which Patch #1 in
      `handler/events/ui.cljs` routes to the Hypha access-code login modal.
@@ -34,11 +34,12 @@
   (:require [cljs-http.client :as http]
             [cljs.core.async :refer [<! go]]
             [frontend.config :as config]
-            [frontend.flows :as flows]
+            [frontend.handler.db-based.rtc-flows :as rtc-flows]
             [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.user :as user-handler]
             [frontend.hypha.asset-cache :as asset-cache]
             [frontend.hypha.auth :as hypha-auth]
+            [frontend.hypha.capture :as capture]
             ;; Required for its side-effecting defonce: the plugin-init ns
             ;; patches `window.fetch` and installs the `window.apis` shim at
             ;; namespace-load time, which lands before frontend.handler/start!
@@ -49,10 +50,15 @@
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
 
+(def ^:private db-worker-ready-timeout-ms 30000)
+
 (defn- <wait-for-db-worker-ready!
   "Resolve once @state/*db-worker is truthy. Mirrors the pattern in
   `frontend.handler.db-based.sync/<wait-for-db-worker-ready!` (private)
-  but kept in this Hypha namespace to avoid an upstream patch."
+  but kept in this Hypha namespace to avoid an upstream patch.
+
+  Logs an error after `db-worker-ready-timeout-ms`, so a worker that never
+  comes up does not leave the post-login work pending without a trace."
   []
   (if @state/*db-worker
     (p/resolved true)
@@ -69,6 +75,12 @@
       (when @state/*db-worker
         (remove-watch state/*db-worker watch-key)
         (p/resolve! ready true))
+      ;; Report a worker that is late, but keep waiting: the post-login
+      ;; work (auth push, remote graph list) has no other trigger.
+      (js/setTimeout #(when-not (p/resolved? ready)
+                        (log/error :hypha/db-worker-not-ready
+                                   {:waited-ms db-worker-ready-timeout-ms}))
+                     db-worker-ready-timeout-ms)
       ready)))
 
 (defn- <push-auth-to-db-worker!
@@ -89,7 +101,7 @@
       (p/then (fn [_]
                 (state/<invoke-db-worker
                  :thread-api/sync-app-state
-                 (select-keys @state/state
+                 (select-keys (state/get-state)
                               [:auth/id-token :auth/access-token]))))))
 
 (defn- <fetch-remote-graphs-after-login!
@@ -103,11 +115,18 @@
   worker-side code reached by <get-remote-graphs (notably crypt/
   <resolve-user-uuid) sees a valid :auth/id-token. Without that push,
   the worker fails with 'worker auth refresh requires refresh token'
-  because Hypha's auth model has no refresh-token."
+  because Hypha's auth model has no refresh-token.
+
+  Then starts sync for the current graph when it is a remote one, like
+  upstream's :user/fetch-info-and-graphs: the login trigger fires before
+  the graph list arrives, so its start is skipped (graph not in the remote
+  list) and nothing else would start it."
   []
-  (-> (p/do
-        (<push-auth-to-db-worker!)
-        (rtc-handler/<get-remote-graphs))
+  (-> (p/let [_ (<push-auth-to-db-worker!)
+              _ (rtc-handler/<get-remote-graphs)]
+        (when-let [repo (state/get-current-repo)]
+          (when (some #(= repo (:url %)) (state/get-rtc-graphs))
+            (rtc-flows/trigger-rtc-start repo))))
       (p/catch (fn [e]
                  (log/error :hypha/initial-graph-fetch-failed
                             {:error e})))))
@@ -124,9 +143,9 @@
   Browser B's freshly-authenticated session sees its remote graphs in the
   picker without further clicks."
   [id-token]
-  (state/set-auth-id-token id-token)
-  (some->> (user-handler/parse-jwt id-token)
-           (reset! flows/*current-login-user))
+  (let [user (user-handler/parse-jwt id-token)]
+    (state/set-auth-id-token id-token (:sub user))
+    (state/set-state! :auth/current-login-user user))
   (<fetch-remote-graphs-after-login!))
 
 (defn- <fetch-session
@@ -134,7 +153,32 @@
   []
   (http/get "/auth/session" {:with-credentials? true}))
 
+(def ^:private session-retry-ms 30000)
 
+(defn- restore-session!
+  "Restore the session from the HttpOnly cookie on app boot.
+
+  Only 401/403 mean the session is gone and surface the login UI. Offline
+  (`:status 0`) and 5xx say nothing about the session, so they are retried
+  instead of prompting for the access code."
+  []
+  (go
+    (let [resp (<! (<fetch-session))
+          status (:status resp)]
+      (cond
+        ;; A 200 without a token is not hypha-server (e.g. a captive portal
+        ;; or a misrouted proxy answering with HTML): retry like a 5xx.
+        (and (= 200 status) (get-in resp [:body :id-token]))
+        (set-hypha-id-token! (get-in resp [:body :id-token]))
+
+        (contains? #{401 403} status)
+        (state/pub-event! [:user/login])
+
+        :else
+        (do
+          (log/warn :hypha/session-restore-failed {:status status
+                                                   :error-text (:error-text resp)})
+          (js/setTimeout restore-session! session-retry-ms))))))
 
 (defn start!
   "Hypha-mode app-boot entry point.
@@ -144,18 +188,16 @@
 
   Phase 1.6.1: also kicks off the LRU asset-cache eviction background tick
   via `asset-cache/start!`. Runs independent of login state — the cache
-  needs guarding even when the user is logged out."
+  needs guarding even when the user is logged out.
+
+  Quick capture: `capture/<start!` consumes any `hypha-*` share params on
+  the boot URL and drains the clipper inbox. It is fired here rather than
+  after login because it strips the params from the URL immediately and
+  then waits for the graph on its own."
   []
   (config/set-custom-sync-server-url! js/window.location.origin)
   (asset-cache/start!)
   (hypha-auth/start-refresh-loop!)
-  (go
-    (let [resp (<! (<fetch-session))]
-      (cond
-        (= 200 (:status resp))
-        (when-let [id-token (get-in resp [:body :id-token])]
-          (set-hypha-id-token! id-token))
-
-        :else
-        (state/pub-event! [:user/login]))))
+  (capture/<start!)
+  (restore-session!)
   nil)

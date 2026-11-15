@@ -87,7 +87,7 @@ RUN bin/hypha-build --release
 
 # Prune dev-only packages from hypha-server before copying to runtime stage.
 # (better-sqlite3 in deps/db-sync has no devDependencies to prune.)
-RUN pnpm --dir hypha-server prune --prod
+RUN pnpm --dir hypha-server prune --prod --ignore-workspace
 
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime

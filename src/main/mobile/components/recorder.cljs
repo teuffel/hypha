@@ -5,9 +5,9 @@
             [cljs-time.local :as tl]
             [clojure.string :as string]
             [frontend.date :as date]
-            [frontend.db :as db]
-            [frontend.db.model :as db-model]
+            [frontend.db.async :as db-async]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.editor.assets :as editor-assets]
             [frontend.mobile.audio-recorder :as audio-recorder]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
@@ -15,13 +15,12 @@
             [goog.functions :as gfun]
             [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
-            [logseq.db :as ldb]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [mobile.init :as init]
             [mobile.state :as mobile-state]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defonce audio-file-format "yyyy-MM-dd HH:mm:ss")
 
@@ -67,15 +66,18 @@
                                            (tl/local-now)
                                           {:formatter-str audio-file-format})
                                           "."))]
-      (-> (p/let [file (js/File. [blob] filename #js {:type (.-type blob)})
+      (-> (p/let [repo (state/get-current-repo)
+                  file (js/File. [blob] filename #js {:type (.-type blob)})
                   capture? (= "capture" @mobile-state/*tab)
+                  save-to-page (when capture?
+                                 (db-async/<get-block repo common-config/quick-add-page-name {:children? false}))
                   insert-opts (cond->
                                {:last-edit-block @*last-edit-block}
                                 @*target-block
                                 (assoc :target-block @*target-block)
                                 capture?
-                                (assoc :save-to-page (ldb/get-built-in-page (db/get-db) common-config/quick-add-page-name)))
-                  result (editor-handler/db-based-save-assets! (state/get-current-repo) [file] insert-opts)
+                                (assoc :save-to-page save-to-page))
+                  result (editor-assets/db-based-save-assets! repo [file] insert-opts)
                   asset-entity (first result)]
             (when (nil? asset-entity)
               (log/error ::empty-asset-entity {}))
@@ -94,7 +96,7 @@
                     (p/catch #(log/error :transcribe-audio-error %))))))
           (p/finally #(reset! *target-block nil))))))
 
-(rum/defc record-button
+(hsx/defc record-button
   []
   (let [*timer-ref (hooks/use-ref nil)
         [*recorder _] (hooks/use-state (atom nil))
@@ -136,7 +138,7 @@
                                          (.click (js/document.getElementById "recording-button"))
                                          (try
                                            (let [t (ms-to-time-format time)]
-                                             (when-let [node (rum/deref *timer-ref)]
+                                             (when-let [node (hooks/deref *timer-ref)]
                                                (set! (. node -textContent) t)))
                                            (catch js/Error e
                                              (log/warn :bad-progress-time e))))))
@@ -169,7 +171,7 @@
                                  (.stopRecording ^js @*recorder))}
                     (shui/tabler-icon "player-stop" {:size 22}))]]]))
 
-(rum/defc audio-recorder-aux < rum/static
+(hsx/defc audio-recorder-aux
   []
   [:div.app-audio-recorder
    [:div.flex.flex-row.justify-between.items-center.font-medium
@@ -200,7 +202,10 @@
       (if-not (string/blank? editing-id)
         (p/do!
          (editor-handler/save-current-block!)
-         (let [block (db-model/query-block-by-uuid (:block/uuid (state/get-edit-block)))]
+         (p/let [block (when-let [edit-block (state/get-edit-block)]
+                         (db-async/<get-block (state/get-current-repo)
+                                              (:block/uuid edit-block)
+                                              {:children? false}))]
            (if (or quick-add? save-to-today?)
              (p/do!
               (state/clear-edit!)

@@ -46,6 +46,75 @@ test("DbSyncRunner — resolves when the adapter prints the ready line", async (
   assert.equal(runner.running, false);
 });
 
+test("DbSyncRunner — reports an exit after ready, but not one caused by stop()", async () => {
+  const exits: (number | null)[] = [];
+  const logger = collectLogger();
+  const runner = new DbSyncRunner({
+    adapterPath,
+    port: 18787,
+    dataDir: "/tmp/fake",
+    jwtIssuer: "test-issuer",
+    jwtAudience: "test-audience",
+    jwksUrl: "http://127.0.0.1:1/auth/jwks",
+    logger,
+    startupTimeoutMs: 5000,
+    onUnexpectedExit: (code) => exits.push(code),
+  });
+  await runner.start();
+  const pid = (runner as unknown as { child: { pid: number } }).child.pid;
+  process.kill(pid, "SIGKILL");
+  for (let i = 0; i < 50 && exits.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(exits.length, 1, "a crash after ready must be reported");
+  assert.ok(logger.entries.some((e) => e.level === "error" && /exited unexpectedly/.test(e.msg)));
+
+  const stopped: (number | null)[] = [];
+  const runner2 = new DbSyncRunner({
+    adapterPath,
+    port: 18788,
+    dataDir: "/tmp/fake",
+    jwtIssuer: "test-issuer",
+    jwtAudience: "test-audience",
+    jwksUrl: "http://127.0.0.1:1/auth/jwks",
+    logger: silentLogger(),
+    startupTimeoutMs: 5000,
+    onUnexpectedExit: (code) => stopped.push(code),
+  });
+  await runner2.start();
+  await runner2.stop();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(stopped, [], "stop() is not an unexpected exit");
+});
+
+// The adapter ignores X-Forwarded-* unless told to trust them; without the
+// flag the snapshot URL points at the internal loopback and every graph
+// download fails in the browser.
+test("DbSyncRunner — passes DB_SYNC_TRUST_FORWARDED_HEADERS=true to the adapter", async () => {
+  const logger = collectLogger();
+  const runner = new DbSyncRunner({
+    adapterPath,
+    port: 18789,
+    dataDir: "/tmp/fake",
+    jwtIssuer: "test-issuer",
+    jwtAudience: "test-audience",
+    jwksUrl: "http://127.0.0.1:1/auth/jwks",
+    logger,
+    startupTimeoutMs: 5000,
+  });
+  process.env.FAKE_ADAPTER_MODE = "env";
+  try {
+    await runner.start();
+    assert.ok(
+      logger.entries.some((e) => e.msg.includes("env:DB_SYNC_TRUST_FORWARDED_HEADERS=true")),
+      JSON.stringify(logger.entries),
+    );
+  } finally {
+    delete process.env.FAKE_ADAPTER_MODE;
+    await runner.stop();
+  }
+});
+
 test("DbSyncRunner — rejects when the adapter exits before the ready line", async () => {
   const runner = new DbSyncRunner({
     adapterPath,

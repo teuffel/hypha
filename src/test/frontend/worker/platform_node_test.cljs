@@ -1,5 +1,6 @@
 (ns frontend.worker.platform-node-test
   (:require ["fs" :as fs]
+            ["fs/promises" :as fs-promises]
             ["keytar" :as keytar]
             ["path" :as node-path]
             [cljs.test :refer [async deftest is testing]]
@@ -9,23 +10,28 @@
             [goog.object :as gobj]
             [promesa.core :as p]))
 
-(defn- node-platform-source
-  []
-  (let [source-path (node-path/join (.cwd js/process)
-                                    "src"
-                                    "main"
-                                    "frontend"
-                                    "worker"
-                                    "platform"
-                                    "node.cljs")]
-    (.toString (fs/readFileSync source-path) "utf8")))
-
 (defn- js-bind
   [pairs]
   (let [bind (js-obj)]
     (doseq [[k v] pairs]
       (gobj/set bind k v))
     bind))
+
+(defn- set-process-platform-arch!
+  [platform arch]
+  (let [platform-descriptor (js/Object.getOwnPropertyDescriptor js/process "platform")
+        arch-descriptor (js/Object.getOwnPropertyDescriptor js/process "arch")]
+    (js/Object.defineProperty js/process "platform"
+                              #js {:value platform
+                                   :enumerable true
+                                   :configurable true})
+    (js/Object.defineProperty js/process "arch"
+                              #js {:value arch
+                                   :enumerable true
+                                   :configurable true})
+    (fn []
+      (js/Object.defineProperty js/process "platform" platform-descriptor)
+      (js/Object.defineProperty js/process "arch" arch-descriptor))))
 
 (defn- <open-test-db
   []
@@ -55,15 +61,74 @@
        (gobj/set opts "rowMode" row-mode))
      ((:exec sqlite) db opts))))
 
-(deftest node-platform-runtime-dependency-is-node-sqlite
-  (let [source (node-platform-source)]
-    (is (string/includes? source "\"node:sqlite\""))
-    (is (not (string/includes? source "\"better-sqlite3\"")))))
+(deftest node-platform-disables-vector-embedding-off-macos
+  (async done
+    (let [root-dir (node-helper/create-tmp-dir "platform-node-no-vector-embedding")
+          restore! (set-process-platform-arch! "linux" "x64")]
+      (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir})]
+            (is (nil? (:embedding platform)))
+            (is (nil? (:vector platform))))
+          (p/catch (fn [e]
+                     (is false (str "unexpected error: " e))))
+          (p/finally (fn []
+                       (restore!)
+                       (done)))))))
 
-(deftest node-platform-backup-uses-shared-sqlite-backup-implementation
-  (let [source (node-platform-source)]
-    (is (string/includes? source "logseq.db.sqlite.backup"))
-    (is (string/includes? source "sqlite-backup/backup-connection!"))))
+(deftest node-platform-disables-vector-embedding-on-macos-x64
+  (async done
+    (let [root-dir (node-helper/create-tmp-dir "platform-node-vector-embedding-x64")
+          restore! (set-process-platform-arch! "darwin" "x64")]
+      (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir})]
+            (is (nil? (:embedding platform)))
+            (is (nil? (:vector platform))))
+          (p/catch (fn [e]
+                     (is false (str "unexpected error: " e))))
+          (p/finally (fn []
+                       (restore!)
+                       (done)))))))
+
+(deftest node-platform-embedding-backend-calls-local-server
+  (async done
+    (let [root-dir (node-helper/create-tmp-dir "platform-node-embedding-text")
+          restore-platform! (set-process-platform-arch! "darwin" "arm64")
+          original-fetch js/fetch
+          calls (atom [])]
+      (set! js/fetch
+            (fn [url opts]
+              (swap! calls conj {:url url
+                                 :method (gobj/get opts "method")
+                                 :headers (js->clj (gobj/get opts "headers"))
+                                 :body (js->clj (js/JSON.parse (gobj/get opts "body"))
+                                                :keywordize-keys true)})
+              (p/resolved #js {:ok true
+                                :status 200
+                                :json (fn []
+                                        (p/resolved
+                                         (clj->js {:data [{:index 1
+                                                           :embedding [4 5 6]}
+                                                          {:index 0
+                                                           :embedding [1 2 3]}]})))})))
+      (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir
+                                                         :embedding-endpoint "http://127.0.0.1:8765/v1/embeddings"})
+                  embeddings ((get-in platform [:embedding :embed-texts]) ["hello" "world"])]
+            (is (= [[1 2 3] [4 5 6]] embeddings))
+            (is (= [{:url "http://127.0.0.1:8765/v1/embeddings"
+                     :method "POST"
+                     :headers {"Content-Type" "application/json"}
+                     :body {:model "all-MiniLM-L6-v2"
+                            :input ["hello" "world"]}}]
+                   @calls)))
+          (p/catch (fn [e]
+                     (is false (str "unexpected error: " e))))
+          (p/finally (fn []
+                       (set! js/fetch original-fetch)
+                       (restore-platform!)
+                       (done)))))))
+
+(deftest node-platform-vector-page-query-topks-expand-adaptively
+  (let [topks #'platform-node/vector-query-topks]
+    (is (= [10] (topks 10 nil)))
+    (is (= [40 160 640] (topks 10 "page-1")))))
 
 (deftest node-platform-env-owner-source-is-propagated
   (async done
@@ -359,7 +424,8 @@
     (let [root-dir (node-helper/create-tmp-dir "platform-node-list-graphs")
           graphs-dir (node-path/join root-dir "graphs")]
       (fs/mkdirSync (node-path/join graphs-dir "alpha") #js {:recursive true})
-      (fs/mkdirSync (node-path/join graphs-dir "backup") #js {:recursive true})
+      (doseq [dir ["backup" " alpha " " padded-only " "   " "~20encoded-leading" "encoded-trailing~20"]]
+        (fs/mkdirSync (node-path/join graphs-dir dir) #js {:recursive true}))
       (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir})
                   graphs ((get-in platform [:storage :list-graphs]))]
             (is (= ["alpha"] graphs)))
@@ -367,25 +433,57 @@
                      (is false (str "unexpected error: " e))))
           (p/finally done)))))
 
-(deftest remove-vfs-removes-lock-file
+(deftest remove-vfs-clears-graph-resources
   (async done
     (let [root-dir (node-helper/create-tmp-dir "platform-node-remove-vfs")
-          lock-json "{\"repo\":\"logseq_db_demo\",\"pid\":1,\"host\":\"127.0.0.1\",\"port\":9001}"]
+]
       (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir})
                   storage (:storage platform)
                   pool ((:install-opfs-pool storage) nil "logseq_db_demo")
                   repo-dir (gobj/get pool "repoDir")
-                  lock-path (node-path/join repo-dir "db-worker.lock")
                   db-path (node-path/join repo-dir "db.sqlite")
                   nested-path (node-path/join repo-dir "assets" "file.bin")
                   _ (fs/mkdirSync (node-path/dirname nested-path) #js {:recursive true})
-                  _ (fs/writeFileSync lock-path lock-json "utf8")
                   _ (fs/writeFileSync db-path "db-bytes" "utf8")
                   _ (fs/writeFileSync nested-path "asset-bytes" "utf8")
                   _ ((:remove-vfs! storage) pool)]
-            (is (not (fs/existsSync lock-path)))
             (is (not (fs/existsSync db-path)))
             (is (not (fs/existsSync nested-path))))
           (p/catch (fn [e]
                      (is false (str "unexpected error: " e))))
           (p/finally done)))))
+
+(deftest draining-platform-waits-for-file-writes-and-rejects-late-background-work
+  (async done
+    (let [root-dir (node-helper/create-tmp-dir "platform-node-drain")
+          original-write-file (.-writeFile fs-promises)
+          write-started (p/deferred)
+          allow-write (p/deferred)]
+      (set! (.-writeFile fs-promises)
+            (fn [& args]
+              (p/resolve! write-started true)
+              (p/let [_ allow-write]
+                (apply original-write-file args))))
+      (-> (p/let [platform (platform-node/node-platform {:root-dir root-dir})
+                  write! (get-in platform [:storage :write-text!])]
+            (let [pending (write! "demo/assets/pending.txt" "committed")]
+              (p/let [_ write-started]
+                (let [drained? (atom false)
+                      draining (p/then ((::platform-node/drain-writes! platform))
+                                       #(reset! drained? true))]
+                  (p/let [_ (p/delay 0)]
+                    (is (false? @drained?) "Drain must wait for the blocked file write")
+                    (is (not (fs/existsSync (node-path/join root-dir "graphs/demo/assets/pending.txt"))))
+                    (is (= :repo-locked (try (write! "demo/assets/late.txt" "late") nil
+                                             (catch :default error (:code (ex-data error))))))
+                    (p/resolve! allow-write true)
+                    (p/let [_ draining
+                            _ pending]
+                      (is (true? @drained?))
+                      (is (= "committed" (fs/readFileSync (node-path/join root-dir "graphs/demo/assets/pending.txt") "utf8")))
+                      (is (not (fs/existsSync (node-path/join root-dir "graphs/demo/assets/late.txt"))))))))))
+          (p/catch (fn [error] (is false (str error))))
+          (p/finally (fn []
+                       (set! (.-writeFile fs-promises) original-write-file)
+                       (p/resolve! allow-write true)
+                       (done)))))))

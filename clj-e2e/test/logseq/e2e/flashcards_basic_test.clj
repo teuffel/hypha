@@ -6,8 +6,7 @@
             [logseq.e2e.keyboard :as k]
             [logseq.e2e.locator :as loc]
             [logseq.e2e.util :as util]
-            [wally.main :as w]
-            [wally.repl :as repl]))
+            [wally.main :as w]))
 
 (use-fixtures :once fixtures/open-page)
 
@@ -17,7 +16,10 @@
 (defn- open-flashcards
   []
   (util/double-esc)
-  (k/press ["t" "c"])
+  (when-not (w/visible? ".flashcards-nav")
+    (w/click "#left-menu")
+    (w/wait-for ".flashcards-nav"))
+  (w/eval-js "selector => document.querySelector(selector)?.click()" ".flashcards-nav a")
   (assert/assert-is-visible "#cards-modal"))
 
 (defn- select-cards-option
@@ -80,4 +82,32 @@
       (assert/assert-is-visible (loc/filter "#cards-modal .text-sm.opacity-50" :has-text "1/1"))
 
       (select-cards-option "All cards")
-      (assert/assert-is-visible (loc/filter "#cards-modal .text-sm.opacity-50" :has-text "1/2")))))
+      (assert/assert-is-visible (loc/filter "#cards-modal .text-sm.opacity-50" :has-text "1/2"))))
+
+  (testing "an untitled #Cards block is listed by its query with page names, not uuids"
+    (let [tag-a "fc-tag-a"
+          card-a "Card A"
+          query-a (str "[[" tag-a "]]")]
+      (k/esc)
+      (assert/assert-is-hidden "#cards-modal")
+      (util/goto-journals)
+      (let [page (ls-api-call! :editor.getCurrentPage)
+            page-name (get page "name")
+            cards (ls-api-call! :editor.getTag "logseq.class/Cards")
+            cards-id (get cards "id")
+            untitled-cards (ls-api-call! :editor.appendBlockInPage page-name ""
+                                         {:properties {:block/tags #{cards-id}}})
+            query-id (get untitled-cards ":logseq.property/query")]
+        (ls-api-call! :editor.updateBlock query-id query-a))
+
+      (open-flashcards)
+      (w/click "#cards-modal [role='combobox']")
+      (assert/assert-is-visible (loc/filter "[role='option']" :has-text query-a))
+      (assert/assert-have-count
+       (loc/filter "[role='option']"
+                   :has-text #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+       0)
+
+      (w/click (loc/filter "[role='option']" :has-text query-a))
+      (assert/assert-is-visible (format "#cards-modal .ls-card :text('%s')" card-a))
+      (assert/assert-is-visible (loc/filter "#cards-modal .text-sm.opacity-50" :has-text "1/1")))))

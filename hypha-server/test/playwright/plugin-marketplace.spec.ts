@@ -18,6 +18,7 @@
 
 import { test, expect } from "@playwright/test";
 
+const ACCESS_CODE = process.env.HYPHA_TEST_ACCESS_CODE ?? "hypha-test";
 const MARKETPLACE_UPSTREAM_HOST = "raw.githubusercontent.com";
 const R2_UPSTREAM_HOST = "plugins.logseq.io";
 
@@ -75,6 +76,8 @@ test.describe("Hypha plugin-marketplace smoke", () => {
     const observed: string[] = [];
     page.on("request", (req) => observed.push(req.url()));
 
+    // The plugin proxies need a session; page.request shares the cookie jar.
+    expect((await page.request.post("/auth/login", { data: { code: ACCESS_CODE } })).status()).toBe(200);
     await page.goto("/");
 
     // From the page, ask the (patched) fetch for both upstream URLs. The
@@ -117,6 +120,7 @@ test.describe("Hypha plugin-marketplace smoke", () => {
     // Cache may already be warm from earlier tests in this run — request a
     // distinct path that no prior test touched so MISS/HIT ordering is
     // deterministic.
+    expect((await request.post("/auth/login", { data: { code: ACCESS_CODE } })).status()).toBe(200);
     const first = await request.get("/plugin-market/packages/hypha-smoke/icon.png");
     expect(first.status()).toBe(200);
     expect(first.headers()["x-hypha-cache"]).toBe("MISS");
@@ -131,12 +135,18 @@ test.describe("Hypha plugin-marketplace smoke", () => {
   });
 
   test("/plugin-cdn/r2 proxies fixture R2 manifest", async ({ request }) => {
+    expect((await request.post("/auth/login", { data: { code: ACCESS_CODE } })).status()).toBe(200);
     const res = await request.get("/plugin-cdn/r2/test-org/test-plugin-hypha-marketplace");
     expect(res.status()).toBe(200);
     const body = await res.json();
     // Fixture-served R2 manifest shape (see global-setup fixtureR2Manifest).
     expect(body.main).toBe("dist/index.html");
     expect(body.name).toBe("test-plugin-hypha-marketplace");
+  });
+
+  test("plugin proxies refuse requests without a session", async ({ request }) => {
+    const res = await request.get("/plugin-cdn/r2/test-org/test-plugin-hypha-marketplace");
+    expect(res.status()).toBe(401);
   });
 
   test("/health?detail=cache reflects cumulative cache activity", async ({ request }) => {

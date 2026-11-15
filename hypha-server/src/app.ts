@@ -11,6 +11,7 @@
  *   - / (statics root)
  */
 
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 
@@ -21,6 +22,8 @@ import { sessionRoute } from "./routes/session.js";
 import { logoutRoute } from "./routes/logout.js";
 import { jwksRoute } from "./routes/jwks.js";
 import { proxyRoute } from "./proxy.js";
+import { captureRoute } from "./routes/capture.js";
+import { manifestRoute } from "./routes/manifest.js";
 import { staticsRoute } from "./statics.js";
 import { PluginCache } from "./plugin-cache.js";
 import { pluginMarketRoute } from "./routes/plugin-market.js";
@@ -67,7 +70,25 @@ export interface BuildAppOptions {
 
 export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: opts.logLevel === "silent" ? false : { level: opts.logLevel ?? "info" },
+    logger:
+      opts.logLevel === "silent"
+        ? false
+        : {
+            level: opts.logLevel ?? "info",
+            // Log paths only. The sync WebSocket carries the JWT in
+            // ?token=, and share-target captures carry the captured title,
+            // text and URL in the query string.
+            serializers: {
+              req(req: { method: string; url: string; host?: string; ip?: string }) {
+                return {
+                  method: req.method,
+                  url: req.url.split("?")[0],
+                  host: req.host,
+                  remoteAddress: req.ip,
+                };
+              },
+            },
+          },
   });
 
   // Cross-origin isolation — required for Logseq's sqlite-wasm in the
@@ -79,14 +100,22 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   // resources loadable without their servers needing to advertise CORP —
   // matters for Logseq's external icon CDNs, image proxies, etc. The
   // page itself is still cross-origin isolated; SharedArrayBuffer works.
-  app.addHook("onSend", async (_request, reply) => {
+  app.addHook("onSend", async (request, reply) => {
     reply.header("Cross-Origin-Opener-Policy", "same-origin");
     reply.header("Cross-Origin-Embedder-Policy", "credentialless");
+    // Tokens and captured clips: never let a shared cache in front of us
+    // (a blanket caching rule on the outer proxy) store them.
+    if (request.url.startsWith("/auth/") || request.url.startsWith("/capture")) {
+      reply.header("Cache-Control", "no-store");
+    }
   });
 
   await app.register(fastifyCookie);
 
-  const sessions = new SessionStore(opts.config.sessionTtlSeconds);
+  const sessions = new SessionStore(
+    opts.config.sessionTtlSeconds,
+    join(opts.config.dataDir, "sessions.json"),
+  );
 
   const pluginCache = opts.pluginUpstream
     ? new PluginCache(opts.pluginUpstream.cacheMaxEntries ?? DEFAULT_PLUGIN_CACHE_MAX_ENTRIES)
@@ -107,6 +136,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(sessionRoute, { config: opts.config, sessions });
   await app.register(logoutRoute, { sessions });
   await app.register(jwksRoute, { config: opts.config });
+  await app.register(manifestRoute);
+  await app.register(captureRoute, { config: opts.config });
 
   if (opts.syncUpstreamUrl) {
     await app.register(proxyRoute, { upstreamUrl: opts.syncUpstreamUrl });
@@ -115,10 +146,12 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   if (opts.pluginUpstream && pluginCache) {
     await app.register(pluginMarketRoute, {
       cache: pluginCache,
+      sessions,
       upstreamBase: opts.pluginUpstream.marketBase,
     });
     await app.register(pluginCdnRoute, {
       cache: pluginCache,
+      sessions,
       upstreamBase: opts.pluginUpstream.cdnBase,
       assetsUpstreamBase: opts.pluginUpstream.assetsBase,
     });

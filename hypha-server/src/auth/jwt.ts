@@ -17,7 +17,7 @@
  *   future upstream rename without consuming patch budget.
  */
 
-import { SignJWT } from "jose";
+import { SignJWT, jwtVerify, importJWK } from "jose";
 import type { HyphaRuntime } from "../config.js";
 
 export async function signHyphaJwt(config: HyphaRuntime): Promise<string> {
@@ -40,4 +40,27 @@ export async function signHyphaJwt(config: HyphaRuntime): Promise<string> {
     .setExpirationTime(config.jwtTtl)
     .setIssuedAt()
     .sign(config.signingPrivateKey);
+}
+
+/**
+ * Verify a Hypha-issued JWT.
+ *
+ * Used by routes hypha-server serves itself (currently /capture); the
+ * proxied db-sync routes verify independently against /auth/jwks.
+ *
+ * Signing keys are regenerated on every container start, so tokens from a
+ * previous run fail here. That is intended: clients treat 401 as "log in
+ * again with the access code" rather than a hard error.
+ */
+export async function verifyHyphaJwt(token: string, config: HyphaRuntime): Promise<boolean> {
+  try {
+    const publicKey = await importJWK(config.signingPublicJwk, "RS256");
+    await jwtVerify(token, publicKey, {
+      issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }

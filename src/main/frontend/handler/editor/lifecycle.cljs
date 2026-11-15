@@ -1,15 +1,25 @@
 (ns ^:no-doc frontend.handler.editor.lifecycle
   (:require [dommy.core :as dom]
-            [frontend.db :as db]
-            [frontend.handler.editor :as editor-handler]
+            [frontend.db.async :as db-async]
+            [frontend.handler.editor.format :as editor-format]
             [frontend.state :as state]
             [frontend.util :as util]
-            [goog.dom :as gdom]))
+            [goog.dom :as gdom]
+            [logseq.shui.hooks :as hooks]
+            [promesa.core :as p]))
+
+(defn- <record-editor-info!
+  [repo edit-block-db-id editor-info]
+  (p/let [page-info (db-async/<get-block-page-info repo edit-block-db-id)
+          page-id (:block/uuid page-info)]
+    (when page-id
+      (state/<invoke-db-worker :thread-api/undo-redo-record-editor-info
+                               repo
+                               editor-info))))
 
 (defn did-mount!
-  [state]
-  (let [[_ id config] (:rum/args state)
-        content (state/get-edit-content)
+  [id config]
+  (let [content (state/get-edit-content)
         input (state/get-input)
         node (util/rec-get-node input "ls-block")
         container-id (when node
@@ -22,7 +32,7 @@
       (state/set-state! :editor/container-id container-id))
 
     (when content
-      (editor-handler/restore-cursor-pos! id content))
+      (editor-format/restore-cursor-pos! id content))
 
     (when-let [element (gdom/getElement id)]
       ;; TODO: check whether editor is visible, do less work
@@ -30,34 +40,15 @@
 
     ;; skip recording editor info when undo or redo is still running
     (when-not (or (:skip-focus? config)
-                  (contains? #{:undo :redo} @(:editor/op @state/state)))
+                  (contains? #{:undo :redo} (state/get-state :editor/op)))
       (when-let [edit-block-db-id (:db/id (state/get-edit-block))]
-        (let [page-id (:block/uuid (:block/page (db/entity edit-block-db-id)))
-              repo (state/get-current-repo)
+        (let [repo (state/get-current-repo)
               editor-info (state/get-editor-info)]
-          (when page-id
-            (state/<invoke-db-worker :thread-api/undo-redo-record-editor-info
-                                     repo
-                                     editor-info)))))
-    (state/set-state! :editor/op nil))
-  state)
+          (<record-editor-info! repo edit-block-db-id editor-info))))
+    (state/set-state! :editor/op nil)))
 
-;; (defn will-remount!
-;;   [_old-state state]
-;;   (let [new-block (:block (first (:rum/args state)))
-;;         edit-block (state/get-edit-content)
-;;         repo (state/get-current-repo)]
-;;     (when (and edit-block
-;;            (= (:block/uuid new-block)
-;;               (:block/uuid edit-block))
-;;            (not= (some-> edit-block string/trim)
-;;                  (some-> (:block/title new-block) string/trim)))
-;;       (when-let [input (state/get-input)]
-;;         (util/set-change-value input
-;;                                (block-handler/sanity-block-content repo (get new-block :block/format :markdown) (:block/title new-block))))))
-;;   state)
-
-(def lifecycle
-  {:did-mount did-mount!
-   ;; :will-remount will-remount!
-   })
+(defn use-did-mount!
+  [id config]
+  (hooks/use-layout-effect!
+   #(did-mount! id config)
+   []))

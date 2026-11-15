@@ -36,7 +36,11 @@
   See `docs/hypha/phase-1.5-plugin-marketplace.md` §§ 2.2 + 2.3 for steps
   1+2, and `docs/hypha/phase-1.6.2-plugin-iframe-corp.md` for step 3."
   (:require [clojure.string :as string]
-            [frontend.hypha.config :as hypha-config]))
+            [frontend.hypha.config :as hypha-config]
+            ;; Required for its side effect: installs the console log
+            ;; handler, which must exist before `_on-load` below logs.
+            [frontend.log]
+            [lambdaisland.glogi :as log]))
 
 ;; ---------------------------------------------------------------------------
 ;; (1) window.fetch redirect
@@ -125,8 +129,9 @@
 (defn- stub-no-filesystem
   "Shared stub for methods that require a native filesystem we don't have."
   [method-name & _args]
-  (js/console.warn (str "[hypha] window.apis." method-name
-                        " is a no-op in Hypha web mode (no native filesystem).")))
+  (log/warn :hypha/window-apis-no-op
+            {:method method-name
+             :reason "no native filesystem in Hypha web mode"}))
 
 (defn install-window-apis!
   "Install Hypha's `window.apis` shim — an EventEmitter3 with extra method
@@ -214,19 +219,25 @@
                              (.call orig this file-path local-root))))]
             (set! (.-__hyphaWrapped wrapped) true)
             (set! (.-_resolveResourceFullUrl proto) wrapped))))
-      (js/console.warn
-       (str "[hypha] window.LSPlugin.PluginLocal not available at "
-            "plugin-init time; plugin-asset rewrite skipped")))))
+      (log/warn :hypha/plugin-asset-rewrite-skipped
+                {:reason "window.LSPlugin.PluginLocal not available at plugin-init time"}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point + namespace-load-time wiring
 
 (defn setup!
-  "Idempotent: install all three shims. Safe to call from a REPL during dev."
+  "Idempotent: install all three shims. Safe to call from a REPL during dev.
+
+  Runs at namespace-load time, where an escaping exception would abort
+  loading the app. A shim that fails to install costs the plugin system,
+  not the boot, so the failure is logged instead."
   []
-  (install-fetch-redirect!)
-  (install-window-apis!)
-  (install-plugin-asset-rewrite!))
+  (try
+    (install-fetch-redirect!)
+    (install-window-apis!)
+    (install-plugin-asset-rewrite!)
+    (catch :default e
+      (log/error :hypha/plugin-init-failed {:error e}))))
 
 (defonce ^:private ^{:doc "Fires on namespace load. The `frontend.hypha.init`
   ns requires this ns, and `frontend.handler` in turn requires hypha.init,

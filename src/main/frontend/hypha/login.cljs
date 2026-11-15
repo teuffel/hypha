@@ -19,8 +19,9 @@
             [clojure.string :as string]
             [frontend.context.i18n :refer [t]]
             [frontend.hypha.init :as hypha-init]
-            [logseq.shui.ui :as shui]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]
+            [logseq.shui.hooks :as hooks]
+            [logseq.shui.ui :as shui]))
 
 (defn- <login
   "POST /auth/login with the supplied access code. Returns the cljs-http
@@ -30,54 +31,78 @@
              {:json-params {:code code}
               :with-credentials? true}))
 
-(rum/defcs modal-inner < (rum/local "" ::code)
-                         (rum/local nil ::error)
-                         (rum/local false ::submitting?)
-  [state]
-  (let [*code (::code state)
-        *error (::error state)
-        *submitting? (::submitting? state)
+(def ^:private login-modal-id :hypha-login)
+
+(hsx/defc modal-inner
+  []
+  (let [[code set-code!] (hooks/use-state "")
+        [code-visible? set-code-visible!] (hooks/use-state false)
+        [error set-error!] (hooks/use-state nil)
+        [submitting? set-submitting!] (hooks/use-state false)
         submit!
         (fn submit! []
-          (when-not (or @*submitting? (string/blank? @*code))
-            (reset! *submitting? true)
-            (reset! *error nil)
+          (when-not (or submitting? (string/blank? code))
+            (set-submitting! true)
+            (set-error! nil)
             (go
-              (let [resp (<! (<login @*code))]
-                (reset! *submitting? false)
+              (let [resp (<! (<login code))]
+                (set-submitting! false)
                 (cond
                   (= 200 (:status resp))
                   (when-let [id-token (get-in resp [:body :id-token])]
                     (hypha-init/set-hypha-id-token! id-token)
-                    (shui/dialog-close!))
+                    (shui/dialog-close! login-modal-id))
 
                   (= 401 (:status resp))
-                  (reset! *error (t :hypha.login/invalid-code))
+                  (set-error! (t :hypha.login/invalid-code))
 
                   :else
-                  (reset! *error (t :hypha.login/network-error)))))))]
+                  (set-error! (t :hypha.login/network-error)))))))]
     [:form.cp__hypha-login.flex.flex-col.gap-3.p-2
      {:on-submit (fn [e]
                    (.preventDefault e)
                    (submit!))}
-     (shui/input
-      {:type "password"
-       :autoFocus true
-       :disabled @*submitting?
-       :value @*code
-       :on-change #(reset! *code (.. % -target -value))
-       :placeholder (t :hypha.login/access-code-placeholder)})
-     (when @*error
-       [:div.text-sm.text-error @*error])
+     [:div.relative
+      (shui/input
+       {:type (if code-visible? "text" "password")
+        :class "pr-9"
+        :autoFocus true
+        :disabled submitting?
+        :value code
+        :on-change #(set-code! (.. % -target -value))
+        :placeholder (t :hypha.login/access-code-placeholder)})
+      (let [label (t (if code-visible?
+                       :hypha.login/hide-access-code
+                       :hypha.login/show-access-code))]
+        (shui/button
+         {:type "button"
+          :variant :ghost
+          :size :icon
+          :class "absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 opacity-70 hover:opacity-100"
+          :title label
+          :aria-label label
+          :aria-pressed code-visible?
+          ;; Keep the focus in the input, so typing continues after a click.
+          :on-pointer-down #(.preventDefault %)
+          :on-click #(set-code-visible! (not code-visible?))}
+         (shui/tabler-icon (if code-visible? "eye-off" "eye") {:size 16})))]
+     (when error
+       [:div.text-sm.text-error error])
      (shui/button
       {:type "submit"
-       :disabled (or @*submitting? (string/blank? @*code))}
+       :disabled (or submitting? (string/blank? code))}
       (t :ui/login))]))
 
 (defn open-login-modal!
-  "Public entry point invoked by Patch #1."
+  "Public entry point invoked by Patch #1.
+
+  Every caller that finds the session gone asks for the login (sync start,
+  graph list, member list, ...), often several at once. Open one dialog."
   []
-  (shui/dialog-open!
-   (fn [_close] (modal-inner))
-   {:label :hypha-login
-    :title (t :ui/login)}))
+  (when-not (shui/dialog-get login-modal-id)
+    (shui/dialog-open!
+     (fn [_close] (modal-inner))
+     {:id login-modal-id
+      :close #(shui/dialog-close! login-modal-id)
+      :label :hypha-login
+      :title (t :ui/login)})))

@@ -25,6 +25,8 @@
    :options ["--fix"
              "--type"
              "--file"
+             "--edn-options"
+             "--pretty-print"
              "--input"
              "--name"
              "--src"
@@ -69,7 +71,9 @@
              "--pos"
              "--content"
              "--path"
+             "--blocks"
              "--blocks-file"
+             "--dry-run"
              "--status"
              "--priority"
              "--scheduled"
@@ -82,7 +86,10 @@
              "--update-properties"
              "--remove-tags"
              "--remove-properties"
+             "--add-properties"
+             "--remove-properties"
              "--page"
+             "--rename"
              "--name"
              "--type"
              "--cardinality"
@@ -96,7 +103,8 @@
               "remove property"]
    :options ["--id"
              "--uuid"
-             "--name"]}
+             "--name"
+             "--force"]}
 
   :query
   {:commands ["query"
@@ -156,7 +164,7 @@
 
   :agent
   {:commands ["agent bridge"]
-   :options ["--dry-run"]}
+   :options []}
 
   :completion
   {:commands ["completion"]

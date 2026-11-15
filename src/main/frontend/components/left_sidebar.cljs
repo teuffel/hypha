@@ -4,45 +4,63 @@
             [frontend.components.block :as block]
             [frontend.components.dnd :as dnd-component]
             [frontend.components.icon :as icon]
+            [frontend.components.left-sidebar-util :as sidebar-util]
             [frontend.components.repo :as repo]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
-            [frontend.db :as db]
-            [frontend.db-mixins :as db-mixins]
-            [frontend.db.model :as db-model]
+            [frontend.db.hooks :as db-hooks]
             [frontend.extensions.fsrs :as fsrs]
             [frontend.handler.block :as block-handler]
             [frontend.handler.page :as page-handler]
-            [frontend.handler.recent :as recent-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.storage :as storage]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [frontend.util.entity :as entity]
             [goog.object :as gobj]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
+            [promesa.core :as p]
             [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(defn get-default-home-if-valid
-  []
-  (when-let [default-home (state/get-default-home)]
+(defn default-home-if-valid
+  "Keep :page when it is a usable start page. The app waits for page-identity;
+  publishing trusts a non-blank configured page because that lookup is not
+  ready on first paint."
+  [default-home {:keys [publishing? page-identity-status page-identity-value]}]
+  (when default-home
     (let [page (:page default-home)
-          page (when (and (string? page)
-                          (not (string/blank? page)))
-                 (db/get-page page))]
-      (if page
+          valid-page? (and (string? page)
+                           (not (string/blank? page)))]
+      (if (or (and publishing? valid-page?)
+              (and (= :ready page-identity-status) page-identity-value))
         default-home
         (dissoc default-home :page)))))
 
-(rum/defc page-title-content
+(defn use-default-home-if-valid
+  []
+  (let [default-home (state/get-default-home)
+        page (:page default-home)
+        valid-page? (and (string? page)
+                         (not (string/blank? page)))
+        {:keys [status value]}
+        (db-hooks/use-resource-snapshot
+         (when valid-page? [:page-identity page]))]
+    (default-home-if-valid default-home
+                           {:publishing? config/publishing?
+                            :page-identity-status status
+                            :page-identity-value value})))
+
+(hsx/defc page-title-content
   [page-id display-title tooltip-title untitled? left-sidebar-resized-at]
-  (let [*title-ref (rum/use-ref nil)
-        [truncated? set-truncated?!] (rum/use-state false)
+  (let [*title-ref (hooks/use-ref nil)
+        [truncated? set-truncated?!] (hooks/use-state false)
         sync-truncated! (fn []
-                          (if-let [^js el (rum/deref *title-ref)]
+                          (if-let [^js el (hooks/deref *title-ref)]
                             (set-truncated?! (> (.-scrollWidth el)
                                                 (+ (.-clientWidth el) 1)))
                             (set-truncated?! false)))
@@ -51,7 +69,7 @@
                   display-title]]
     (hooks/use-effect!
      (fn []
-       (if-let [^js el (rum/deref *title-ref)]
+       (if-let [^js el (hooks/deref *title-ref)]
          (let [observer (js/ResizeObserver. (fn [_] (sync-truncated!)))]
            (.observe observer el)
            (sync-truncated!)
@@ -69,76 +87,72 @@
       (ui/tooltip title-el tooltip-title)
       title-el)))
 
-(rum/defc ^:large-vars/cleanup-todo page-name < rum/reactive db-mixins/query
+(hsx/defc ^:large-vars/cleanup-todo page-name
   [page recent?]
-  (when-let [id (:db/id page)]
-    (let [page (db/sub-block id)
-          left-sidebar-resized-at (rum/react ui-handler/*left-sidebar-resized-at)
-          icon (icon/get-node-icon-cp page {:size 16})
-          title (:block/title page)
-          untitled? (db-model/untitled-page? title)
-          display-title (cond
-                          (not (db/page? page))
-                          (block/inline-text :markdown (string/replace (apply str (take 64 (:block/title page))) "\n" " "))
-                          untitled? (t :ui/untitled)
-                          :else (block-handler/block-unique-title page))
-          tooltip-title (or (block-handler/block-unique-title page)
-                            (when untitled? (t :ui/untitled)))
-          ctx-icon #(shui/tabler-icon %1 {:class "scale-90 pr-1 opacity-80"})
-          open-in-sidebar #(state/sidebar-add-block!
-                            (state/get-current-repo)
-                            (:db/id page)
-                            :page)
-          x-menu-content (fn []
-                           (let [x-menu-item shui/dropdown-menu-item]
-                             [:<>
-                              (when-not recent?
+  (let [[left-sidebar-resized-at] (hooks/use-atom ui-handler/*left-sidebar-resized-at)
+        id (:db/id page)]
+    (when id
+      (let [icon (icon/get-node-icon-cp page {:size 16})
+            title (:block/title page)
+            untitled? (util/uuid-string? title)
+            display-title (cond
+                            (not (entity/page? page))
+                            (block/inline-text :markdown (string/replace (apply str (take 64 (:block/title page))) "\n" " "))
+                            untitled? (t :ui/untitled)
+                            :else (block-handler/block-unique-title page))
+            tooltip-title (or (block-handler/block-unique-title page)
+                              (when untitled? (t :ui/untitled)))
+            ctx-icon #(shui/tabler-icon %1 {:class "scale-90 pr-1 opacity-80"})
+            open-in-sidebar #(state/sidebar-add-block!
+                              (state/get-current-repo)
+                              (:db/id page)
+                              :page)
+            x-menu-content (fn []
+                             (let [x-menu-item shui/dropdown-menu-item]
+                               [:<>
+                                (when-not recent?
+                                  (x-menu-item
+                                   {:key "unfavorite"
+                                    :on-click #(page-handler/<unfavorite-page! (str (:block/uuid page)))}
+                                   (ctx-icon "star-off")
+                                   (t :page/unfavorite)
+                                   (ui/dropdown-shortcut :page/toggle-favorite)))
                                 (x-menu-item
-                                 {:key "unfavorite"
-                                  :on-click #(page-handler/<unfavorite-page! (str (:block/uuid page)))}
-                                 (ctx-icon "star-off")
-                                 (t :page/unfavorite)
-                                 (ui/dropdown-shortcut :page/toggle-favorite)))
-                              (x-menu-item
-                               {:key "open in sidebar"
-                                :on-click open-in-sidebar}
-                               (ctx-icon "layout-sidebar-right")
-                               (t :sidebar.right/open)
-                               (ui/dropdown-shortcut "shift+click"))]))]
-
-    ;; TODO: move to standalone component
-      [:a.link-item.group
-       (if (util/mobile?)
-         {:on-pointer-down util/stop-propagation
-          :on-pointer-up (fn [_e]
-                           (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?}))}
-         {:on-click
-          (fn [e]
-            (if (gobj/get e "shiftKey")
-              (open-in-sidebar)
-              (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?})))
-          :on-context-menu (fn [^js e]
-                             (shui/popup-show! e (x-menu-content)
-                                               {:as-dropdown? true
-                                                :content-props {:on-click (fn [] (shui/popup-hide!))
-                                                                :class "w-60"}})
-                             (util/stop e))})
-       [:span.page-icon {:key "page-icon"} icon]
-       (page-title-content id display-title tooltip-title untitled? left-sidebar-resized-at)
-
-     ;; dots trigger
-       (shui/button
-        {:key "more actions"
-         :size :sm
-         :variant :ghost
-         :class "absolute !bg-transparent right-0 top-0 px-1.5 scale-75 opacity-40 hidden group-hover:block hover:opacity-80 active:opacity-100"
-         :on-click #(do
-                      (shui/popup-show! (.-target %) (x-menu-content)
-                                        {:as-dropdown? true
-                                         :content-props {:on-click (fn [] (shui/popup-hide!))
-                                                         :class "w-60"}})
-                      (util/stop %))}
-        [:i.relative {:style {:top "4px"}} (shui/tabler-icon "dots")])])))
+                                 {:key "open in sidebar"
+                                  :on-click open-in-sidebar}
+                                 (ctx-icon "layout-sidebar-right")
+                                 (t :sidebar.right/open)
+                                 (ui/dropdown-shortcut "shift+click"))]))]
+        [:a.link-item.group
+         (if (util/mobile?)
+           {:on-pointer-down util/stop-propagation
+            :on-pointer-up (fn [_e]
+                             (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?}))}
+           {:on-click
+            (fn [e]
+              (if (gobj/get e "shiftKey")
+                (open-in-sidebar)
+                (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?})))
+            :on-context-menu (fn [^js e]
+                               (shui/popup-show! e (x-menu-content)
+                                                 {:as-dropdown? true
+                                                  :content-props {:on-click (fn [] (shui/popup-hide!))
+                                                                  :class "w-60"}})
+                               (util/stop e))})
+         [:span.page-icon {:key "page-icon"} icon]
+         (page-title-content id display-title tooltip-title untitled? left-sidebar-resized-at)
+         (shui/button
+           {:key "more actions"
+            :size :sm
+            :variant :ghost
+            :class "sidebar-page-actions absolute !bg-transparent right-0 top-0 px-1.5 scale-75 opacity-40 hover:opacity-80 active:opacity-100"
+            :on-click #(do
+                         (shui/popup-show! (.-target %) (x-menu-content)
+                                           {:as-dropdown? true
+                                            :content-props {:on-click (fn [] (shui/popup-hide!))
+                                                            :class "w-60"}})
+                         (util/stop %))}
+           [:i.relative {:style {:top "4px"}} (shui/tabler-icon "dots")])]))))
 
 (defn sidebar-item
   [{:keys [on-click-handler class title icon icon-extension? active href shortcut more]}]
@@ -158,7 +172,7 @@
         :shortcut-id shortcut)])
     more]])
 
-(rum/defc sidebar-graphs
+(hsx/defc sidebar-graphs
   []
   [:div.sidebar-graphs
    (repo/graphs-selector)])
@@ -172,9 +186,9 @@
     :tag/tasks :nav/tasks
     :tag/assets :nav/assets))
 
-(rum/defc sidebar-navigations-edit-content
+(hsx/defc sidebar-navigations-edit-content
   [{:keys [_id navs checked-navs set-checked-navs!]}]
-  (let [[local-navs set-local-navs!] (rum/use-state checked-navs)]
+  (let [[local-navs set-local-navs!] (hooks/use-state checked-navs)]
 
     (hooks/use-effect!
      (fn []
@@ -191,9 +205,13 @@
                                       (filterv #(not= nav %) local-navs)))))}
        (t (navigation-label-key nav))))))
 
-(rum/defc sidebar-content-group < rum/reactive
+(hsx/defc sidebar-content-group-body
+  [child]
+  [:div.bd child])
+
+(hsx/defc sidebar-content-group
   [name {:keys [class count more header-props enter-show-more? collapsable?]} child]
-  (let [collapsed? (state/sub [:ui/navigation-item-collapsed? class])]
+  (let [collapsed? (rfx/use-sub [:ui/navigation-item-collapsed? class])]
     [:div.sidebar-content-group
      {:class (util/classnames [class {:is-expand (not collapsed?)
                                       :has-children (and (number? count) (> count 0))}])}
@@ -207,21 +225,49 @@
          (not (false? collapsable?))
          (assoc :on-click (fn [^js/MouseEvent _e]
                             (state/toggle-navigation-item-collapsed! class))))
-       [:span.a name]
-       [:span.b (or more (ui/icon "chevron-right" {:class "more" :size 15}))]]
-      (when child [:div.bd child])]]))
+      [:span.a name]
+      [:span.b (or more (ui/icon "chevron-right" {:class "more" :size 15}))]]
+      (when child
+        ^{:key (str (or class "group") "-body")}
+        [sidebar-content-group-body child])]]))
 
-(rum/defc ^:large-vars/cleanup-todo sidebar-navigations
+(defn <load-nav-class-uuids
+  [repo db-worker-ready?]
+  (when (and repo db-worker-ready?)
+    (p/all (map (fn [class-ident]
+                  (state/<invoke-db-worker :thread-api/pull repo [:block/uuid] class-ident))
+                [:logseq.class/Asset :logseq.class/Task]))))
+
+(hsx/defc ^:large-vars/cleanup-todo sidebar-navigations-loaded
   [{:keys [default-home route-match route-name srs-open?]}]
   (let [navs [:flashcards :all-pages :graph-view :tag/tasks :tag/assets]
-        [checked-navs set-checked-navs!] (rum/use-state (or (storage/get :ls-sidebar-navigations)
+        _preferred-language (rfx/use-sub [:preferred-language])
+        repo (state/get-current-repo)
+        db-worker-ready? (hooks/use-atom-value state/db-worker-ready?)
+        [class-ident->uuid set-class-ident->uuid!] (hooks/use-state {})
+        [checked-navs set-checked-navs!] (hooks/use-state (or (storage/get :ls-sidebar-navigations)
                                                             [:flashcards :all-pages :graph-view]))]
 
     (hooks/use-effect!
      (fn []
-       (when (vector? checked-navs)
-         (storage/set :ls-sidebar-navigations checked-navs)))
-     [checked-navs])
+	       (when (vector? checked-navs)
+	         (storage/set :ls-sidebar-navigations checked-navs)))
+	     [checked-navs])
+    (hooks/use-effect!
+     (fn []
+       (if-let [classes-request (<load-nav-class-uuids repo db-worker-ready?)]
+         (let [cancelled? (atom false)]
+           (-> classes-request
+               (p/then (fn [classes]
+                         (when-not @cancelled?
+                           (set-class-ident->uuid! (zipmap [:logseq.class/Asset :logseq.class/Task]
+                                                           (map :block/uuid classes))))))
+               (p/catch (fn [_] nil)))
+           #(reset! cancelled? true))
+         (do
+           (set-class-ident->uuid! {})
+           nil)))
+     [repo db-worker-ready?])
 
     (sidebar-content-group
       [:a.wrap-th [:strong.flex-1 (t :sidebar.left/navigations)]]
@@ -238,9 +284,8 @@
              (shui/tabler-icon "filter-edit" {:size 14})]}
      [:div.sidebar-navigations.flex.flex-col.mt-1
        ;; required custom home page
-      (let [page (:page default-home)
-            enable-journals? (state/enable-journals? (state/get-current-repo))]
-        (if (and page (not enable-journals?))
+      (let [page (:page default-home)]
+        (if page
           (sidebar-item
            {:class "home-nav"
             :title page
@@ -251,24 +296,23 @@
             :icon "home"
             :shortcut :go/home})
 
-          (when enable-journals?
-            (sidebar-item
-             {:class "journals-nav"
-              :active (and (not srs-open?)
-                           (or (= route-name :all-journals) (= route-name :home)))
-              :title (t :nav/journals)
-              :on-click-handler (fn [e]
-                                  (if (gobj/get e "shiftKey")
-                                    (route-handler/sidebar-journals!)
-                                    (route-handler/go-to-journals!)))
-              :icon "calendar"
-              :shortcut :go/journals}))))
+          (sidebar-item
+           {:class "journals-nav"
+            :active (and (not srs-open?)
+                         (or (= route-name :all-journals) (= route-name :home)))
+            :title (t :nav/journals)
+            :on-click-handler (fn [e]
+                                (if (gobj/get e "shiftKey")
+                                  (route-handler/sidebar-journals!)
+                                  (route-handler/go-to-journals!)))
+            :icon "calendar"
+            :shortcut :go/journals})))
 
       (for [nav checked-navs]
         (cond
           (= nav :flashcards)
           (when (state/enable-flashcards? (state/get-current-repo))
-            (let [num (state/sub :srs/cards-due-count)]
+            (let [num (rfx/use-sub [:srs/cards-due-count])]
               (sidebar-item
                {:class "flashcards-nav"
                 :title (t :nav/flashcards)
@@ -297,21 +341,27 @@
             :active (and (not srs-open?) (= route-name :all-pages))
             :icon "files"})
 
-          (= (namespace nav) "tag")
-          (let [name'' (name nav)
-                class-ident (get {"assets" :logseq.class/Asset  "tasks" :logseq.class/Task} name'')]
-            (when-let [tag-uuid (and class-ident (:block/uuid (db/entity class-ident)))]
-              (sidebar-item
+	          (= (namespace nav) "tag")
+	          (let [name'' (name nav)
+	                class-ident (get {"assets" :logseq.class/Asset  "tasks" :logseq.class/Task} name'')]
+	            (when-let [tag-uuid (and class-ident (get class-ident->uuid class-ident))]
+	              (sidebar-item
                {:class (str "tag-view-nav " name'')
                 :title (t (navigation-label-key nav))
                 :href (rfe/href :page {:name tag-uuid})
                 :active (= (str tag-uuid) (get-in route-match [:path-params :name]))
                 :icon "hash"})))))])))
 
-(rum/defc sidebar-favorites < rum/reactive
+(hsx/defc sidebar-navigations
+  [opts]
+  (let [db-restoring? (rfx/use-sub [:db/restoring?])]
+    (when-not db-restoring?
+      (sidebar-navigations-loaded opts))))
+
+(hsx/defc sidebar-favorites-loaded
   []
-  (let [_favorites-updated? (state/sub :favorites/updated?)
-        favorite-entities (page-handler/get-favorites)]
+  (let [_preferred-language (rfx/use-sub [:preferred-language])
+        favorite-entities (db-hooks/use-resource [:favorites])]
     (sidebar-content-group
      [:a.wrap-th
       [:strong.flex-1 (t :sidebar.left/favorites)]]
@@ -334,29 +384,44 @@
                                               (page-handler/<reorder-favorites! favorites'))
                                :parent-node :ul.favorites.text-sm}))))))
 
-(rum/defc sidebar-recent-pages < rum/reactive db-mixins/query
+(hsx/defc sidebar-favorites
   []
-  (let [pages (recent-handler/get-recent-pages)]
-    (sidebar-content-group
-     [:a.wrap-th [:strong.flex-1 (t :sidebar.left/recent-pages)]]
+  (let [db-restoring? (rfx/use-sub [:db/restoring?])]
+    (when-not db-restoring?
+      (sidebar-favorites-loaded))))
 
-     {:class "recent"
-      :count (count pages)}
+(hsx/defc sidebar-recent-pages-loaded
+  []
+  (let [_preferred-language (rfx/use-sub [:preferred-language])
+        current-repo (rfx/use-sub [:git/current-repo])
+        recent-page-ids (vec (rfx/use-sub [:ui/recent-pages current-repo]))
+        pages (db-hooks/use-resource [:recent-pages recent-page-ids])]
+       (sidebar-content-group
+        [:a.wrap-th [:strong.flex-1 (t :sidebar.left/recent-pages)]]
 
-     [:ul.text-sm
-      (for [page pages]
-        [:li.recent-item.select-none.font-medium
-         {:key (str "recent-" (:db/id page))}
-         (page-name page true)])])))
+        {:class "recent"
+         :count (count pages)}
 
-(rum/defc ^:large-vars/cleanup-todo sidebar-container
+        [:ul.text-sm
+         (for [page pages]
+           [:li.recent-item.select-none.font-medium
+            {:key (str "recent-" (:db/id page))}
+            (page-name page true)])])))
+
+(hsx/defc sidebar-recent-pages
+  []
+  (let [db-restoring? (rfx/use-sub [:db/restoring?])]
+    (when-not db-restoring?
+      (sidebar-recent-pages-loaded))))
+
+(hsx/defc ^:large-vars/cleanup-todo sidebar-container
   [route-match close-modal-fn left-sidebar-open? srs-open?
    *closing? close-signal touching-x-offset]
-  (let [[local-closing? set-local-closing?] (rum/use-state false)
-        [el-rect set-el-rect!] (rum/use-state nil)
-        ref-el (rum/use-ref nil)
-        ref-open? (rum/use-ref left-sidebar-open?)
-        default-home (get-default-home-if-valid)
+  (let [[local-closing? set-local-closing?] (hooks/use-state false)
+        [el-rect set-el-rect!] (hooks/use-state nil)
+        ref-el (hooks/use-ref nil)
+        ref-open? (hooks/use-ref left-sidebar-open?)
+        default-home (use-default-home-if-valid)
         route-name (get-in route-match [:data :name])
         on-contents-scroll #(when-let [^js el (.-target %)]
                               (let [top (.-scrollTop el)
@@ -378,7 +443,7 @@
 
     (hooks/use-effect!
      #(js/setTimeout
-       (fn [] (some-> (rum/deref ref-el)
+       (fn [] (some-> (hooks/deref ref-el)
                       (.getBoundingClientRect)
                       (.toJSON)
                       (js->clj :keywordize-keys true)
@@ -388,9 +453,9 @@
 
     (hooks/use-layout-effect!
      (fn []
-       (when (and (rum/deref ref-open?) local-closing?)
+       (when (and (hooks/deref ref-open?) local-closing?)
          (reset! *closing? true))
-       (rum/set-ref! ref-open? left-sidebar-open?)
+       (hooks/set-ref! ref-open? left-sidebar-open?)
        #())
      [local-closing? left-sidebar-open?])
 
@@ -418,8 +483,7 @@
                               (set-local-closing? false)
                               (close-modal-fn)))
        :on-click #(when-let [^js target (and (util/sm-breakpoint?) (.-target %))]
-                    (when (some (fn [sel] (boolean (.closest target sel)))
-                                [".favorites .bd" ".recent .bd" ".dropdown-wrapper" ".nav-header"])
+                    (when (sidebar-util/mobile-navigation-target? target)
                       (close-fn)))}
 
       [:div.wrap
@@ -450,9 +514,9 @@
                                   (neg? offset-ratio)
                                   (+ 1))}))]]))
 
-(rum/defc sidebar-resizer
+(hsx/defc sidebar-resizer
   []
-  (let [*el-ref (rum/use-ref nil)
+  (let [*el-ref (hooks/use-ref nil)
         ^js el-doc js/document.documentElement
         adjust-size! (fn [width]
                        (.setProperty (.-style el-doc) "--ls-left-sidebar-width" width)
@@ -467,7 +531,7 @@
     ;; draggable handler
     (hooks/use-effect!
      (fn []
-       (when-let [el (and (fn? js/window.interact) (rum/deref *el-ref))]
+       (when-let [el (and (fn? js/window.interact) (hooks/deref *el-ref))]
          (let [^js sidebar-el (.querySelector el-doc "#left-sidebar")]
            (-> (js/interact el)
                (.draggable
@@ -488,34 +552,32 @@
      [])
     [:span.left-sidebar-resizer {:ref *el-ref}]))
 
-(rum/defcs left-sidebar < rum/reactive
-  (rum/local false ::closing?)
-  (rum/local -1 ::close-signal)
-  (rum/local nil ::touch-state)
-  [s {:keys [left-sidebar-open? route-match]}]
+(hsx/defc left-sidebar
+  [{:keys [left-sidebar-open? route-match]}]
   (let [close-fn #(state/set-left-sidebar-open! false)
-        *closing? (::closing? s)
-        *touch-state (::touch-state s)
-        *close-signal (::close-signal s)
+        *closing? (hooks/use-memo #(atom false) [])
+        [closing?] (hooks/use-atom *closing?)
+        [touch-state set-touch-state!] (hooks/use-state nil)
+        [close-signal set-close-signal!] (hooks/use-state -1)
         touch-point-fn (fn [^js e] (some-> (gobj/get e "touches") (aget 0) (#(hash-map :x (.-clientX %) :y (.-clientY %)))))
-        srs-open? (= :srs (state/sub :modal/id))
-        touching-x-offset (and (some-> @*touch-state :after)
-                               (some->> @*touch-state
+        srs-open? (= :srs (rfx/use-sub [:modal/id]))
+        touching-x-offset (and (some-> touch-state :after)
+                               (some->> touch-state
                                         ((juxt :after :before))
                                         (map :x) (apply -)))
         touch-pending? (> (abs touching-x-offset) 20)]
 
     [:div#left-sidebar.cp__sidebar-left-layout
      {:class (util/classnames [{:is-open left-sidebar-open?
-                                :is-closing @*closing?
+                                :is-closing closing?
                                 :is-touching touch-pending?}])
       :on-touch-start
       (fn [^js e]
-        (reset! *touch-state {:before (touch-point-fn e)}))
+        (set-touch-state! {:before (touch-point-fn e)}))
       :on-touch-move
       (fn [^js e]
-        (when @*touch-state
-          (some-> *touch-state (swap! assoc :after (touch-point-fn e)))))
+        (when touch-state
+          (set-touch-state! (assoc touch-state :after (touch-point-fn e)))))
       :on-touch-end
       (fn []
         (when touch-pending?
@@ -524,12 +586,12 @@
             (state/set-left-sidebar-open! true)
 
             (and left-sidebar-open? (< touching-x-offset -30))
-            (reset! *close-signal (inc @*close-signal))))
-        (reset! *touch-state nil))}
+            (set-close-signal! (inc close-signal))))
+        (set-touch-state! nil))}
 
      ;; sidebar contents
      (sidebar-container route-match close-fn left-sidebar-open? srs-open? *closing?
-                        @*close-signal (and touch-pending? touching-x-offset))
+                        close-signal (and touch-pending? touching-x-offset))
 
      ;; resizer
      (sidebar-resizer)]))

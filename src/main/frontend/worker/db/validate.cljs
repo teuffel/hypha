@@ -5,7 +5,9 @@
             [datascript.impl.entity :as de]
             [frontend.worker.db.migrate :as db-migrate]
             [frontend.worker.shared-service :as shared-service]
+            [lambdaisland.glogi :as log]
             [logseq.db :as ldb]
+            [logseq.db.common.order :as db-order]
             [logseq.db-sync.checksum :as sync-checksum]
             [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.validate :as db-validate]))
@@ -39,8 +41,14 @@
                      (fn [{:keys [entity dispatch-key]}]
                        (let [entity (d/entity db (:db/id entity))]
                          (cond
+                           (= :logseq.property.embedding/hnsw-label (:db/ident entity))
+                           (db-migrate/delete-property db :logseq.property.embedding/hnsw-label)
                            (some? (:logseq.property/parent entity))
                            [[:db/retract (:db/id entity) :logseq.property/parent]]
+                           (and (ldb/class? entity) (:block/order entity))
+                           [[:db/retract (:db/id entity) :block/order]]
+                           (and (not (ldb/page? entity)) (:block/name entity))
+                           [[:db/retract (:db/id entity) :block/name]]
                            (some? (:hide? entity))
                            [[:db/retract (:db/id entity) :hide?]]
                            (some? (:public? entity))
@@ -183,7 +191,7 @@
         tx-data (concat fix-tx-data
                         class-as-properties)]
     (when (seq tx-data)
-      (let [tx-report (d/transact! conn tx-data {:fix-db? true})]
+      (let [tx-report (ldb/transact! conn tx-data {:fix-db? true})]
         (seq (:tx-data tx-report))))))
 
 (defn- fix-num-prefix-db-idents!
@@ -240,7 +248,7 @@
                  properties)]
     (when (seq tx-data)
       (prn :debug :fix-non-closed-values tx-data)
-      (d/transact! conn tx-data {:fix-db? true}))))
+      (ldb/transact! conn tx-data {:fix-db? true}))))
 
 (defn- fix-icon-wrong-type!
   [conn]
@@ -250,16 +258,37 @@
             tx-data (cons
                      [:db/retract (:db/id icon) :db/valueType]
                      (map (fn [d] [:db/retract (:e d) (:a d)]) datoms))]
-        (d/transact! conn tx-data {:fix-db? true})))))
+        (ldb/transact! conn tx-data {:fix-db? true})))))
 
 (defn- fix-extends-cardinality!
   [conn]
   (when (not= :db.cardinality/many (:db/cardinality (d/entity @conn :logseq.property.class/extends)))
-    (d/transact! conn
-                 [{:db/ident :logseq.property.class/extends
-                   :db/cardinality :db.cardinality/many
-                   :db/index true}]
-                 {:fix-db? true})))
+    (ldb/transact! conn
+                   [{:db/ident :logseq.property.class/extends
+                     :db/cardinality :db.cardinality/many
+                     :db/index true}]
+                   {:fix-db? true})))
+
+(defn- fix-dangling-block-parents!
+  "Repair blocks whose :block/parent points at a since-deleted (non-existent) entity.
+   Such a dangling ref makes (:block/parent entity) materialize to nil, which then
+   makes block serialization emit `:block/parent nil` and crash the renderer mirror
+   transact (\"Cannot store nil as a value\"). Malli validation doesn't flag it (the
+   ref is a valid eid number), so repair it here: re-parent to the block's page when
+   available, otherwise drop the dangling ref."
+  [conn]
+  (let [db @conn
+        tx-data (->> (d/datoms db :aevt :block/parent)
+                     (keep (fn [d]
+                             (let [e (:e d)
+                                   parent-eid (:v d)]
+                               (when (nil? (d/entity db parent-eid)) ; target entity doesn't exist
+                                 (if-let [page-id (:db/id (:block/page (d/entity db e)))]
+                                   [:db/add e :block/parent page-id]
+                                   [:db/retract e :block/parent parent-eid]))))))]
+    (when (seq tx-data)
+      (log/info :db-validate/fix-dangling-block-parents {:count (count tx-data)})
+      (ldb/transact! conn tx-data {:fix-db? true}))))
 
 (defn- validate-db-result
   [db]
@@ -285,14 +314,25 @@
       (recur (validate-db-result @conn))
       result)))
 
+(defn- fix-missing-internal-page-parent-orders!
+  [conn]
+  (let [tx-data (db-order/missing-internal-page-parent-order-tx @conn)]
+    (when (seq tx-data)
+      (let [report (ldb/transact! conn tx-data {:fix-db? true})]
+        (doseq [order (keep :block/order tx-data)]
+          (db-order/reset-max-key! order))
+        report))))
+
 (defn validate-db
-  [conn & {:keys [fix] :or {fix true}}]
+  [conn & {:keys [fix silent?] :or {fix true}}]
   (when fix
     (fix-extends-cardinality! conn)
     (fix-icon-wrong-type! conn)
     (db-migrate/ensure-built-in-data-exists! conn)
     (fix-non-closed-values! conn)
-    (fix-num-prefix-db-idents! conn))
+    (fix-num-prefix-db-idents! conn)
+    (fix-dangling-block-parents! conn)
+    (fix-missing-internal-page-parent-orders! conn))
 
   (let [{:keys [errors datom-count entities invalid-entity-ids]}
         (if fix
@@ -300,25 +340,27 @@
           (let [{:keys [errors] :as result} (validate-db-result @conn)]
             (log-validation-errors! errors)
             result))
-        db @conn]
+        db @conn
+        counts (assoc (db-validate/graph-counts db entities) :datoms datom-count)]
 
-    (if errors
-      (do
-        (shared-service/broadcast-to-clients! :log [:db-invalid :error
-                                                    {:msg "Validation errors"
-                                                     :errors errors}])
+    (when-not silent?
+      (if errors
+        (do
+          (shared-service/broadcast-to-clients! :log [:db-invalid :error
+                                                      {:msg "Validation errors"
+                                                       :errors errors}])
+          (shared-service/broadcast-to-clients! :notification
+                                                [(str "Validation detected " (count errors) " invalid block(s). These blocks may be buggy."
+                                                      (when fix
+                                                        " Attempting to fix invalid blocks. Run validation again to see if they were fixed."))
+                                                 :warning false]))
+
         (shared-service/broadcast-to-clients! :notification
-                                              [(str "Validation detected " (count errors) " invalid block(s). These blocks may be buggy."
-                                                    (when fix
-                                                      " Attempting to fix invalid blocks. Run validation again to see if they were fixed."))
-                                               :warning false]))
-
-      (shared-service/broadcast-to-clients! :notification
-                                            [(str "Your graph is valid! " (assoc (db-validate/graph-counts db entities) :datoms datom-count))
-                                             :success false]))
-    {:errors errors
-     :datom-count datom-count
-     :invalid-entity-ids invalid-entity-ids}))
+                                              [(str "Your graph is valid! " counts)
+                                               :success false])))
+    (merge {:errors errors
+            :invalid-entity-ids invalid-entity-ids}
+           counts)))
 
 (defn recompute-checksum-diagnostics
   [_repo conn {:keys [local-checksum remote-checksum] :as _sync-diagnostics}]

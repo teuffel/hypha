@@ -1,39 +1,33 @@
 (ns frontend.handler.export.common
   "Common functions for exporting."
-  (:require [clojure.string :as string]
-            [frontend.db.conn :as conn]
-            [frontend.state :as state]
-            [logseq.cli.common.export.common :as cli-export-common]
+  (:require [frontend.state :as state]
+            [frontend.handler.export.common-impl :as common-impl]
             [promesa.core :as p]))
 
 (defn get-content-config []
   {:export-bullet-indentation (state/get-export-bullet-indentation)
-   :date-formatter (state/get-date-formatter)})
+   :date-formatter (state/get-date-formatter)
+   ;; Encode block background-color highlights as ^^text^^ so they survive
+   ;; Text/OPML/HTML export instead of being silently dropped (the property
+   ;; is otherwise hidden from export like other :hide? true properties).
+   :encode-highlight-as-mark? true})
 
-(defn root-block-uuids->content
-  "Converts given block uuids to content for given repo"
-  ([repo root-block-uuids]
-   (root-block-uuids->content repo root-block-uuids nil))
-  ([repo root-block-uuids {:keys [open-blocks-only? include-properties?]}]
-   (binding [cli-export-common/*current-db* (conn/get-db repo)
-             cli-export-common/*content-config* (get-content-config)]
-     (let [contents (mapv (fn [id]
-                            (cli-export-common/get-blocks-contents id
-                                                                   :open-blocks-only? open-blocks-only?
-                                                                   :include-properties? include-properties?))
-                          root-block-uuids)]
-       (string/join "\n" (mapv string/trim-newline contents))))))
+(defn <export-blocks-as-format
+  [repo root-block-uuids-or-page-uuid format-type options]
+  (state/<invoke-db-worker :thread-api/export-blocks-as-format
+                           repo
+                           root-block-uuids-or-page-uuid
+                           format-type
+                           options
+                           (get-content-config)))
 
-(defn get-page-content
-  "Gets page content for current repo, db and state"
-  ([page-uuid]
-   (get-page-content page-uuid nil))
-  ([page-uuid {:keys [open-blocks-only? include-properties?]}]
-   (binding [cli-export-common/*current-db* (conn/get-db (state/get-current-repo))
-             cli-export-common/*content-config* (get-content-config)]
-     (cli-export-common/get-page-content page-uuid
-                                         :open-blocks-only? open-blocks-only?
-                                         :include-properties? include-properties?))))
+(defn <get-blocks-export-data
+  [repo root-block-uuids-or-page-uuid opts]
+  (state/<invoke-db-worker :thread-api/export-get-blocks-data
+                           repo
+                           root-block-uuids-or-page-uuid
+                           opts
+                           (get-content-config)))
 
 (defn <get-debug-datoms
   [repo]
@@ -54,19 +48,19 @@
                          :format :markdown})
                       page->content)))
 
-;; Aliased fns requiring cli-export-common dynamic bindings e.g. cli-export-common/*current-db*
-(def replace-block&page-reference&embed cli-export-common/replace-block&page-reference&embed)
-(def replace-Heading-with-Paragraph cli-export-common/replace-Heading-with-Paragraph)
+;; Aliased fns requiring worker-bound resolvers when replacing block/page embeds.
+(def replace-block&page-reference&embed common-impl/replace-block&page-reference&embed)
+(def replace-Heading-with-Paragraph common-impl/replace-Heading-with-Paragraph)
 
 ;; Aliased fns
-(def priority->string cli-export-common/priority->string)
-(def timestamp-to-string cli-export-common/timestamp-to-string)
-(def hashtag-value->string cli-export-common/hashtag-value->string)
-(def remove-block-ast-pos cli-export-common/remove-block-ast-pos)
-(def Properties-block-ast? cli-export-common/Properties-block-ast?)
-(def keep-only-level<=n cli-export-common/keep-only-level<=n)
-(def remove-emphasis cli-export-common/remove-emphasis)
-(def remove-page-ref-brackets cli-export-common/remove-page-ref-brackets)
-(def remove-tags cli-export-common/remove-tags)
-(def remove-prefix-spaces-in-Plain cli-export-common/remove-prefix-spaces-in-Plain)
-(def walk-block-ast cli-export-common/walk-block-ast)
+(def priority->string common-impl/priority->string)
+(def timestamp-to-string common-impl/timestamp-to-string)
+(def hashtag-value->string common-impl/hashtag-value->string)
+(def remove-block-ast-pos common-impl/remove-block-ast-pos)
+(def Properties-block-ast? common-impl/Properties-block-ast?)
+(def keep-only-level<=n common-impl/keep-only-level<=n)
+(def remove-emphasis common-impl/remove-emphasis)
+(def remove-page-ref-brackets common-impl/remove-page-ref-brackets)
+(def remove-tags common-impl/remove-tags)
+(def remove-prefix-spaces-in-Plain common-impl/remove-prefix-spaces-in-Plain)
+(def walk-block-ast common-impl/walk-block-ast)

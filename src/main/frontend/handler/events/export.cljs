@@ -1,16 +1,18 @@
 (ns frontend.handler.events.export
   "Export events"
+  (:require-macros [frontend.handler.events.macros :refer [defevent!]])
   (:require [frontend.handler.events :as events]
             [frontend.context.i18n :refer [t]]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [logseq.shui.dialog.core :as shui-dialog]
             [logseq.shui.ui :as shui]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc indicator-progress < rum/reactive
+(hsx/defc indicator-progress
   []
-  (let [{:keys [total current-idx current-page label]} (state/sub :graph/exporting-state)
+  (let [{:keys [total current-idx current-page label]} (rfx/use-sub [:graph/exporting-state])
         label (or label (t :export/exporting))
         left-label (if (and current-idx total (= current-idx total))
                      [:div.flex.flex-row.font-bold (t :ui/loading)]
@@ -26,21 +28,21 @@
     [:div.p-5
      (ui/progress-bar-with-label width left-label process)]))
 
-(defmethod events/handle :dialog/export-zip [[_ label]]
+(defevent! :dialog/export-zip [[_ label]]
   (shui/dialog-close!)
   (state/set-state! :graph/exporting :export-zip)
   (state/set-state! :graph/exporting-state {:total 100
                                             :current-idx 0
                                             :current-page label
                                             :label (t :export/exporting)})
-  (when-not (shui-dialog/get-modal :export-indicator)
+  (when-not (shui-dialog/get-dialog :export-indicator)
     (shui/dialog-open! indicator-progress
                        {:id :export-indicator
                         :content-props
                         {:onPointerDownOutside #(.preventDefault %)
                          :onOpenAutoFocus #(.preventDefault %)}})))
 
-(defmethod events/handle :dialog/close-export-zip [_]
+(defevent! :dialog/close-export-zip [_]
   (state/set-state! :graph/exporting nil)
   (state/set-state! :graph/exporting-state nil)
   (shui/dialog-close! :export-indicator))

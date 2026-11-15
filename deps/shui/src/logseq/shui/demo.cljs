@@ -1,504 +1,573 @@
 (ns logseq.shui.demo
   (:require [dommy.core :refer-macros [sel1]]
+            [frontend.handler.notification :as notification]
             [logseq.shui.dialog.core :as dialog-core]
-            [logseq.shui.form.core :refer [yup yup-resolver] :as form-core]
+            [logseq.shui.form.core :refer [yup] :as form-core]
             [logseq.shui.hooks :as hooks]
-            [logseq.shui.ui :as ui]
+            [logseq.shui.ui :as shui]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc section-item
+(hsx/defc section-item
   [title children]
   [:section.mb-4
    [:h2.text-xl.font-semibold.py-2.italic.opacity-50 title]
    [:div.py-4 children]])
 
-(rum/defc sample-dropdown-menu-content
+(hsx/defc sample-dropdown-menu-content
   []
-  (let [icon #(ui/tabler-icon (name %1) {:class "scale-90 pr-1 opacity-80"})]
-    (ui/dropdown-menu-content
-     {:class "w-56"
-      :on-click (fn [^js e] (some-> (.-target e) (.-innerText)
-                                    (#(identity ["You select: " [:b.text-red-700 %1]])) (ui/toast! :info)))}
-     (ui/dropdown-menu-label "My Account")
-     (ui/dropdown-menu-separator)
-     (ui/dropdown-menu-group
+  (let [icon #(shui/tabler-icon (name %1) {:class "scale-90 pr-1 opacity-80"})]
+    (shui/dropdown-menu-content
+      {:class "w-56"
+       :on-click (fn [^js e] (some-> (.-target e) (.-innerText)
+                               (#(identity ["You select: " [:b.text-red-700 %1]])) (shui/toast! :info)))}
+      (shui/dropdown-menu-label "My Account")
+      (shui/dropdown-menu-separator)
+      (shui/dropdown-menu-group
         ;; items
-      (ui/dropdown-menu-item (icon :user) "Profile" (ui/dropdown-menu-shortcut "⌘P"))
-      (ui/dropdown-menu-item (icon :brand-mastercard) [:span "Billing"] (ui/dropdown-menu-shortcut "⌘B"))
-      (ui/dropdown-menu-item (icon :adjustments-alt) [:span "Settings"] (ui/dropdown-menu-shortcut "⌘,"))
-      (ui/dropdown-menu-item (icon :keyboard) [:span "Keyboard shortcuts"]))
-     (ui/dropdown-menu-separator)
+        (shui/dropdown-menu-item (icon :user) "Profile" (shui/dropdown-menu-shortcut "⌘P"))
+        (shui/dropdown-menu-item (icon :brand-mastercard) [:span "Billing"] (shui/dropdown-menu-shortcut "⌘B"))
+        (shui/dropdown-menu-item (icon :adjustments-alt) [:span "Settings"] (shui/dropdown-menu-shortcut "⌘,"))
+        (shui/dropdown-menu-item (icon :keyboard) [:span "Keyboard shortcuts"]))
+      (shui/dropdown-menu-separator)
       ;; group
-     (ui/dropdown-menu-group
+      (shui/dropdown-menu-group
         ;; items
-      (ui/dropdown-menu-item (icon :users) "Team")
+        (shui/dropdown-menu-item (icon :users) "Team")
         ;; sub menu
-      (ui/dropdown-menu-sub
-       (ui/dropdown-menu-sub-trigger
-        (icon :user-plus) [:span "Invite users"])
-       (ui/dropdown-menu-sub-content
-        (ui/dropdown-menu-item (icon :mail) "Email")
-        (ui/dropdown-menu-item (icon :message) "Message")
-        (ui/dropdown-menu-item (icon :dots-circle-horizontal) "More...")))
+        (shui/dropdown-menu-sub
+          (shui/dropdown-menu-sub-trigger
+            (icon :user-plus) [:span "Invite users"])
+          (shui/dropdown-menu-sub-content
+            (shui/dropdown-menu-item (icon :mail) "Email")
+            (shui/dropdown-menu-item (icon :message) "Message")
+            (shui/dropdown-menu-item (icon :dots-circle-horizontal) "More...")))
         ;; menu item
-      (ui/dropdown-menu-item (icon :plus) "New Team" (ui/dropdown-menu-shortcut "⌘+T")))
-     (ui/dropdown-menu-separator)
-     (ui/dropdown-menu-item (icon :brand-github) "GitHub")
-     (ui/dropdown-menu-item {:disabled true} (icon :cloud) "Cloud API")
-     (ui/dropdown-menu-separator)
-     (ui/dropdown-menu-item (icon :logout) "Logout" (ui/dropdown-menu-shortcut "⌘+Q")))))
+        (shui/dropdown-menu-item (icon :plus) "New Team" (shui/dropdown-menu-shortcut "⌘+T")))
+      (shui/dropdown-menu-separator)
+      (shui/dropdown-menu-item (icon :brand-github) "GitHub")
+      (shui/dropdown-menu-item {:disabled true} (icon :cloud) "Cloud API")
+      (shui/dropdown-menu-separator)
+      (shui/dropdown-menu-item (icon :logout) "Logout" (shui/dropdown-menu-shortcut "⌘+Q")))))
 
-(rum/defc sample-context-menu-content
+(hsx/defc sample-context-menu-content
   []
-  (let [icon #(ui/tabler-icon (name %1) {:class "scale-90 pr-1 opacity-80"})]
-    (ui/context-menu
+  (let [icon #(shui/tabler-icon (name %1) {:class "scale-90 pr-1 opacity-80"})]
+    (shui/context-menu
       ;; trigger
-     (ui/context-menu-trigger
-      [:div.border.px-6.py-12.border-dashed.rounded.text-center.select-none
-       {:key "ctx-menu-click"}
-       [:span.opacity-50 "Right click here"]])
+      (shui/context-menu-trigger
+        [:div.border.px-6.py-12.border-dashed.rounded.text-center.select-none
+         {:key "ctx-menu-click"}
+         [:span.opacity-50 "Right click here"]])
       ;; content
-     (ui/context-menu-content
-      {:class "w-60 max-h-[80vh] overflow-auto"}
-      (ui/context-menu-item
-       (icon "arrow-left")
-       "Back"
-       (ui/context-menu-shortcut "⌘["))
-      (ui/context-menu-item {:disabled true}
-                            (icon "arrow-right")
-                            "Forward"
-                            (ui/context-menu-shortcut "⌘]"))
-      (ui/context-menu-item
-       (icon "refresh")
-       "Reload"
-       (ui/context-menu-shortcut "⌘R"))
+      (shui/context-menu-content
+        {:class "w-60 max-h-[80vh] overflow-auto"}
+        (shui/context-menu-item
+          (icon "arrow-left")
+          "Back"
+          (shui/context-menu-shortcut "⌘["))
+        (shui/context-menu-item {:disabled true}
+          (icon "arrow-right")
+          "Forward"
+          (shui/context-menu-shortcut "⌘]"))
+        (shui/context-menu-item
+          (icon "refresh")
+          "Reload"
+          (shui/context-menu-shortcut "⌘R"))
         ;; Sub menu
-      (ui/context-menu-sub
-       (ui/context-menu-sub-trigger {:inset true} "More tools")
-       (ui/context-menu-sub-content {:class "w-48"}
-                                    (ui/context-menu-item "Save page As..."
-                                                          (ui/context-menu-shortcut "⇧⌘S"))
-                                    (ui/context-menu-item "Create Shortcut...")
-                                    (ui/context-menu-item "Name Window...")
-                                    (ui/context-menu-separator)
-                                    (ui/context-menu-item "Developer Tools")))
+        (shui/context-menu-sub
+          (shui/context-menu-sub-trigger {:inset true} "More tools")
+          (shui/context-menu-sub-content {:class "w-48"}
+            (shui/context-menu-item "Save page As..."
+              (shui/context-menu-shortcut "⇧⌘S"))
+            (shui/context-menu-item "Create Shortcut...")
+            (shui/context-menu-item "Name Window...")
+            (shui/context-menu-separator)
+            (shui/context-menu-item "Developer Tools")))
         ;; more
-      (ui/context-menu-separator)
-      (ui/context-menu-checkbox-item {:checked true}
-                                     "Show Bookmarks Bar" (ui/context-menu-shortcut "⌘⇧B"))
-      (ui/context-menu-checkbox-item "Show Full URLs")
-      (ui/context-menu-separator)
-      (ui/context-menu-radio-group {:value "pedro"}
-                                   (ui/context-menu-label {:inset true} "People")
-                                   (ui/context-menu-separator)
-                                   (ui/context-menu-radio-item {:value "pedro"} "Pedro Duarte")
-                                   (ui/context-menu-radio-item {:value "colm"} "Colm Tuite"))))))
+        (shui/context-menu-separator)
+        (shui/context-menu-checkbox-item {:checked true}
+          "Show Bookmarks Bar" (shui/context-menu-shortcut "⌘⇧B"))
+        (shui/context-menu-checkbox-item "Show Full URLs")
+        (shui/context-menu-separator)
+        (shui/context-menu-radio-group {:value "pedro"}
+          (shui/context-menu-label {:inset true} "People")
+          (shui/context-menu-separator)
+          (shui/context-menu-radio-item {:value "pedro"} "Pedro Duarte")
+          (shui/context-menu-radio-item {:value "colm"} "Colm Tuite"))))))
 
-(rum/defc sample-tabs
+(hsx/defc sample-tabs
   []
-  (ui/tabs
-   {:defaultValue "account"
-    :className "w-[400px]"}
-   (ui/tabs-list
-    (ui/tabs-trigger
-     {:value "account"}
-     "Account")
-    (ui/tabs-trigger
-     {:value "password"}
-     "Password"))
-   (ui/tabs-content
-    {:value "account"}
-    "Make changes to your account here.")
-   (ui/tabs-content
-    {:value "password"}
-    "Change your password here.")))
+  (shui/tabs
+    {:defaultValue "account"
+     :className "w-[400px]"}
+    (shui/tabs-list
+      (shui/tabs-trigger
+        {:value "account"}
+        "Account")
+      (shui/tabs-trigger
+        {:value "password"}
+        "Password"))
+    (shui/tabs-content
+      {:value "account"}
+      "Make changes to your account here.")
+    (shui/tabs-content
+      {:value "password"}
+      "Change your password here.")))
 
-(rum/defc sample-form-basic
+(hsx/defc sample-form-basic
   []
   [:div.border.p-6.rounded.bg-gray-01
    (let [form-ctx (form-core/use-form
-                   {:defaultValues {:username ""
-                                    :agreement true
-                                    :notification "all"
-                                    :bio ""}
-                    :yupSchema (-> (.object yup)
-                                   (.shape #js {:username (-> (.string yup) (.required))})
-                                   (.required))})
+                    {:defaultValues {:username ""
+                                     :agreement true
+                                     :notification "all"
+                                     :bio ""}
+                     :yupSchema (-> (.object yup)
+                                  (.shape #js {:username (-> (.string yup) (.required))})
+                                  (.required))})
          handle-submit (:handleSubmit form-ctx)
          on-submit-valid (handle-submit
-                          (fn [^js e]
-                            (js/console.log "[form] submit: " e)
-                            (js/alert (js/JSON.stringify e nil 2))))]
+                           (fn [^js e]
+                             (js/console.log "[form] submit: " e)
+                             (js/alert (js/JSON.stringify e nil 2))))]
 
-     (ui/form-provider form-ctx
-                       [:form
-                        {:on-submit on-submit-valid}
+     (shui/form-provider form-ctx
+       [:form
+        {:on-submit on-submit-valid}
 
         ;; field item
-                        (ui/form-field {:name "username"}
-                                       (fn [field error]
-                                         (ui/form-item
-                                          (ui/form-label "Username")
-                                          (ui/form-control
-                                           (ui/input (merge {:placeholder "Username"} field)))
-                                          (ui/form-description
-                                           (if error
-                                             [:b.text-red-800 (:message error)]
-                                             "This is your public display name.")))))
+        (shui/form-field {:name "username"}
+          (fn [field error]
+            (shui/form-item
+              (shui/form-label "Username")
+              (shui/form-control
+                (shui/input (merge {:placeholder "Username"} field)))
+              (shui/form-description
+                (if error
+                  [:b.text-red-800 (:message error)]
+                  "This is your public display name.")))))
 
-                        (ui/form-field {:name "bio"}
-                                       (fn [field error]
-                                         (ui/form-item
-                                          {:class "pt-4"}
-                                          (ui/form-control
-                                           (ui/textarea (merge {:placeholder "Bio text..."} field))))))
+        (shui/form-field {:name "bio"}
+          (fn [field _error]
+            (shui/form-item
+              {:class "pt-4"}
+              (shui/form-control
+                (shui/textarea (merge {:placeholder "Bio text..."} field))))))
 
         ;; radio
-                        (ui/form-field {:name "notification"}
+        (shui/form-field {:name "notification"}
           ;; item render
-                                       (fn [field]
-                                         (ui/form-item
-                                          {:class "space-y-3 my-4"}
-                                          (ui/form-label "Notify me about...")
-                                          (ui/form-control
-                                           (ui/radio-group
-                                            {:value (:value field)
-                                             :on-value-change (:onChange field)
-                                             :class "flex flex-col space-y-3"}
-                                            (ui/form-item
-                                             {:class "flex flex-row space-x-3 items-center space-y-0"}
-                                             (ui/form-control
-                                              (ui/radio-group-item {:value "all"}))
-                                             (ui/form-label "All"))
+          (fn [field]
+            (shui/form-item
+              {:class "space-y-3 my-4"}
+              (shui/form-control
+                (shui/radio-group
+                  {:value (:value field)
+                   :on-value-change (:onChange field)
+                   :class "flex flex-col space-y-3"}
+                  (shui/form-item
+                    {:class "flex flex-row space-x-2 items-center space-y-0"}
+                    (shui/form-control
+                      (shui/radio-group-item {:value "all"}))
+                    (shui/form-label "All"))
 
-                                            (ui/form-item
-                                             {:class "flex flex-row space-x-3 items-center space-y-0"}
-                                             (ui/form-control
-                                              (ui/radio-group-item {:value "direct"}))
-                                             (ui/form-label "Direct messages and mentions")))))))
+                  (shui/form-item
+                    {:class "flex flex-row space-x-2 items-center space-y-0"}
+                    (shui/form-control
+                      (shui/radio-group-item {:value "direct"}))
+                    (shui/form-label "Direct messages and mentions")))))))
 
-                        [:hr]
+        [:hr]
 
         ;; checkbox
-                        (ui/form-field {:name "agreement"}
-                                       (fn [field]
-                                         (ui/form-item
-                                          {:class "flex justify-start items-center space-x-3 space-y-0 my-3 pr-3"}
-                                          (ui/form-control
-                                           (ui/checkbox {:checked (:value field)
-                                                         :on-checked-change (:onChange field)}))
-                                          (ui/form-label {:class "font-normal cursor-pointer"} "Agreement terms"))))
+        (shui/form-field {:name "agreement"}
+          (fn [field]
+            (shui/form-item
+              {:class "flex justify-start items-center space-x-2 space-y-0 my-3 pr-3"}
+              (shui/form-control
+                (shui/checkbox {:checked (:value field)
+                                :on-checked-change (:onChange field)}))
+              (shui/form-label {:class "font-normal cursor-pointer"} "Agreement terms"))))
 
         ;; actions
-                        [:div.relative.px-2
-                         (ui/button {:type "submit" :class "!absolute right-0 top-[-40px]"} "Submit")]]))])
+        [:div.relative.px-2
+         (shui/button {:type "submit" :class "!absolute right-0 top-[-40px]"} "Submit")]]))])
 
-(rum/defc sample-date-picker
+(hsx/defc sample-date-picker
   []
-  (let [[open? set-open!] (rum/use-state false)
-        [date set-date!] (rum/use-state (js/Date.))]
-    (ui/popover
-     {:open open?
-      :on-open-change (fn [o] (set-open! o))}
+  (let [[open? set-open!] (hooks/use-state false)
+        [date set-date!] (hooks/use-state (js/Date.))]
+    (shui/popover
+      {:open open?
+       :on-open-change (fn [o] (set-open! o))}
       ;; trigger
-     (ui/popover-trigger
-      {:as-child true
-       :class "w-2/3"}
-      (ui/input
-       {:type :text
-        :placeholder "pick a date"
-        :default-value (.toDateString date)}))
+      (shui/popover-trigger
+        {:as-child true
+         :class "w-2/3"}
+        (shui/input
+          {:type :text
+           :placeholder "pick a date"
+           :default-value (.toDateString date)}))
       ;; content
-     (ui/popover-content
-      {:on-open-auto-focus #(.preventDefault %)
-       :side-offset 8
-       :class "p-0"}
-      (ui/calendar
-       {:selected date
-        :on-day-click
-        (fn [^js d]
-          (set-date! d)
-          (set-open! false))})))))
+      (shui/popover-content
+        {:on-open-auto-focus #(.preventDefault %)
+         :side-offset 8
+         :class "p-0"}
+        (shui/calendar
+          {:selected date
+           :on-day-click
+           (fn [^js d]
+             (set-date! d)
+             (set-open! false))})))))
 
-(rum/defc sample-dialog-basic
+(hsx/defc sample-dialog-basic
   []
-  (let [[open? set-open!] (rum/use-state false)]
-    (ui/dialog
-     {:open open?
-      :on-open-change #(set-open! %)}
-     (ui/dialog-trigger
-      {:as-child true}
-      (ui/button {:variant :outline}
-                 (ui/tabler-icon "notification") "Open as modal locally"))
-     (ui/dialog-content
-      (ui/dialog-header
-       (ui/dialog-title "Header")
-       (ui/dialog-description
-        "Description"))
-      [:div.max-h-96.overflow-y-auto
-       {:class "-mx-6"}
-       [:section.px-6
-        (repeat 8 [:p "Your custom content"])]]
-      (ui/dialog-footer
-       (ui/button
-        {:on-click #(set-open! false)
-         :size :md} "🍄 * Footer"))))))
+  (let [[open? set-open!] (hooks/use-state false)]
+    (shui/dialog
+      {:open open?
+       :on-open-change #(set-open! %)}
+      (shui/dialog-trigger
+        {:as-child true}
+        (shui/button {:variant :outline}
+          (shui/tabler-icon "notification") "Open as modal locally"))
+      (shui/dialog-content
+        (shui/dialog-header
+          (shui/dialog-title "Header")
+          (shui/dialog-description
+            "Description"))
+        [:div.max-h-96.overflow-y-auto
+         {:class "-mx-6"}
+         [:section.px-6
+          (repeat 8 [:p "Your custom content"])]]
+        (shui/dialog-footer
+          (shui/button
+            {:on-click #(set-open! false)
+             :size :md} "🍄 * Footer"))))))
 
-(rum/defc page []
-  (ui/tooltip-provider
-   [:div.sm:p-10
-    [:hr]
-    [:input
-     {:type "checkbox" :on-change #(js/console.log "===>> onChange:" % (.-value (.-target %)))}]
-    (ui/checkbox {:on-click
-                  (fn [^js e] (js/console.log "==>> click:"
-                                              (set! (. (.-target e) -checked) (.-state (.-dataset (.-target e))))
-                                              (.-checked (.-target e))))
-                  :on-checked-change #(js/console.log "==>> on checked change:" %)} "abc")
+(hsx/defc sample-notifications
+  []
+  (let [[last-dismissed set-last-dismissed!] (hooks/use-state nil)
+        progress-id :demo/notification-progress
+        callback-id :demo/notification-callback]
+    [:div.flex.flex-col.gap-3
+     [:div.flex.flex-row.flex-wrap.gap-2
+      (shui/button
+        {:variant :outline
+         :size :sm
+         :on-click #(notification/show! "Saved successfully" :success)}
+        "Success")
+      (shui/button
+        {:variant :outline
+         :size :sm
+         :on-click #(notification/show! "Background sync is running" :info)}
+        "Info")
+      (shui/button
+        {:variant :outline
+         :size :sm
+         :on-click #(notification/show! "Storage space is almost full" :warning false)}
+        "Warning")
+      (shui/button
+        {:variant :destructive
+         :size :sm
+         :on-click #(notification/show! "Upload failed. Fix it before retrying." :error false)}
+        "Persistent error")]
 
-    [:h1.text-3xl.font-bold "Logseq UI"]
-    [:hr]
+     [:div.flex.flex-row.flex-wrap.gap-2
+      (shui/button
+        {:class "primary-green"
+         :size :sm
+         :on-click (fn []
+                     (notification/show! "Syncing notifications demo..." :info true progress-id 10000)
+                     (js/setTimeout
+                      #(notification/show! "Notifications demo synced" :success true progress-id 1500)
+                      1200))}
+        "Update same id")
+      (shui/button
+        {:variant :secondary
+         :size :sm
+         :on-click #(notification/clear! progress-id)}
+        "Clear updated one")
+      (shui/button
+        {:variant :secondary
+         :size :sm
+         :on-click #(notification/show! "Dismiss me to trigger callback" :warning true callback-id 4000
+                                      (fn [uid] (set-last-dismissed! (name uid))))}
+        "Dismiss callback")
+      (shui/button
+        {:variant :ghost
+         :size :sm
+         :on-click notification/clear-all!}
+        "Clear all")]
+
+     [:div.text-sm.opacity-70
+      "Last dismissed notification: "
+      [:code (or last-dismissed "none")]]]))
+
+(hsx/defc page []
+  (shui/tooltip-provider
+    [:div.sm:p-10
+     [:hr]
+     [:input
+      {:type "checkbox" :on-change #(js/console.log "===>> onChange:" % (.-value (.-target %)))}]
+     (shui/checkbox {:on-click
+                     (fn [^js e] (js/console.log "==>> click:"
+                                   (set! (. (.-target e) -checked) (.-state (.-dataset (.-target e))))
+                                   (.-checked (.-target e))))
+                     :on-checked-change #(js/console.log "==>> on checked change:" %)} "abc")
+
+     [:h1.text-3xl.font-bold "Logseq UI"]
+     [:hr]
 
      ;; Button
-    (section-item "Button"
-                  [:div.flex.flex-row.flex-wrap.gap-2
-                   (let [[loading? set-loading!] (rum/use-state false)]
-                     (ui/button
-                      {:size :sm
-                       :on-click (fn []
-                                   (set-loading! true)
-                                   (js/setTimeout #(set-loading! false) 5000))
-                       :disabled loading?}
-                      (when loading?
-                        (ui/tabler-icon "loader2" {:class "animate-spin"}))
-                      "Logseq Classic Button"
-                      (ui/tabler-icon "arrow-right")))
+     (section-item "Button"
+       [:div.flex.flex-row.flex-wrap.gap-2
+        (let [[loading? set-loading!] (hooks/use-state false)]
+          (shui/button
+            {:size :sm
+             :on-click (fn []
+                         (set-loading! true)
+                         (js/setTimeout #(set-loading! false) 5000))
+             :disabled loading?}
+            (when loading?
+              (shui/tabler-icon "loader2" {:class "animate-spin"}))
+            "Logseq Classic Button"
+            (shui/tabler-icon "arrow-right")))
 
-                   (ui/button {:variant :outline :size :sm} "Outline")
-                   (ui/button {:variant :secondary :size :sm} "Secondary")
-                   (ui/button {:disabled true :size :sm} "Disabled")
-                   (ui/button {:variant :destructive :size :sm} "Destructive")
-                   (ui/button {:class "primary-green" :size :sm} "Custom (.primary-green)")
-                   (ui/button {:variant :ghost :size :sm} "Ghost")
-                   (ui/button {:variant :link :size :sm} "Link")
-                   (ui/button
-                    {:variant :icon
-                     :size :sm}
-                    [:a.flex.items-center.text-blue-rx-10.hover:text-blue-rx-10-alpha
-                     {:href "https://x.com/logseq" :target "_blank"}
-                     (ui/tabler-icon "brand-twitter" {:size 15})])])
+        (shui/button {:variant :outline :size :sm} "Outline")
+        (shui/button {:variant :secondary :size :sm} "Secondary")
+        (shui/button {:disabled true :size :sm} "Disabled")
+        (shui/button {:variant :destructive :size :sm} "Destructive")
+        (shui/button {:class "primary-green" :size :sm} "Custom (.primary-green)")
+        (shui/button {:variant :ghost :size :sm} "Ghost")
+        (shui/button {:variant :link :size :sm} "Link")
+        (shui/button
+          {:variant :icon
+           :size :sm}
+          [:a.flex.items-center.text-blue-rx-10.hover:text-blue-rx-10-alpha
+           {:href "https://x.com/logseq" :target "_blank"}
+           (shui/tabler-icon "brand-twitter" {:size 15})])])
 
-;; Toast
-    (section-item "Toast"
-                  [:div.flex.flex-row.flex-wrap.gap-2
-                   (ui/button
-                    {:size :md
-                     :variant :outline
-                     :on-click #(ui/toast!
-                                 "Check for updates ..."
-                                 (nth [:success :error :default :info :warning] (rand-int 3))
-                                 {:title (if (odd? (js/Date.now)) "History of China" "")
-                                  :duration 3000})}
-                    "Open random toast"
-                    (ui/tabler-icon "arrow-right"))
+     ;; Toast
+     (section-item "Toast"
+       [:div.flex.flex-row.flex-wrap.gap-2
+        (shui/button
+          {:size :md
+           :variant :outline
+           :on-click #(shui/toast!
+                        "Check for updates ..."
+                        (nth [:success :error :default :info :warning] (rand-int 3))
+                        {:title (if (odd? (js/Date.now)) "History of China" "")
+                         :duration 3000})}
+          "Open random toast"
+          (shui/tabler-icon "arrow-right"))
 
-                   (ui/button
-                    {:variant :secondary
-                     :size :md
-                     :on-click (fn []
-                                 (ui/toast!
-                                  (fn [{:keys [id dismiss! update!]}]
-                                    [:b.text-red-700
-                                     [:div.flex.items-center.gap-2
-                                      (ui/tabler-icon "info-circle")
-                                      (str "#(" id ") ")
-                                      (.toLocaleString (js/Date.))]
-                                     [:div.flex.flex-row.gap-2
-                                      (ui/button
-                                       {:on-click #(dismiss! id) :size :sm}
-                                       "x close")
+        (shui/button
+          {:variant :secondary
+           :size :md
+           :on-click (fn []
+                       (shui/toast!
+                         (fn [{:keys [id dismiss! update!]}]
+                           [:b.text-red-700
+                            [:div.flex.items-center.gap-2
+                             (shui/tabler-icon "info-circle")
+                             (str "#(" id ") ")
+                             (.toLocaleString (js/Date.))]
+                            [:div.flex.flex-row.gap-2
+                             (shui/button
+                               {:on-click #(dismiss! id) :size :sm}
+                               "x close")
 
-                                      (ui/button
-                                       {:on-click #(update! {:title (js/Date.now)
-                                                             :action [:b (ui/button {:on-click (fn [] (ui/toast-dismiss!))} "clear all")]})
-                                        :size :sm}
-                                       "x update")]])
-                                  :default
-                                  {:duration 3000 :onDismiss #(js/console.log "===>> dismiss?:" %1)}))}
-                    (ui/tabler-icon "apps")
-                    "Toast callback handle")
+                             (shui/button
+                               {:on-click #(update! {:title (js/Date.now)
+                                                     :action [:b (shui/button {:on-click (fn [] (shui/toast-dismiss!))} "clear all")]})
+                                :size :sm}
+                               "x update")]])
+                         :default
+                         {:duration 3000 :onDismiss #(js/console.log "===>> dismiss?:" %1)}))}
+          (shui/tabler-icon "apps")
+          "Toast callback handle")
 
-                   (ui/button
-                    {:on-click #(ui/toast! "A message from SoundCloud..."
-                                           {:class "text-orange-rx-10"
-                                            :icon [:b.pl-1 (ui/tabler-icon "brand-soundcloud" {:size 20})]
-                                            :duration 3000})
-                     :class "primary-orange"
-                     :size :md}
-                    "Custom icon")])
+        (shui/button
+          {:on-click #(shui/toast! "A message from SoundCloud..."
+                        {:class "text-orange-rx-10"
+                         :icon [:b.pl-1 (shui/tabler-icon "brand-soundcloud" {:size 20})]
+                         :duration 3000})
+           :class "primary-orange"
+           :size :md}
+          "Custom icon")])
 
-    [:div.flex.flex-row.space-x-16.items-center
+     (section-item "Notification"
+       (sample-notifications))
+
+     [:div.flex.flex-row.space-x-16.items-center
       ;; Tips
-     (section-item "Tips"
-                   [:div.flex.flex-row.flex-wrap.gap-2
-                    (ui/tooltip-provider
-                     (ui/tooltip
-                      (ui/tooltip-trigger
-                       (ui/button
-                        {:variant :outline
-                         :on-click #(dialog-core/open! [:h1.text-9xl.text-center.scale-110 "🍄"])}
-                        "Tip for hint?"))
-                      (ui/tooltip-content
-                       {:class "w-42 px-8 py-4 text-xl border-green-rx-08 bg-green-rx-07-alpha"}
-                       "🍄")))])
+      (section-item "Tips"
+        [:div.flex.flex-row.flex-wrap.gap-2
+         (shui/tooltip-provider
+           (shui/tooltip
+             (shui/tooltip-trigger
+               (shui/button
+                 {:variant :outline
+                  :on-click #(dialog-core/open! [:h1.text-9xl.text-center.scale-110 "🍄"])}
+                 "Tip for hint?"))
+             (shui/tooltip-content
+               {:class "w-42 px-8 py-4 text-xl border-green-rx-08 bg-green-rx-07-alpha"}
+               "🍄")))])
       ;; Avatar
-     (section-item "Avatar"
-                   [:div.flex.flex-row.space-x-6.items-center
-                    (ui/avatar
-                     (ui/avatar-image {:src "https://avatars.githubusercontent.com/u/63385289?s=200&v=4"})
-                     (ui/avatar-fallback "L"))
-                    (ui/avatar
-                     (ui/avatar-fallback "CH"))])]
+      (section-item "Avatar"
+        [:div.flex.flex-row.space-x-6.items-center
+         (shui/avatar
+           (shui/avatar-image {:src "https://avatars.githubusercontent.com/u/63385289?s=200&v=4"})
+           (shui/avatar-fallback "L"))
+         (shui/avatar
+           (shui/avatar-fallback "CH"))])]
 
      ;; Badge
-    (section-item "Badge"
-                  [:div.flex.flex-row.flex-wrap.gap-2
-                   (ui/badge "Default")
-                   (ui/badge {:variant :outline} "Outline")
-                   (ui/badge {:variant :secondary} "Secondary")
-                   (ui/badge {:variant :destructive} "Destructive")
-                   (ui/badge {:class "primary-yellow"} "Custom (.primary-yellow)")])
+     (section-item "Badge"
+       [:div.flex.flex-row.flex-wrap.gap-2
+        (shui/badge "Default")
+        (shui/badge {:variant :outline} "Outline")
+        (shui/badge {:variant :secondary} "Secondary")
+        (shui/badge {:variant :destructive} "Destructive")
+        (shui/badge {:class "primary-yellow"} "Custom (.primary-yellow)")])
 
-    [:div.grid.sm:grid-cols-3.sm:gap-8
+     [:div.grid.sm:grid-cols-3.sm:gap-8
       ;; Dropdown
-     (section-item "Dropdown"
-                   (ui/dropdown-menu
-                    (ui/tooltip
-                     (ui/tooltip-trigger
-                      (ui/dropdown-menu-trigger
-                       {:as-child true}
-                       (ui/button {:variant :outline}
-                                  (ui/tabler-icon "list") "Open dropdown menu")))
-                     (ui/tooltip-content "test hide?"))
+      (section-item "Dropdown"
+        (shui/dropdown-menu
+          (shui/tooltip
+            (shui/tooltip-trigger
+              (shui/dropdown-menu-trigger
+                {:as-child true}
+                (shui/button {:variant :outline}
+                  (shui/tabler-icon "list") "Open dropdown menu")))
+            (shui/tooltip-content "test hide?"))
 
-                    (sample-dropdown-menu-content)))
+          (sample-dropdown-menu-content)))
 
       ;; Context menu
-     [:div.col-span-2
-      (section-item "Context Menu"
-                    (sample-context-menu-content))]]
+      [:div.col-span-2
+       (section-item "Context Menu"
+         (sample-context-menu-content))]]
 
-    (section-item "Tabs" (sample-tabs))
+     (section-item "Tabs" (sample-tabs))
 
      ;; Dialog
-    (section-item "Dialog"
-                  [:div.flex.flex-row.flex-wrap.gap-2
-                   (sample-dialog-basic)
-                   (ui/button
-                    {:on-click #(dialog-core/open! "a modal dialog from `open!`" {:title "Title"})}
-                    "Imperative API: open!")
+     (section-item "Dialog"
+       [:div.flex.flex-row.flex-wrap.gap-2
+        (sample-dialog-basic)
+        (let [fc #(dialog-core/open!
+                    (fn []
+                      [:div.py-2
+                       [:p [:strong "a modal dialog from `open!`"]]
+                       [:p "You can put any content here, and even use shui components!"]
+                       [:p (shui/button {:on-click (fn [] (dialog-core/alert! [:p "nest"] {}))} "open nested dialog")]])
+                    {:title "Title"})]
+          (shui/button
+            {:on-click fc}
+            "Imperative API: open!"))
 
-                   (ui/button
-                    {:class "primary-yellow"
-                     :on-click (fn []
-                                 (-> (dialog-core/alert!
-                                      "a alert dialog from `alert!`"
-                                      {:title [:div.flex.flex-row.space-x-2.items-center
-                                               (ui/tabler-icon "alert-triangle" {:size 18})
-                                               [:span "Alert"]]})
-                                     (p/then #(js/console.log "=> alert (promise): " %))))}
-                    "Imperative API: alert!")
+        (shui/button
+          {:class "primary-yellow"
+           :on-click (fn []
+                       (-> (dialog-core/alert!
+                             "a alert dialog from `alert!`"
+                             {:title [:div.flex.flex-row.space-x-2.items-center
+                                      (shui/tabler-icon "alert-triangle" {:size 18})
+                                      [:span "Alert"]]})
+                         (p/then #(js/console.log "=> alert (promise): " %))))}
+          "Imperative API: alert!")
 
-                   (ui/button
-                    {:class "primary-green"
-                     :on-click (fn []
-                                 (-> (dialog-core/confirm!
-                                      "a alert dialog from `confirm!`"
-                                      {:title [:div.flex.flex-row.space-x-2.items-center
-                                               (ui/tabler-icon "alert-triangle" {:size 18})
-                                               [:span "Confirm"]]})
-                                     (p/then #(js/console.log "=> confirm (promise): " %))
-                                     (p/catch #(js/console.log "=> confirm (promise): " %))))}
-                    "Imperative API: confirm!")])
+        (shui/button
+          {:class "primary-green"
+           :on-click (fn []
+                       (-> (dialog-core/confirm!
+                             "a alert dialog from `confirm!`"
+                             {:title [:div.flex.flex-row.space-x-2.items-center
+                                      (shui/tabler-icon "alert-triangle" {:size 18})
+                                      [:span "Confirm"]]})
+                         (p/then #(js/console.log "=> confirm (promise): " %))
+                         (p/catch #(js/console.log "=> confirm (promise): " %))))}
+          "Imperative API: confirm!")])
 
      ;; Alert
-    (section-item "Alert"
-                  [:<>
-                   (ui/alert
-                    {:class "text-orange-rx-09 border-orange-rx-07-alpha mb-4"}
-                    (ui/tabler-icon "brand-soundcloud")
-                    (ui/alert-title "Title is SoundCloud")
-                    (ui/alert-description
-                     "content: radix colors for Logseq"))
-                   (ui/alert
-                    (ui/tabler-icon "brand-github")
-                    (ui/alert-title "GitHub")
-                    (ui/alert-description
-                     "content: radix colors for Logseq"))])
+     (section-item "Alert"
+       [:<>
+        (shui/alert
+          {:class "text-orange-rx-09 border-orange-rx-07-alpha mb-4"}
+          (shui/tabler-icon "brand-soundcloud")
+          (shui/alert-title "Title is SoundCloud")
+          (shui/alert-description
+            "content: radix colors for Logseq"))
+        (shui/alert
+          (shui/tabler-icon "brand-github")
+          (shui/alert-title "GitHub")
+          (shui/alert-description
+            "content: radix colors for Logseq"))])
 
      ;; Slider
-    [:div.grid.sm:grid-cols-8.gap-4
-     [:div.col-span-4.mr-6
-      (section-item "Slider" (ui/slider))]
-     [:div.col-span-1
-      (section-item "Switch"
-                    (ui/switch {:size :sm :class "relative top-[-8px]"}))]
-     [:div.col-span-3.pl-4.pr-2
-      (section-item "Select"
-                    (ui/select
-                     {:on-value-change (fn [v] (ui/toast! v :info))}
+     [:div.grid.sm:grid-cols-8.gap-4
+      [:div.col-span-4.mr-6
+       (section-item "Slider" (shui/slider))]
+      [:div.col-span-1
+       (section-item "Switch"
+         (shui/switch {:size :sm :class "relative top-[-8px]"}))]
+      [:div.col-span-3.pl-4.pr-2
+       (section-item "Select"
+         (shui/select
+           {:on-value-change (fn [v] (shui/toast! v :info))}
            ;; trigger
-                     (ui/select-trigger
-                      (ui/select-value {:placeholder "Select a fruit"}))
+           (shui/select-trigger
+             (shui/select-value {:placeholder "Select a fruit"}))
            ;; content
-                     (ui/select-content
-                      (ui/select-group
-                       (ui/select-label "Fruits")
-                       (ui/select-item {:value "apple"} "Apple")
-                       (ui/select-item {:value "pear"} "Pear")
-                       (ui/select-item {:value "grapes"} "Grapes")))))]]
+           (shui/select-content
+             (shui/select-group
+               (shui/select-label "Fruits")
+               (shui/select-item {:value "apple"} "Apple")
+               (shui/select-item {:value "pear"} "Pear")
+               (shui/select-item {:value "grapes"} "Grapes")))))]]
 
-;; Form
-    (section-item "Form"
-                  [:<>
-                   (sample-form-basic)])
+     ;; Form
+     (section-item "Form"
+       [:<>
+        (sample-form-basic)])
 
      ;; Card
-    [:div.grid.sm:grid-cols-2.sm:gap-8
-     (section-item "Card"
-                   (ui/card
-                    (ui/card-header
-                     (ui/card-title "Title")
-                     (ui/card-description "Description"))
-                    (ui/card-content "This is content")
-                    (ui/card-footer "Footer")))
+     [:div.grid.sm:grid-cols-2.sm:gap-8
+      (section-item "Card"
+        (shui/card
+          (shui/card-header
+            (shui/card-title "Title")
+            (shui/card-description "Description"))
+          (shui/card-content "This is content")
+          (shui/card-footer "Footer")))
 
-     (section-item "Skeleton"
-                   (ui/card
-                    (ui/card-header
-                     (ui/card-title
-                      (ui/skeleton {:class "h-4 w-1/2"}))
-                     (ui/card-description
-                      (ui/skeleton {:class "h-2 w-full"})))
-                    (ui/card-content
-                     (ui/skeleton {:class "h-3 mb-1"})
-                     (ui/skeleton {:class "h-3 mb-1"})
-                     (ui/skeleton {:class "h-3 w-2/3"}))
+      (section-item "Skeleton"
+        (shui/card
+          (shui/card-header
+            (shui/card-title
+              (shui/skeleton {:class "h-4 w-1/2"}))
+            (shui/card-description
+              (shui/skeleton {:class "h-2 w-full"})))
+          (shui/card-content
+            (shui/skeleton {:class "h-3 mb-1"})
+            (shui/skeleton {:class "h-3 mb-1"})
+            (shui/skeleton {:class "h-3 w-2/3"}))
 
-                    (ui/card-footer
-                     (ui/skeleton {:class "h-4 w-full mb-2"}))))]
+          (shui/card-footer
+            (shui/skeleton {:class "h-4 w-full mb-2"}))))]
 
      ;; Calendar
-    [:div.grid.sm:grid-cols-2.sm:gap-8
-     (section-item "Calendar"
-                   (ui/card
-                    {:class "inline-flex"}
-                    (ui/calendar {:on-day-click #(ui/toast! (.toString %) :success)})))
-     (section-item "Date Picker"
-                   (sample-date-picker))]
+     [:div.grid.sm:grid-cols-2.sm:gap-8
+      (section-item "Calendar"
+        (shui/card
+          {:class "inline-flex"}
+          (shui/calendar {:on-day-click #(shui/toast! (.toString %) :success)})))
+      (section-item "Date Picker"
+        (sample-date-picker))]
 
-    [:hr.mb-80]]))
+     [:hr.mb-80]]))
 
 (defn- get-head-container
   []
@@ -508,49 +577,49 @@
   []
   (sel1 "#main-content-container"))
 
-(rum/defc sticky-table
+(hsx/defc sticky-table
   []
 
-  (let [el-ref (rum/use-ref nil)]
+  (let [el-ref (hooks/use-ref nil)]
     (hooks/use-effect!
-     (fn []
-       (let [^js container (get-main-scroll-container)
-             ^js el (rum/deref el-ref)
-             ^js cls (.-classList el)
-             *ticking? (volatile! false)
-             el-top (-> el (.getBoundingClientRect) (.-top))
-             head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
-             translate (fn [offset]
-                         (set! (. (.-style el) -transform) (str "translate3d(0, " offset "px , 0)"))
-                         (if (zero? offset)
-                           (.remove cls "translated")
-                           (.add cls "translated")))
-             *last-offset (volatile! 0)
-             handle (fn []
-                      (let [scroll-top (js/parseInt (.-scrollTop container))
-                            offset (if (> (+ scroll-top head-top) el-top)
-                                     (+ (- scroll-top el-top) head-top 1) 0)
-                            offset (js/parseInt offset)
-                            last-offset @*last-offset]
-                        (if (and (not (zero? last-offset))
-                                 (not= offset last-offset))
-                          (let [dir (if (neg? (- offset last-offset)) -1 1)]
-                            (loop [offset' (+ last-offset dir)]
-                              (translate offset')
-                              (if (and (not= offset offset')
-                                       (< (abs (- offset offset')) 100))
-                                (recur (+ offset' dir))
-                                (translate offset))))
-                          (translate offset))
-                        (vreset! *last-offset offset)))
-             handler (fn [^js e]
-                       (when (not @*ticking?)
-                         (js/window.requestAnimationFrame
-                          #(do (handle) (vreset! *ticking? false)))
-                         (vreset! *ticking? true)))]
-         (.addEventListener container "scroll" handler)
-         #(.removeEventListener container "scroll" handler)))
-     [])
+      (fn []
+        (let [^js container (get-main-scroll-container)
+              ^js el (hooks/deref el-ref)
+              ^js cls (.-classList el)
+              *ticking? (volatile! false)
+              el-top (-> el (.getBoundingClientRect) (.-top))
+              head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
+              translate (fn [offset]
+                          (set! (. (.-style el) -transform) (str "translate3d(0, " offset "px , 0)"))
+                          (if (zero? offset)
+                            (.remove cls "translated")
+                            (.add cls "translated")))
+              *last-offset (volatile! 0)
+              handle (fn []
+                       (let [scroll-top (js/parseInt (.-scrollTop container))
+                             offset (if (> (+ scroll-top head-top) el-top)
+                                      (+ (- scroll-top el-top) head-top 1) 0)
+                             offset (js/parseInt offset)
+                             last-offset @*last-offset]
+                         (if (and (not (zero? last-offset))
+                               (not= offset last-offset))
+                           (let [dir (if (neg? (- offset last-offset)) -1 1)]
+                             (loop [offset' (+ last-offset dir)]
+                               (translate offset')
+                               (if (and (not= offset offset')
+                                     (< (abs (- offset offset')) 100))
+                                 (recur (+ offset' dir))
+                                 (translate offset))))
+                           (translate offset))
+                         (vreset! *last-offset offset)))
+              handler (fn [^js _e]
+                        (when (not @*ticking?)
+                          (js/window.requestAnimationFrame
+                            #(do (handle) (vreset! *ticking? false)))
+                          (vreset! *ticking? true)))]
+          (.addEventListener container "scroll" handler)
+          #(.removeEventListener container "scroll" handler)))
+      [])
 
     [:div.charlie-table
      [:div.charlie-table-header

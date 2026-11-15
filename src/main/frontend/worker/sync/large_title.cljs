@@ -43,12 +43,22 @@
        (string? (:asset-uuid value))
        (string? (:asset-type value))))
 
+(defn- large-title-object-datoms
+  "Every large-title-object datom in `db`.
+
+  HYPHA-PATCH-006: read through :aevt, not :avet. Both callers walk all
+  datoms of the attribute, so the value index buys nothing, and :avet
+  misses the datoms of graphs that held them before the attribute was
+  marked :db/index true (a schema change does not reindex)."
+  [db]
+  (d/datoms db :aevt large-title-object-attr))
+
 (defn- find-large-title-object-eid
   [db obj]
   (some (fn [datom]
           (when (= obj (:v datom))
             (:e datom)))
-        (d/datoms db :avet large-title-object-attr)))
+        (large-title-object-datoms db)))
 
 (defn- resolve-large-title-item-eid
   [db {:keys [e obj]}]
@@ -152,7 +162,7 @@
                 fail-fast-f]}]
   (when-let [conn* (or conn (get-conn-f repo))]
     (let [graph-id* (or graph-id (get-graph-id repo))
-          items (if (seq tx-data)
+          items (if (some? tx-data)
                   (->> tx-data
                        (keep (fn [item]
                                (when (and (vector? item)
@@ -162,13 +172,12 @@
                                  {:e (nth item 1)
                                   :obj (nth item 3)})))
                        (distinct))
-                  (->> (d/datoms @conn* :eavt)
+                  (->> (large-title-object-datoms @conn*)
                        (keep (fn [datom]
-                               (when (= large-title-object-attr (:a datom))
-                                 (let [obj (:v datom)]
-                                   (when (large-title-object? obj)
-                                     {:e (:e datom)
-                                      :obj obj})))))
+                               (let [obj (:v datom)]
+                                 (when (large-title-object? obj)
+                                   {:e (:e datom)
+                                    :obj obj}))))
                        (distinct)))]
       (when (seq items)
         (p/let [aes-key* (or aes-key
@@ -256,5 +265,6 @@
   (when-let [conn (get-conn-f repo)]
     (let [tx-data (mapv (fn [datom]
                           [:db/add (:e datom) large-title-object-attr (:v datom)])
-                        (d/datoms @conn :avet large-title-object-attr))]
-      (rehydrate-large-titles!-f repo {:tx-data tx-data :graph-id graph-id}))))
+                        (large-title-object-datoms @conn))]
+      (when (seq tx-data)
+        (rehydrate-large-titles!-f repo {:tx-data tx-data :graph-id graph-id})))))

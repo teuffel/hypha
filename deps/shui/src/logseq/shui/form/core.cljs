@@ -1,15 +1,14 @@
 (ns logseq.shui.form.core
-  (:require [rum.core :as rum]
-            [daiquiri.interpreter :refer [interpret]]
+  (:require [io.factorhouse.hsx.core :as hsx]
             [logseq.shui.util :as util]
             [cljs-bean.core :as bean]))
 
 
 ;; State
-(def form-provider (util/lsui-wrap "Form" {:static? false}))
-(def form-field' (util/lsui-wrap "FormField" {:static? false}))
+(def form-provider (util/ui-wrap "Form" {:static? false}))
+(def form-field' (util/ui-wrap "FormField" {:static? false}))
 
-(rum/defc form-field
+(hsx/defc form-field
   [render' & args]
   (let [[props render']
         (if (map? render')
@@ -25,35 +24,35 @@
                    ctx))]
     (form-field' (assoc props :render render))))
 
-(def form-control (util/lsui-wrap "FormControl" {:static? false}))
+(def form-control (util/ui-wrap "FormControl" {:static? false}))
 
-(def ^js yup (util/lsui-get "yup"))
-(def yup-resolver (util/lsui-get "yupResolver"))
+(def ^js yup (util/ui-get "yup"))
+(def yup-resolver (util/ui-get "yupResolver"))
 
 ;; Hooks
 ;; https://react-hook-form.com/docs/useform#resolver
-(def use-form' (util/lsui-get "useForm"))
-(def use-form-context (util/lsui-get "useFormContext"))
+(def use-form' (util/ui-get "useForm"))
+(def use-form-context (util/ui-get "useFormContext"))
 
 (defn use-form
   ([] (use-form {}))
   ([opts]
    (let [yup-schema (:yupSchema opts)
-         ^js methods (use-form' (bean/->js
-                                  (cond-> opts
-                                    (not (nil? yup-schema))
-                                    (assoc :resolver (yup-resolver yup-schema)))))]
+         ^js form-methods (use-form' (bean/->js
+                                       (cond-> opts
+                                         (not (nil? yup-schema))
+                                         (assoc :resolver (yup-resolver yup-schema)))))]
      ;; NOTE: just shallow convert return object!
-     (bean/bean methods))))
+     (bean/bean form-methods))))
 
 ;; UI
-(def form-item (util/lsui-wrap "FormItem"))
-(def form-label (util/lsui-wrap "FormLabel"))
-(def form-description (util/lsui-wrap "FormDescription"))
-(def form-message (util/lsui-wrap "FormMessage"))
-(def input (util/lsui-wrap "Input"))
-(def textarea (util/lsui-wrap "Textarea"))
-(def switch (util/lsui-wrap "Switch"))
-(def checkbox (util/lsui-wrap "Checkbox"))
-(def radio-group (util/lsui-wrap "RadioGroup"))
-(def radio-group-item (util/lsui-wrap "RadioGroupItem"))
+(def form-item (util/ui-wrap "FormItem"))
+(def form-label (util/ui-wrap "FormLabel"))
+(def form-description (util/ui-wrap "FormDescription"))
+(def form-message (util/ui-wrap "FormMessage"))
+(def input (util/ui-wrap "Input"))
+(def textarea (util/ui-wrap "Textarea"))
+(def switch (util/ui-wrap "Switch"))
+(def checkbox (util/ui-wrap "Checkbox"))
+(def radio-group (util/ui-wrap "RadioGroup"))
+(def radio-group-item (util/ui-wrap "RadioGroupItem"))

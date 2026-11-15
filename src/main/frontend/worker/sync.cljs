@@ -13,9 +13,9 @@
    [frontend.worker.sync.transport :as sync-transport]
    [frontend.worker.sync.upload :as sync-upload]
    [frontend.worker.sync.util :as sync-util]
-   [frontend.worker-common.util :as worker-util]
    [lambdaisland.glogi :as log]
    [logseq.common.util :as common-util]
+   [logseq.db :as ldb]
    [logseq.db-sync.checksum :as sync-checksum]
    [promesa.core :as p]
    [logseq.common.config :as common-config]))
@@ -25,6 +25,17 @@
 (def ^:private reconnect-jitter-ms 250)
 (def ^:private ws-stale-kill-interval-ms 60000)
 (def ^:private ws-stale-timeout-ms 600000)
+;; Watchdog for a wedged-but-open WS: when a tx/batch/ok or pull/ok is lost, the
+;; push pipeline stalls (inflight never clears or local-tx never catches up) yet
+;; nothing self-heals, because the stale detector above only fires after total
+;; silence (and unrelated server messages keep the socket "fresh"). Force a
+;; reconnect when there are pending local txs that make no progress for this long
+;; while a reply from the server is outstanding.
+(def ^:private sync-wedge-check-interval-ms 30000)
+(def ^:private sync-wedge-timeout-ms 45000)
+;; After this many forced reconnects without progress in between, the stall is
+;; not a lost reply: surface a sync error and stop resetting the reconnect backoff.
+(def ^:private sync-wedge-max-kills 3)
 (def fail-fast sync-util/fail-fast)
 
 (defonce *repo->latest-remote-tx sync-apply/*repo->latest-remote-tx)
@@ -42,6 +53,7 @@
     :get-client-ops-conn worker-state/get-client-ops-conn
     :get-pending-local-tx-count client-op/get-pending-local-tx-count
     :get-unpushed-asset-ops-count client-op/get-unpushed-asset-ops-count
+    :get-missing-asset-upload-files sync-assets/get-missing-asset-upload-files
     :get-local-tx client-op/get-local-tx
     :get-local-checksum client-op/get-local-checksum
     :get-graph-uuid client-op/get-graph-uuid
@@ -49,24 +61,68 @@
     :latest-remote-checksum @*repo->latest-remote-checksum}
    repo))
 
+(defn- graph-remote?
+  "True when the graph syncs: upload and download set
+  `:logseq.kv/graph-remote?`, and nothing unsets it."
+  [db]
+  (true? (some-> db (ldb/get-key-value :logseq.kv/graph-remote?))))
+
 (defn update-local-sync-checksum!
-  [repo tx-report]
-  (when (and worker-util/dev-or-test?
-             (worker-state/get-client-ops-conn repo))
-    (let [current-checksum (client-op/get-local-checksum repo)
+  "Keeps the stored checksum current on a graph that syncs. A graph that does
+  not sync keeps none: the checksum is only compared with the sync server's,
+  and the upload recomputes it before it sends the snapshot. The transaction
+  that makes a graph remote starts from a full recompute, since the stored
+  value may predate edits made while the graph was local."
+  [repo {:keys [db-before db-after] :as tx-report}]
+  (when (and (worker-state/get-client-ops-conn repo)
+             (graph-remote? db-after))
+    (let [current-checksum (when (graph-remote? db-before)
+                             (client-op/get-local-checksum repo))
           new-checksum (sync-checksum/update-checksum current-checksum tx-report)]
-      ;; (let [full-checksum (sync-checksum/recompute-checksum (:db-after tx-report))]
-      ;;   (when (not= new-checksum full-checksum)
-      ;;    (prn :debug
-      ;;         "checksum-doesn't match"
-      ;;         {:current-checksum current-checksum
-      ;;          :new-checksum new-checksum
-      ;;          :full-checksum full-checksum
-      ;;          :db-before (ldb/write-transit-str (:db-before tx-report))
-      ;;          :db-after (ldb/write-transit-str (:db-after tx-report))
-      ;;          :tx-data (ldb/write-transit-str (:tx-data tx-report))
-      ;;          :tx-meta (ldb/write-transit-str (:tx-meta tx-report))})))
-      (client-op/update-local-checksum repo new-checksum))))
+      (when (and (exists? js/process)
+                 (= "1" (aget (.-env js/process) "LOGSEQ_CHECKSUM_ASSERT")))
+        (let [recomputed-checksum (sync-checksum/recompute-checksum (:db-after tx-report))]
+          (when-not (= new-checksum recomputed-checksum)
+            (let [{:keys [tx-meta tx-data]} tx-report]
+              (log/error :db-sync/checksum-incremental-drift
+                         {:repo repo
+                          :current-checksum current-checksum
+                          :incremental-checksum new-checksum
+                          :recomputed-checksum recomputed-checksum
+                          :tx-meta tx-meta
+                          :tx-count (count tx-data)
+                          :tx-sample (take 30 tx-data)})
+              (throw (ex-info "Incremental checksum drift"
+                              {:repo repo
+                               :current-checksum current-checksum
+                               :incremental-checksum new-checksum
+                               :recomputed-checksum recomputed-checksum
+                               :tx-meta tx-meta
+                               :tx-count (count tx-data)}))))))
+      (client-op/update-local-checksum repo new-checksum (:max-tx (:db-after tx-report))))))
+
+(defn reconcile-local-checksum!
+  "Heals a checksum left stale when a commit's checksum write never landed: the
+  checksum is stored post-commit in the client-ops sqlite file, separate from
+  the graph store, so process death between the two writes drops it. The stored
+  covered commit is compared with the reopened db's :max-tx; a mismatch means
+  commits were missed and the checksum is recomputed. A graph that does not
+  sync keeps no checksum, so nothing is healed on it."
+  [repo conn]
+  (when (and (worker-state/get-client-ops-conn repo)
+             (graph-remote? @conn))
+    (let [checksum (client-op/get-local-checksum repo)
+          covered-tx (client-op/get-local-checksum-covered-tx repo)
+          current-tx (:max-tx @conn)]
+      (when (and checksum (not= covered-tx current-tx))
+        (let [recomputed (sync-checksum/recompute-checksum @conn)]
+          (when-not (= checksum recomputed)
+            (log/info :db-sync/checksum-healed-on-open {:repo repo
+                                                      :stored-checksum checksum
+                                                      :recomputed-checksum recomputed
+                                                      :covered-tx covered-tx
+                                                      :current-tx current-tx}))
+          (client-op/update-local-checksum repo recomputed current-tx))))))
 
 (defn- broadcast-rtc-state!
   [client]
@@ -83,10 +139,17 @@
   [client users]
   (sync-presence/update-online-users! broadcast-rtc-state! client users))
 
-(defn- clear-inflight!
+(defn- clear-in-flight-sync-state!
+  "Reset protocol state for in-flight ops that are lost when the socket goes
+  away: the unacked tx batch and the pending-pull dedup marker. Resetting
+  pending-pull-since matters because request-pull! dedupes on it, so without
+  this a post-reconnect pull would be suppressed and the client could never
+  catch up (and thus never flush its pending local txs)."
   [client]
   (when-let [*inflight (:inflight client)]
-    (reset! *inflight [])))
+    (reset! *inflight []))
+  (when-let [*pending (:pending-pull-since client)]
+    (reset! *pending nil)))
 
 (defn- ws-base-url
   []
@@ -102,6 +165,11 @@
   [repo graph-id]
   (when (seq graph-id)
     (client-op/update-graph-uuid repo graph-id)))
+
+(defn- client-op-ready?
+  [repo]
+  (and (some? (worker-state/get-client-ops-conn repo))
+       (integer? (client-op/get-local-tx repo))))
 
 (defn- reconnect-delay-ms
   [attempt]
@@ -126,6 +194,13 @@
 (defn- clear-stale-ws-loop-timer!
   [client]
   (when-let [*timer (:stale-kill-timer client)]
+    (when-let [timer @*timer]
+      (js/clearInterval timer)
+      (reset! *timer nil))))
+
+(defn- clear-sync-watchdog-timer!
+  [client]
+  (when-let [*timer (:sync-watchdog-timer client)]
     (when-let [timer @*timer]
       (js/clearInterval timer)
       (reset! *timer nil))))
@@ -157,6 +232,7 @@
                  (p/catch (fn [_] nil))
                  (p/then (fn [_] (task)))
                  (p/catch (fn [error]
+                            (sync-util/set-last-sync-error! client error)
                             (log/error :db-sync/ws-handle-message-failed
                                        {:repo (:repo client)
                                         :error error}))))))
@@ -169,13 +245,6 @@
       (send! ws {:type "presence"
                  :editing-block-uuid editing-block-uuid}))))
 
-(defn- enqueue-asset-task!
-  [client task]
-  (when-let [queue (:asset-queue client)]
-    (swap! queue
-           (fn [prev]
-             (p/then prev (fn [_] (task)))))))
-
 (defn- ensure-client-state!
   [repo]
   {:repo repo
@@ -184,9 +253,13 @@
    :asset-queue (atom (p/resolved nil))
    :pending-pull-since (atom nil)
    :inflight (atom [])
+   :upload-request (atom nil)
    :last-sync-error (atom nil)
    :reconnect (atom {:attempt 0 :timer nil})
    :stale-kill-timer (atom nil)
+   :sync-watchdog-timer (atom nil)
+   :sync-progress (atom nil)
+   :sync-wedge-kills (atom 0)
    :last-ws-message-ts (atom (common-util/time-ms))
    :online-users (atom [])
    :ws-state (atom :closed)})
@@ -231,7 +304,8 @@
         (fn [_]
           (log/info :db-sync/ws-closed {:repo repo})
           (clear-stale-ws-loop-timer! client)
-          (clear-inflight! client)
+          (clear-sync-watchdog-timer! client)
+          (clear-in-flight-sync-state! client)
           (update-online-users! client [])
           (set-ws-state! client :closed)
           (schedule-reconnect! repo client url :close))))
@@ -268,7 +342,8 @@
                            (do
                              (log/warn :db-sync/ws-stale-closed {:repo repo :ready-state (ready-state ws)})
                              (clear-stale-ws-loop-timer! current)
-                             (clear-inflight! current)
+                             (clear-sync-watchdog-timer! current)
+                             (clear-in-flight-sync-state! current)
                              (update-online-users! current [])
                              (set-ws-state! current :closed)
                              (schedule-reconnect! repo current url :stale-closed))))))
@@ -276,9 +351,127 @@
         (reset! *timer timer))))
   client)
 
+(defn- sync-progressed?
+  "Progress means the push pipeline did something useful since the last tick:
+  local-tx advanced (a pull or tx batch was acked) or the pending count dropped."
+  [snapshot local-tx pending]
+  (or (nil? snapshot)
+      (and (number? local-tx)
+           (number? (:local-tx snapshot))
+           (> local-tx (:local-tx snapshot)))
+      (< pending (:pending snapshot))))
+
+(defn- awaiting-server?
+  "True while a tx batch is unacked or a pull is unanswered: the two requests
+  whose lost reply wedges the pipeline. A long-running apply of a pull/ok is
+  neither, so it is never mistaken for a wedge."
+  [client]
+  (boolean (or (seq @(:inflight client))
+               (some? @(:pending-pull-since client)))))
+
+(defn- wedge-limit-reached?
+  [client]
+  (>= @(:sync-wedge-kills client) sync-wedge-max-kills))
+
+(defn- clear-wedge-error!
+  [client]
+  (when (= :db-sync/ws-wedged (some-> (:last-sync-error client) deref :code))
+    (sync-util/clear-last-sync-error! client)))
+
+(defn- sync-watchdog-tick!
+  "One watchdog check for `client` on its open `ws` at time `now`."
+  [client ws now]
+  (let [repo (:repo client)
+        *snap (:sync-progress client)
+        *kills (:sync-wedge-kills client)
+        pending (or (client-op/get-pending-local-tx-count repo) 0)
+        local-tx (client-op/get-local-tx repo)
+        snapshot @*snap
+        fresh-snapshot {:local-tx local-tx :pending pending :at now}]
+    (cond
+      (nil? snapshot)
+      (reset! *snap fresh-snapshot)
+
+      ;; Moving again, or fully pushed: whatever wedged before is over.
+      (or (sync-progressed? snapshot local-tx pending)
+          (zero? pending))
+      (do
+        (clear-wedge-error! client)
+        (reset! *kills 0)
+        (reset! *snap fresh-snapshot))
+
+      (or (not (worker-state/online?))
+          (not (ws-open? ws))
+          (sync-apply/upload-stopped? repo))
+      (reset! *snap fresh-snapshot)
+
+      (< (- now (:at snapshot)) sync-wedge-timeout-ms)
+      nil
+
+      (awaiting-server? client)
+      (let [kills (swap! *kills inc)]
+        (log/warn :db-sync/ws-wedge-timeout
+                  {:repo repo :pending pending :local-tx local-tx
+                   :wedged-ms (- now (:at snapshot))
+                   :kills kills})
+        (reset! *snap fresh-snapshot)
+        (when (wedge-limit-reached? client)
+          (sync-util/set-last-sync-error!
+           client
+           (ex-info "sync is stuck: the server does not answer pending changes"
+                    {:code :db-sync/ws-wedged
+                     :repo repo
+                     :pending pending
+                     :kills kills})))
+        (try (.close ws) (catch :default _ nil)))
+
+      ;; Nothing is outstanding, yet the pending txs did not move: the last
+      ;; flush failed before it sent anything (e.g. a large-title upload or
+      ;; the e2ee key fetch). Nothing re-triggers it before the next local
+      ;; edit or remote change, so try again. During a long apply this is a
+      ;; no-op, because flush-pending! waits for local-tx to catch up.
+      :else
+      (do
+        (log/info :db-sync/sync-watchdog-reflush {:repo repo :pending pending})
+        (reset! *snap fresh-snapshot)
+        (sync-apply/enqueue-flush-pending! repo client)))))
+
+(defn- start-sync-watchdog-loop
+  "Force a reconnect when pending local txs make no progress for too long while
+  the WS is open and a reply from the server is outstanding. Closing the socket
+  routes through onclose, which resets the in-flight sync state and schedules a
+  reconnect that re-flushes from a clean state. Re-flush without a reconnect
+  when nothing is outstanding. No-op while offline, paused or fully synced."
+  [client ws]
+  (let [repo (:repo client)
+        graph-id (:graph-id client)
+        *snap (:sync-progress client)]
+    (clear-sync-watchdog-timer! client)
+    (when-let [*timer (:sync-watchdog-timer client)]
+      ;; Keep what the last connection reached, so that a recovery that
+      ;; completes before the first tick on this connection (the usual case
+      ;; after a forced reconnect) still counts as progress.
+      (swap! *snap #(some-> % (assoc :at (common-util/time-ms))))
+      (let [timer (js/setInterval
+                   (fn []
+                     (try
+                       (when-let [current @worker-state/*db-sync-client]
+                         (when (and (= repo (:repo current))
+                                    (= graph-id (:graph-id current))
+                                    (identical? ws (:ws current)))
+                           (sync-watchdog-tick! current ws (common-util/time-ms))))
+                       (catch :default e
+                         (log/error :db-sync/sync-watchdog-tick-failed
+                                    {:repo repo :error e}))))
+                   sync-wedge-check-interval-ms)]
+        (reset! *timer timer))))
+  client)
+
 (defn- stop-client!
   [client]
   (clear-stale-ws-loop-timer! client)
+  (clear-sync-watchdog-timer! client)
+  (sync-apply/clear-upload-response-timeout! client)
   (when-let [reconnect (:reconnect client)]
     (clear-reconnect-timer! reconnect))
   (when-let [ws (:ws client)]
@@ -306,18 +499,23 @@
       (attach-ws-handlers! repo updated ws url)
       (set! (.-onopen ws)
             (fn [_]
-              (reset-reconnect! updated)
+              ;; A socket the wedge watchdog keeps killing opens fine every
+              ;; time. Keep its backoff and its error until sync moves again.
+              (when-not (wedge-limit-reached? updated)
+                (reset-reconnect! updated))
               (touch-last-ws-message! updated)
               (set-ws-state! updated :open)
-              (sync-util/clear-last-sync-error! updated)
+              (when-not (wedge-limit-reached? updated)
+                (sync-util/clear-last-sync-error! updated))
               (send! ws {:type "hello" :client repo})
               (sync-assets/enqueue-asset-sync!
                repo updated
-               {:enqueue-asset-task-f enqueue-asset-task!
+               {:enqueue-asset-task-f sync-assets/enqueue-asset-task!
                 :current-client-f current-client
                 :broadcast-rtc-state!-f broadcast-rtc-state!
                 :fail-fast-f fail-fast})))
-      (close-stale-ws-loop updated ws url))))
+      (close-stale-ws-loop updated ws url)
+      (start-sync-watchdog-loop updated ws))))
 
 (defn stop!
   []
@@ -362,12 +560,18 @@
             (log/info :db-sync/start-skipped {:repo repo :graph-id graph-id :base base})
             (p/resolved nil))
 
+          (not (client-op-ready? repo))
+          (do
+            (log/info :db-sync/start-skipped {:repo repo :graph-id graph-id :base base :reason :client-op-not-ready})
+            (p/resolved nil))
+
           (= start-target inflight-target)
           (p/resolved nil)
 
           (active-client-for? current repo graph-id)
           (do
             (broadcast-rtc-state! current)
+            (sync-apply/enqueue-flush-pending! repo current)
             (p/resolved nil))
 
           :else
@@ -401,6 +605,21 @@
   [repo asset-uuid]
   (sync-apply/request-asset-download! repo asset-uuid))
 
+(defn download-missing-assets!
+  [repo graph-id]
+  (sync-assets/download-missing-remote-assets! repo graph-id))
+
+(defn retry-asset-upload!
+  [repo]
+  (when-let [client (current-client repo)]
+    (sync-assets/enqueue-asset-sync!
+     repo client
+     {:enqueue-asset-task-f sync-assets/enqueue-asset-task!
+      :current-client-f current-client
+      :broadcast-rtc-state!-f broadcast-rtc-state!
+      :fail-fast-f fail-fast}))
+  (p/resolved nil))
+
 (defn rehydrate-large-titles-from-db!
   [repo graph-id]
   (sync-apply/rehydrate-large-titles-from-db! repo graph-id))
@@ -412,11 +631,6 @@
 (defn create-remote-graph!
   [repo opts]
   (sync-upload/create-remote-graph! repo opts))
-
-;; HYPHA-PATCH-013
-(defn rebind-to-remote-graph!
-  [repo remote-graph-id remote-graph-e2ee?]
-  (sync-upload/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
 
 (def list-remote-graphs! sync-upload/list-remote-graphs!)
 

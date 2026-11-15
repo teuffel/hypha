@@ -146,6 +146,7 @@ Edit `.env`:
 
 ```bash
 HYPHA_JWT_ISSUER=http://192.168.1.42:3000   # your LAN address
+HYPHA_BIND=0.0.0.0                          # publish beyond localhost
 ```
 
 Restart the stack. The JWT issuer matters because the browser and
@@ -158,11 +159,12 @@ Once TLS is terminated:
 
 ```bash
 HYPHA_JWT_ISSUER=https://hypha.example.com
-HYPHA_COOKIE_SECURE=true
 ```
 
-`Secure` on the session cookie keeps it from being sent over plain
-HTTP, closing one class of attacks. A Caddy `Caddyfile` example will
+With an `https://` issuer the session cookie carries `Secure`
+automatically, so it is never sent over plain HTTP. The port is published
+on `127.0.0.1` only, so the proxy must run on the same host; if it runs
+elsewhere, set `HYPHA_BIND=0.0.0.0` and firewall port 3000. A Caddy `Caddyfile` example will
 land in a future Hypha release.
 
 ### Backup

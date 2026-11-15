@@ -16,18 +16,22 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, isSafeSubpath, serveCached } from "../plugin-cache.js";
+import { PluginCache, requireSession, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
+import type { SessionStore } from "../auth/session.js";
 
 const INDEX_TTL_SECONDS = 3600;
 const PACKAGE_TTL_SECONDS = 86_400;
 
 export interface PluginMarketDeps {
   cache: PluginCache;
+  sessions: SessionStore;
   /** e.g. "https://raw.githubusercontent.com/logseq/marketplace/master" (no trailing slash). */
   upstreamBase: string;
 }
 
 export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (app, deps) => {
+  app.addHook("preHandler", requireSession(deps.sessions));
+
   app.get("/plugin-market/plugins.json", async (_request, reply) =>
     serveCached({
       cache: deps.cache,
@@ -50,13 +54,14 @@ export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (ap
 
   app.get("/plugin-market/packages/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(`${deps.upstreamBase}/packages`, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `market:packages:${subpath}`,
-      upstreamUrl: `${deps.upstreamBase}/packages/${subpath}`,
+      cacheKey: `market:packages:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: PACKAGE_TTL_SECONDS,
       reply,
     });

@@ -1,7 +1,7 @@
 (ns mobile.state
   "Mobile state"
-  (:require [frontend.rum :as r]
-            [frontend.state :as state]
+  (:require [frontend.state :as state]
+            [logseq.shui.hooks :as hooks]
             [mobile.navigation :as mobile-nav]))
 
 (defonce *search-input (atom ""))
@@ -18,14 +18,19 @@
       (mobile-nav/reset-stack-history! "search"))
     (reset! *tab tab)
     (mobile-nav/switch-stack! tab)))
-(defn use-tab [] (r/use-atom *tab))
+(defn use-tab [] (hooks/use-atom *tab))
 
 (defonce *popup-data (atom nil))
+(defonce *popup-presenting? (atom false))
 (defn set-popup!
   [data]
   (reset! *popup-data data)
   (when data
     (state/pub-event! [:mobile/clear-edit])))
+
+(defn set-popup-presenting!
+  [presenting?]
+  (reset! *popup-presenting? presenting?))
 
 (defonce *flashcards-header (atom nil))
 (defn set-flashcards-header!

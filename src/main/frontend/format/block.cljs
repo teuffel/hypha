@@ -2,11 +2,9 @@
   "Block code needed by app but not graph-parser. This should be the only frontend
    namespace that has references to legacy file attributes like :block/pre-block?
    as they are being removed from graph-parser output"
-  (:require [cljs.cache :as cache]
-            [clojure.string :as string]
+  (:require [clojure.string :as string]
             [frontend.common.cache :as common.cache]
             [frontend.context.i18n :refer [t]]
-            [frontend.db :as db]
             [frontend.format :as format]
             [frontend.format.mldoc :as mldoc]
             [frontend.handler.notification :as notification]
@@ -14,56 +12,34 @@
             [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
             [logseq.graph-parser.block :as gp-block]
+            [logseq.graph-parser.db-input :as db-input]
             [logseq.graph-parser.property :as gp-property]))
 
 (defn extract-blocks
   "Wrapper around logseq.graph-parser.block/extract-blocks that adds in system state
 and handles unexpected failure."
   [blocks content format {:keys [page-name]}]
-  (let [repo (state/get-current-repo)]
-    (try
-      (let [blocks (gp-block/extract-blocks blocks content format
-                                            {:user-config (state/get-config)
-                                             :block-pattern common-config/block-pattern
-                                             :db (db/get-db repo)
-                                             :date-formatter (state/get-date-formatter)
-                                             :page-name page-name
-                                             :db-graph-mode? true})]
-        (map (fn [block]
-               (cond-> (dissoc block :block/format :block/properties :block/macros :block/properties-order)
-                 (:block/properties block)
-                 (merge (update-keys (:block/properties block)
-                                     (fn [k]
-                                       (or ({:heading :logseq.property/heading} k)
-                                           (throw (ex-info (str "Don't know how to save graph-parser property " (pr-str k)) {}))))))))
-             blocks))
-      (catch :default e
-        (log/error :exception e)
-        (state/pub-event! [:capture-error {:error e
-                                           :payload {:type "Extract-blocks"}}])
-        (notification/show! (t :block/extraction-error) :error)
-        []))))
+  (try
+    (db-input/extract-blocks blocks content format
+                             {:repo (state/get-current-repo)
+                              :user-config (state/get-config)
+                              :date-formatter (state/get-date-formatter)
+                              :page-name page-name})
+    (catch :default e
+      (log/error :exception e)
+      (state/pub-event! [:capture-error {:error e
+                                         :payload {:type "Extract-blocks"}}])
+      (notification/show! (t :block/extraction-error) :error)
+      [])))
 
 (defn parse-block
-  [{:block/keys [uuid title format] :as block}]
-  (when-not (string/blank? title)
-    (let [block (dissoc block :block/pre-block?)
-          format (or format :markdown)
-          parse-config (mldoc/get-default-config format)
-          ;; Disable extraction for display-type blocks as there isn't a reason to have
-          ;; it enabled yet and can cause visible bugs when '#' is used
-          blocks (if (:logseq.property.node/display-type block)
-                   [block]
-                   (let [ast (format/to-edn title parse-config)]
-                     (extract-blocks ast title format {})))
-          new-block (first blocks)
-          block (cond-> (merge block new-block)
-                  true
-                  (dissoc :block/format))
-          block (dissoc block :block.temp/ast-body :block/level)]
-      (if uuid (assoc block :block/uuid uuid) block))))
+  [block]
+  (db-input/parse-block block {:repo (state/get-current-repo)
+                               :user-config (state/get-config)
+                               :date-formatter (state/get-date-formatter)
+                               :extract-blocks extract-blocks}))
 
-(defonce *blocks-ast-cache (volatile! (cache/lru-cache-factory {} :threshold 5000)))
+(defonce *blocks-ast-cache (volatile! (common.cache/empty-lru 5000)))
 
 (defn- markdown-heading-level
   [content]

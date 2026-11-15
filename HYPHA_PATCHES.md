@@ -21,13 +21,13 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Patch form**:
   ```clojure
   ;; ORIGINAL (~line 349)
-  (defmethod events/handle :user/login [[_]]
+  (defevent! :user/login [[_]]
     (if (mobile-util/native-platform?)
       (route-handler/redirect! {:to :user-login})
       (login/open-login-modal!)))
 
   ;; HYPHA
-  (defmethod events/handle :user/login [[_]]
+  (defevent! :user/login [[_]]
     (cond
       hypha-config/hypha-mode?
       (hypha-login/open-login-modal!)
@@ -42,6 +42,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   `[frontend.hypha.config :as hypha-config]`,
   `[frontend.hypha.login :as hypha-login]`.
 - **Line count**: +4 (one cond clause + if→cond restructuring) +2 requires
+- **Upstream sync 2026-11**: upstream replaced the `events/handle`
+  multimethod with `defevent!` registrations; the patch moved along unchanged.
 - **Rationale**: In Hypha mode the access-code login modal must replace
   Cognito's Amplify-driven modal. All call sites that publish `:user/login`
   (`components/settings.cljs`, `components/header.cljs`, etc.) stay
@@ -53,7 +55,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Wrapping `:user/login` via an event hijack: rejected (more invasive,
     higher surface for upstream divergence).
 - **Break signal — structural**:
-  - `defmethod events/handle :user/login` is renamed, deleted, or moved
+  - `defevent! :user/login` is renamed, deleted, or moved
     to another file or split across files.
 - **Break signal — semantic**:
   - Cond ordering changes; a new clause lands before `hypha-mode?` and
@@ -61,7 +63,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `:user/login` event is replaced by a new event schema upstream.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'defmethod events/handle :user/login' src/main/frontend/handler/events/ui.cljs`
+    `rg -c 'defevent! :user/login' src/main/frontend/handler/events/ui.cljs`
     ⇒ `1`
   - Semantic, manual at triage: the first cond clause must read
     `hypha-config/hypha-mode?`.
@@ -237,8 +239,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - A third encryption-mode hook gets introduced; we should evaluate.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'rum/defc new-db-graph-inner' src/main/frontend/components/repo.cljs`
-    ⇒ `1`
+    `rg -c '(rum|hsx)/defc new-db-graph-inner' src/main/frontend/components/repo.cljs`
+    ⇒ `1` (upstream migrated the component from `rum/defc` to `hsx/defc`;
+    the anchor tolerates either framework form).
   - Semantic, manual at triage: the `cloud?` and `graph-e2ee?` initial
     values must read `hypha-config/hypha-mode?`.
 - **On break**:
@@ -266,19 +269,29 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   ;; HYPHA
   (defn- snapshot-stream-url
     "... reverse-proxy-aware ..."
-    [request graph-id]
+    [^js self request graph-id]
     (let [url (js/URL. (.-url request))
-          headers (.-headers request)
-          forwarded-host (some-> headers (.get "x-forwarded-host"))
-          forwarded-proto (some-> headers (.get "x-forwarded-proto"))
-          origin (if (seq forwarded-host)
-                   (str (if (seq forwarded-proto) forwarded-proto "http")
-                        "://"
-                        forwarded-host)
+          headers (when (trust-forwarded-headers? self)
+                    (.-headers request))
+          forwarded-host (first-forwarded-value headers "x-forwarded-host")
+          forwarded-proto (first-forwarded-value headers "x-forwarded-proto")
+          origin (if forwarded-host
+                   (str (or forwarded-proto "http") "://" forwarded-host)
                    (.-origin url))]
       (str origin "/sync/" graph-id "/snapshot/stream")))
   ```
-- **Line count**: +13 (8 net lines of code, plus a 5-line docstring)
+  plus the helpers `trust-forwarded-headers?` (env flag
+  `DB_SYNC_TRUST_FORWARDED_HEADERS`) and `first-forwarded-value` (first
+  entry of a comma-separated header), and a 3-line pass-through of the
+  flag in `deps/db-sync/src/logseq/db_sync/node/graph.cljs`
+  (`env-object`).
+- **Hardened**: 2026-11 — the headers used to be honoured from any
+  request and taken whole. Now they count only when the deployment sets
+  `DB_SYNC_TRUST_FORWARDED_HEADERS` (hypha-server's db-sync runner
+  always does; a bare node adapter or Cloudflare Worker does not), and
+  with a proxy chain (`host-a, host-b`) only the first, client-facing
+  entry is used.
+- **Line count**: ~+35 (helpers, docstrings, flag pass-through)
 - **Rationale**: When db-sync runs behind hypha-server's reverse proxy,
   the request URL the adapter sees has the internal loopback host
   (`http://127.0.0.1:8787`). Using `request.url.origin` for embedded URLs
@@ -290,8 +303,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   them to reconstruct the public-facing URL.
 - **Companion change (NOT a patch)**:
   `hypha-server/src/proxy.ts` injects these headers on every proxied path
-  (rewriteRequestHeaders hook). Counts as Hypha-server-own code, not an
-  upstream patch.
+  (rewriteRequestHeaders hook), and `hypha-server/src/db-sync-runner.ts`
+  spawns the adapter with `DB_SYNC_TRUST_FORWARDED_HEADERS=true`. Counts
+  as Hypha-server-own code, not an upstream patch.
 - **Additive alternatives considered**:
   - Modify the response body in `hypha-server` proxy with a JSON-rewrite
     hook: rejected — fragile (depends on exact response shape) and
@@ -314,7 +328,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     `rg -c 'defn- snapshot-stream-url' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
     ⇒ `1`
   - Semantic, manual at triage: the function body must read
-    `x-forwarded-host` from `.headers`.
+    `x-forwarded-host` from `.headers`, gated by
+    `trust-forwarded-headers?`.
+  - Regression guard:
+    `snapshot-download-url-uses-forwarded-headers-only-when-trusted-test`
+    in `deps/db-sync/test/logseq/db_sync/worker_handler_sync_test.cljs`.
 - **On break**:
   - Structural → find the new URL-building location, re-anchor.
   - Semantic → re-apply the X-Forwarded-Host respect logic.
@@ -330,6 +348,28 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Files**:
   - `deps/db/src/logseq/db/frontend/schema.cljs`
   - `deps/db/src/logseq/db/frontend/malli_schema.cljs`
+  - `src/main/frontend/worker/sync/large_title.cljs` (since 2026-11, see
+    "Extended" below)
+- **Extended**: 2026-11 — marking the attribute `:db/index true` does not
+  reindex. A graph that already held large-title-object datoms keeps them
+  out of `:avet`, so `find-large-title-object-eid` and
+  `rehydrate-large-titles-from-db!` found nothing there. Both walk every
+  datom of the attribute anyway, so they now read `:aevt` through
+  `large-title-object-datoms`:
+  ```clojure
+  ;; ORIGINAL (two call sites)
+  (d/datoms db :avet large-title-object-attr)
+  ;; HYPHA
+  (d/datoms db :aevt large-title-object-attr)
+  ```
+  This was chosen over a versioned migration that re-transacts the
+  datoms: a Hypha-only entry in
+  `frontend.worker.db.migrate/schema-version->updates` would take the
+  minor version upstream uses next, and graphs already on it would skip
+  upstream's migration. Regression guard:
+  `large-title-lookups-find-datoms-that-predate-the-index-test` in
+  `frontend.worker.sync.large-title-test`. The schema entry stays, so an
+  upstream `:avet` read of the attribute cannot throw.
 - **Patch form** (two-piece, semantically one patch — both files must move
   in lockstep to keep the db-sync adapter's symmetry check happy):
 
@@ -508,12 +548,20 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   ;; HYPHA
   (defn- normalize-graph-e2ee?
     [graph-e2ee?]
-    (if (nil? graph-e2ee?)
-      (not (seq (:http-base @worker-state/*db-sync-config)))
-      (true? graph-e2ee?)))
+    (true? graph-e2ee?))
   ```
-- **Line count**: +8 (1 line of logic plus a 7-line explanatory comment).
-  `crypt.cljs/graph-e2ee?` is left untouched at its upstream definition.
+  The frontend twin `normalize-graph-e2ee?` in
+  `src/main/frontend/handler/db_based/sync.cljs` has the same form.
+- **Simplified**: 2026-11 — until then the nil default read
+  `(not (seq (:http-base @worker-state/*db-sync-config)))`, meant as
+  "self-hosted ⇒ false, Logseq.com ⇒ true". `:http-base` is always set
+  (it defaults to the Logseq.com API base), so that was always `false`.
+  Hypha never runs without a hypha-server, so the patch now says so
+  directly. The frontend twin still defaulted nil to `true` and was
+  aligned.
+- **Line count**: -3 logic lines plus a 6-line explanatory comment, in
+  both files. `crypt.cljs/graph-e2ee?` is left untouched at its upstream
+  definition.
 - **Rationale**: Stock Logseq's `graph-e2ee?` returns `nil` for graphs
   with no explicit `:logseq.kv/graph-rtc-e2ee?` setting. Every consumer
   in `worker/sync/{upload,assets,apply_txs,handle_message}.cljs` treats
@@ -535,14 +583,10 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   - **Older graphs created before M9.3**: same nil default, same failure.
 
-  This patch makes the upload path's `normalize-graph-e2ee?` hypha-aware:
-  when the worker's `db-sync-config` has a custom `:http-base` (=
-  self-hosted Hypha, set by `persist_db/browser.cljs` from
-  `frontend.config/set-custom-sync-server-url!`), unset state defaults to
-  **false** (no e2ee). When `:http-base` is empty (= stock Logseq pointing
-  at Logseq.com), unset state keeps the safer default **true**. This is
-  identical in shape to M9.3's UI default reversal, just propagated through
-  the upload-path fallback. `graph-e2ee?` itself remains the upstream pure
+  This patch makes the upload path's `normalize-graph-e2ee?` default
+  unset state to **false** (no e2ee). This is identical in shape to
+  M9.3's UI default reversal, just propagated through the upload-path
+  fallback. `graph-e2ee?` itself remains the upstream pure
   passthrough; the truthiness consumers (`<ensure-graph-aes-key`,
   `<grant-graph-access!`, assets, apply-txs, handle-message) already treat
   its `nil` as falsy (skip e2ee), so only the upload preflight needed the
@@ -555,7 +599,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Older graphs: nil → false → upload skips e2ee → user can opt back
     in via Settings if desired.
 
-  Net effect on Logseq.com: unchanged (no custom server → keeps true).
+  Net effect on Logseq.com: a Hypha build pointed at Logseq.com would
+  upload unset graphs without e2ee. Not a supported setup.
 
 - **Companion change (NOT a patch)**: none. This is a single-file
   worker-internal change.
@@ -585,7 +630,6 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `normalize-graph-e2ee?` is renamed, moved out of
     `worker/sync/upload.cljs`, or stops gating the `<preflight-upload-e2ee!`
     call.
-  - `worker-state/*db-sync-config` is renamed or restructured.
 
 - **Break signal — semantic**:
   - Upstream Logseq changes `normalize-graph-e2ee?` so nil no longer maps
@@ -599,9 +643,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-008' src/main/frontend/worker/sync/upload.cljs`
     ⇒ `1`
-  - Semantic, manual at triage: the `(nil? graph-e2ee?)` branch must read
-    `:http-base` from `worker-state/*db-sync-config`, and the polarity
-    must be `(not (seq ...))` — present-http-base implies default-false.
+  - Semantic, manual at triage: `normalize-graph-e2ee?` must map nil to
+    false, in the worker and in the frontend handler.
   - Regression guard: upstream's `graph-e2ee-preserves-nil-kv-value-test`
     and `graph-e2ee-preserves-false-kv-value-test` in
     `crypt_test.cljs` must stay green (they assert `graph-e2ee?` purity).
@@ -715,12 +758,16 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Patch form**:
   ```clojure
   ;; ADDED — secret material for the locally-persisted e2ee password.
-  (defn- password-persistence-secret
+  (defn- <password-persistence-secret
     [refresh-token]
-    (if (seq refresh-token)
-      refresh-token
-      (when (browser-runtime? (platform/current))
-        (some-> (sync-util/auth-token) worker-util/parse-jwt :sub))))
+    (let [platform' (platform/current)]
+      (cond
+        (seq refresh-token) (p/resolved refresh-token)
+        (browser-runtime? platform') (<device-secret platform')
+        :else (p/resolved nil))))
+
+  ;; <device-secret: 32 random bytes (hex), created on first use and kept
+  ;; in the platform secret store under "hypha-e2ee-device-secret".
 
   (defn- ensure-password-persistence-secret!
     [secret]
@@ -730,12 +777,20 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
   ;; <save-e2ee-password / <read-e2ee-password-text /
   ;; <decrypt-e2ee-password-text / <read-e2ee-password / <decrypt-in-headless
-  ;; now resolve the refresh-token to `secret` via password-persistence-secret
+  ;; now resolve the refresh-token to `secret` via <password-persistence-secret
   ;; and use it for encrypt/decrypt instead of the raw refresh-token.
   ```
-- **Line count**: +~20 (helper pair + comment; call sites swap
+- **Line count**: +~35 (helpers + comment; call sites swap
   `refresh-token` → `secret`). `ensure-refresh-token!` is kept for the
   node auth-file path only.
+- **Reworked**: 2026-11 — the browser fallback used to be the JWT `sub`
+  (user-id). That is not a secret: it is in every token and known to the
+  server, so the stored password was only obfuscated. The fallback is
+  now a random secret generated once per browser profile. A password
+  persisted under the old user-id key no longer decrypts; the headless
+  attempt fails and the interactive path asks for the e2ee password once
+  and saves it under the device secret. No compatibility read of the old
+  format.
 - **Rationale**: Stock Logseq persists the e2ee password encrypted with
   the OAuth **refresh-token** as the symmetric key (so the password
   survives reboots without re-entry). Hypha's auth model has **no
@@ -751,12 +806,12 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   generate path that needs to persist a password.
 
   This patch resolves the persistence secret through
-  `password-persistence-secret`: the refresh-token when present (stock
-  Logseq, CLI), else — **only in browser runtime** — the stable JWT
-  `sub` (user-id). The user-id is identical across reboots and devices,
-  so the saved password re-decrypts correctly. The user still chooses
-  and enters the password; only the symmetric key wrapping the *stored*
-  password changes from refresh-token to user-id.
+  `<password-persistence-secret`: the refresh-token when present (stock
+  Logseq, CLI), else — **only in browser runtime** — a random secret
+  stored in this browser profile. It survives reboots, so the saved
+  password re-decrypts correctly. The user still chooses and enters the
+  password; only the symmetric key wrapping the *stored* password
+  changes from refresh-token to device secret.
 
   Net effect:
   - Hypha browser: password save/read works; entered once per device,
@@ -765,12 +820,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Node/CLI without refresh-token: `browser-runtime?` is false → no
     fallback → still fails as before (auth-file is the source of truth).
 
-- **Security note**: In Hypha the *local reusability* of the persisted
-  password rests on the non-secret user-id, not on a secret. The
-  password itself remains the secret protecting the RSA private key.
-  Acceptable under Hypha's single-user, trusts-own-server model (same
-  rationale as Patch #4's e2ee-off default); it would be a weakening for
-  a don't-trust-the-server threat model.
+- **Security note**: The device secret sits in the same origin storage
+  (IndexedDB) as the encrypted password. It keeps the stored password
+  from being decrypted with public information (the user-id), but not
+  from code or a person with access to this browser profile's storage.
+  The password itself remains the secret protecting the RSA private key.
 
 - **Companion change (NOT a patch)**: none. Single-file worker-internal
   change. The paired UI copy clarification
@@ -794,11 +848,11 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     can be removed.
 
 - **Break signal — structural**:
-  - `password-persistence-secret` or `ensure-password-persistence-secret!`
+  - `<password-persistence-secret` or `ensure-password-persistence-secret!`
     is renamed/removed, or a save/read path reverts to using the raw
     `refresh-token` for encrypt/decrypt.
-  - `sync-util/auth-token`, `browser-runtime?`, or `worker-util/parse-jwt`
-    is renamed/moved.
+  - `browser-runtime?`, `platform/read-secret-text` or
+    `platform/save-secret-text!` is renamed/moved.
 
 - **Break signal — semantic**:
   - Upstream makes refresh-token optional for password persistence (e.g.
@@ -812,15 +866,16 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-010' src/main/frontend/worker/sync/crypt.cljs`
     ⇒ `1`
-  - Semantic, manual at triage: `password-persistence-secret` must gate
-    the user-id fallback on `browser-runtime?`, and the save/read paths
+  - Semantic, manual at triage: `<password-persistence-secret` must gate
+    the device-secret fallback on `browser-runtime?`, and the save/read paths
     must encrypt/decrypt with the resolved `secret`, not the raw
     refresh-token.
   - Regression guard: `save-e2ee-password-missing-refresh-token-in-auth-file-test`
     and `decrypt-private-key-headless-ignores-config-e2ee-password-test`
-    (node-path, must still fail) plus the two
-    `*-falls-back-to-user-id-in-browser-without-refresh-token-test`
-    cases (browser-path, must succeed) in `crypt_test.cljs`.
+    (node-path, must still fail) plus
+    `save-e2ee-password-uses-new-device-secret-in-browser-without-refresh-token-test`
+    and `read-e2ee-password-uses-device-secret-in-browser-without-refresh-token-test`
+    (browser-path, must succeed) in `crypt_test.cljs`.
 
 - **On break**:
   - Structural → re-anchor on the new save/read secret-resolution shape.
@@ -939,8 +994,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     call in `start!`)
   - `src/main/frontend/handler/user.cljs` (added `<refresh-id-token-hypha`
     branch in `<refresh-id-token&access-token`)
-  - `src/main/frontend/worker/sync/auth.cljs` (added Hypha branch in
-    `<refresh-id&access-token` via ui-request)
+  - `src/main/frontend/worker/sync/auth.cljs` (`<refresh-id&access-token`
+    refreshes via ui-request; the OAuth body is removed, see below)
   - `src/main/frontend/handler/worker.cljs` (added `:hypha-refresh-id-token`
     ui-action)
 - **Patch form**:
@@ -949,7 +1004,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   (defn <refresh-hypha-id-token!
     "Re-mint id-token via /auth/session."
     ([] (<refresh-hypha-id-token! <fetch-session-default))
-    ([fetch-fn] ...))    ;; resolves to fresh JWT or nil on session loss
+    ([fetch-fn] ...))    ;; resolves to fresh JWT, nil on session loss
+                         ;; (401/403), rejects on anything else
 
   (defn start-refresh-loop! [])  ;; 5-min tick, refresh when TTL < 15min
 
@@ -958,18 +1014,51 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     (<refresh-id-token-hypha)
     <existing-OAuth-path>)
 
-  ;; frontend.worker.sync.auth/<refresh-id&access-token now branches:
-  (if (hypha-mode?)  ;; detect via (seq (:http-base @*db-sync-config))
-    (<refresh-id&access-token-hypha)  ;; ui-request → main thread
-    <existing-OAuth-path>)
+  ;; frontend.worker.sync.auth/<refresh-id&access-token is the Hypha
+  ;; path only (ui-request → main thread); upstream's OAuth body and
+  ;; `oauth-token-url` are deleted:
+  (defn <refresh-id&access-token []
+    (p/let [resp (ui-request/<request :hypha-refresh-id-token nil ...)
+            id-token (:id-token resp)]
+      (when-not (seq id-token) (throw ...))
+      {:id-token id-token :access-token nil}))
 
   ;; frontend.handler.worker case-clause:
   :hypha-refresh-id-token
   (p/let [id-token (hypha-auth/<refresh-hypha-id-token!)]
     {:id-token id-token})
   ```
-- **Line count**: +~155 net code lines (helper ns, four branch points,
-  plus a 5-line config comment), -0 from upstream paths.
+- **Line count**: +~155 net code lines (helper ns, three branch points,
+  plus a 5-line config comment), -~40 upstream lines in
+  `worker/sync/auth.cljs` (OAuth refresh body, `oauth-token-url`) and
+  the two upstream tests that covered them
+  (`resolve-ws-token-refreshes-when-token-expired-test`,
+  `resolve-ws-token-does-not-fallback-to-main-thread-when-feature-flag-disabled-test`),
+  replaced by `resolve-ws-token-refreshes-through-main-thread-when-token-expired-test`
+  and `resolve-ws-token-rejects-when-main-thread-has-no-session-test`.
+- **Reworked**: 2026-11 —
+  - The worker used to pick the Hypha path with a `hypha-mode?` helper
+    that tested `(seq (:http-base @*db-sync-config))`. `:http-base` is
+    always set (it defaults to the Logseq.com API base), so the helper
+    was always true and upstream's OAuth body was unreachable. Hypha
+    never runs without a hypha-server, so the helper and the OAuth body
+    were removed instead of fixing the signal. **Upstream changes to
+    `<refresh-id&access-token` in `worker/sync/auth.cljs` now conflict;
+    resolve by keeping ours.**
+  - `<refresh-id-token-hypha` took from a promise in a `go` block
+    (`(<! (p/then …))`), which throws: core.async has no `ReadPort` for
+    `js/Promise`. It goes through `p->c` now.
+  - Only 401/403 from `/auth/session` count as a lost session. Offline
+    (`:status 0`) and 5xx reject in `<refresh-hypha-id-token!`, and
+    `frontend.hypha.init` retries the boot-time session restore instead
+    of prompting for the access code.
+- **Upstream sync 2026-11**: `state/set-auth-id-token` now keys a graph
+  session by user id; called with the token alone, every re-mint looked like
+  a user switch and emptied the remote graph list. Both Hypha call sites pass
+  the JWT `sub` (guard: `refresh-hypha-id-token-keeps-the-session-of-the-same-user`).
+  Upstream's `<ensure-id&access-token!` awaited the core.async refresh with
+  `p/let`, which does not wait for a channel; it now bridges it into a
+  promise (guard: `ensure-token-waits-for-the-refresh-test`).
 - **Rationale**: Stock Logseq uses Cognito OAuth: a refresh-token plus
   /oauth2/token mints a fresh id-token whenever the current one nears
   expiry. Hypha has no refresh-token (Patch #3); the only persistent
@@ -1003,9 +1092,9 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   JWT and the server-side session both expired simultaneously. The loop
   refreshes while the cookie is still valid, keeping both sides aligned.
 
-  Session loss (e.g. cookie expired, manual logout server-side) returns
-  nil from `<refresh-hypha-id-token!`; the main-thread frontend then
-  surfaces `[:user/login]` to show the access-code modal.
+  Session loss (e.g. cookie expired, manual logout server-side: 401/403)
+  returns nil from `<refresh-hypha-id-token!`; the main-thread frontend
+  then surfaces `[:user/login]` to show the access-code modal.
 
 - **Companion change (NOT a patch)**: none. `/auth/session` is already
   Hypha-server's standard auth endpoint.
@@ -1033,31 +1122,31 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - `frontend.handler.user/<refresh-id-token&access-token` is renamed,
     deleted, or its OAuth body is restructured such that the Hypha
     branch no longer sits at the top.
-  - `frontend.worker.sync.auth/<refresh-id&access-token` is similarly
-    refactored.
+  - `frontend.worker.sync.auth/<refresh-id&access-token` is renamed or
+    `<resolve-ws-token` stops calling it.
   - The `:hypha-refresh-id-token` ui-action key is renamed.
 
 - **Break signal — semantic**:
   - Upstream introduces its own cookie-session refresh path. Then both
     Hypha branches can fold into the upstream code and this patch
     becomes redundant — remove and re-verify the long-tab user story.
-  - `worker-state/*db-sync-config` is restructured such that
-    `:http-base` is no longer the Hypha-mode detection signal in the
-    worker.
 
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-012' src/main/frontend/handler/user.cljs` ⇒ `2`
+    (refresh branch and, since 2026-11, the server-side logout in `logout`)
     (plus matches in `hypha/auth.cljs`, `worker/sync/auth.cljs`,
     `handler/worker.cljs`).
   - Semantic, manual at triage: `<refresh-id-token&access-token` must
     branch on `hypha-config/hypha-mode?` to a Hypha-only function;
-    `<refresh-id&access-token` in the worker must branch on
-    `(hypha-mode?)` (the worker-side helper, which checks
-    `:http-base`) to a ui-request path.
+    `<refresh-id&access-token` in the worker must go through the
+    `:hypha-refresh-id-token` ui-request and never call `js/fetch`.
   - Regression guard: tests `refresh-hypha-id-token-*` in
-    `frontend.hypha.auth-test` (3 cases: 200+id-token, non-200, 200
-    without id-token).
+    `frontend.hypha.auth-test` (200+id-token, 401/403, and
+    offline/5xx/200-without-id-token),
+    `hypha-refresh-surfaces-login-only-on-session-loss-test` in
+    `frontend.handler.user-test`, and the two `resolve-ws-token-*` tests
+    named above in `frontend.worker.db-sync-test`.
 
 - **On break**:
   - Structural rename → re-anchor the branch on the new entry-point name.
@@ -1067,47 +1156,31 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
-## Patch #13 — Name-collision resolve dialog (rebind to existing remote graph)
+## Patch #13 — Name-collision resolve dialog (take over existing remote graph)
 
 - **ID**: HYPHA-PATCH-013
 - **Introduced**: Phase 1.6.2 hardening (graph-already-exists dead-end
-  recovery), 2026-05-30
+  recovery), 2026-05-30. Reworked 2026-11 from "rebind" to "take over
+  remote" (see Rationale).
 - **Files**:
   - `src/main/frontend/worker/sync/upload.cljs` (enriched
-    fail-upload-graph-already-exists! + new rebind-to-remote-graph!)
-  - `src/main/frontend/worker/sync.cljs` (re-export `rebind-to-remote-graph!`)
-  - `src/main/frontend/worker/db_core.cljs` (new
-    `:thread-api/db-sync-rebind-to-remote` endpoint)
+    fail-upload-graph-already-exists!)
   - `src/main/frontend/handler/db_based/sync.cljs` (differentiate
-    `<rtc-upload-graph!` catch + add `<rtc-rebind-to-remote!`)
+    `<rtc-upload-graph!` catch + add `<rtc-replace-local-with-remote!`)
   - `src/main/frontend/handler/events/rtc.cljs` (new
     `:rtc/graph-already-exists-resolve` event handler)
   - `src/main/frontend/components/graph_rebind.cljs` (new namespace,
     dialog component)
-  - `src/resources/dicts/{en,de,zh-cn}.edn` (new `:graph.rebind/*`
-    keys)
+  - `src/resources/dicts/{en,de,zh-cn}.edn` (`:graph.rebind/*` keys)
 - **Patch form**:
   ```clojure
   ;; worker/sync/upload.cljs: enrich the error with the remote graph's
-  ;; identity so the frontend can rebind without a second round-trip.
+  ;; identity so the frontend can download it without a second round-trip.
   (fail-upload-graph-already-exists!
    repo {:graph-name target-graph-name
          :remote-graph-id (:graph-id match)
          :remote-graph-e2ee? (:graph-e2ee? match)
          :remote-updated-at (:updated-at match)})
-
-  ;; new worker fn:
-  (defn rebind-to-remote-graph!
-    [repo remote-graph-id remote-graph-e2ee?]
-    (set-graph-sync-metadata! repo remote-graph-id (boolean remote-graph-e2ee?))
-    (ensure-client-graph-uuid! repo remote-graph-id)
-    {:graph-id remote-graph-id
-     :graph-e2ee? (boolean remote-graph-e2ee?)})
-
-  ;; thread-api endpoint:
-  (def-thread-api :thread-api/db-sync-rebind-to-remote
-    [repo remote-graph-id remote-graph-e2ee?]
-    (db-sync/rebind-to-remote-graph! repo remote-graph-id remote-graph-e2ee?))
 
   ;; handler/db_based/sync.cljs: catch differentiation
   (if (= :db-sync/graph-already-exists (:code data))
@@ -1115,38 +1188,41 @@ during weekly upstream-sync, the detection grep is the first thing run; the
                        (assoc data :repo repo)])
     ;; … existing toast path …)
 
+  ;; handler/db_based/sync.cljs: the dialog's action
+  (defn <rtc-replace-local-with-remote!
+    [repo graph-name remote-graph-id remote-graph-e2ee?]
+    (p/do!
+     (<rtc-download-graph! graph-name remote-graph-id (boolean remote-graph-e2ee?))
+     (<get-remote-graphs)
+     (state/pub-event! [:graph/switch repo {:rtc-download? true}])
+     (<rtc-start! repo)))
+
   ;; handler/events/rtc.cljs: event opens the resolve dialog
-  (defmethod events/handle :rtc/graph-already-exists-resolve [[_ payload]]
+  (defevent! :rtc/graph-already-exists-resolve [[_ payload]]
     (shui/dialog-open! #(graph-rebind/graph-already-exists-dialog payload) …))
   ```
-- **Line count**: +~230 net code lines (worker enrichment, new public
-  fns, new thread-api endpoint, new event handler, new dialog component)
-  plus +~40 i18n strings (3 locales × ~13 keys, en + de + zh-cn).
 - **Rationale**: Before this patch, uploading a local-only graph whose
   name was already taken on the server was a hard dead end. The
   upload-pipeline threw `:db-sync/graph-already-exists`, the frontend
   rendered a toast (`graph/upload-failed`), and the user had no
-  affordance other than:
-  - deleting the remote graph (would lose data on the other devices),
-  - deleting the local graph (would lose the changes that triggered
-    the upload in the first place),
-  - or finding a hidden console workaround to write KV bindings by
-    hand.
-
-  This is exactly the path Patch #12's user story walked into on
-  2026-05-30: a Hypha session expired silently, the local graph's
-  `:logseq.kv/graph-uuid` got cleared (or never wrote in the first
-  place), the cloud icon turned non-green, and clicking "Upload" hit
-  the dead-end toast.
+  affordance other than deleting the remote graph or deleting the
+  local graph by hand.
 
   This patch routes the name-collision error to a one-action resolve
-  dialog: "Connect to existing remote graph". The action calls a new
-  worker endpoint that writes the KV bindings to the remote graph's
-  UUID (no upload, no delete) and starts RTC. RTC's normal merge logic
-  then reconciles the local `client_ops` queue with the server. The
-  dialog shows the remote graph's short ID, last server-update
-  timestamp, and e2ee flag so the user can visually confirm they
+  dialog. "Connect" downloads the remote graph through the regular
+  download path, which replaces the same-named local db
+  (`prepare-import!` with `reset? = true`), then switches to the graph
+  and starts RTC. Local data that was never synced is lost; the dialog
+  says so. The dialog shows the remote graph's short ID, last
+  server-update timestamp, and e2ee flag so the user can confirm they
   picked the right one.
+
+  The first version of this patch wrote only the KV identity bindings
+  ("rebind") and relied on RTC to merge. That never synced: `local-tx`
+  stayed `nil` for a graph that was never uploaded, so the first
+  `hello` message threw `Invalid local tx` while the UI showed
+  "Connected". The rebind worker fn and its
+  `:thread-api/db-sync-rebind-to-remote` endpoint were removed.
 
   Rename-and-upload (third option floated in the design) is
   intentionally out of scope: it touches graph-identity rename code
@@ -1162,8 +1238,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
     distinguish "the user wants to keep their local-only changes" from
     "the user accidentally created a duplicate". The resolve dialog is
     the conscious user choice.
-  - Auto-rebind silently on name match: rejected — strong
-    data-mutating action; the user must consent.
+  - Replace the local graph silently on name match: rejected —
+    destructive action; the user must consent.
   - Throw a richer code (`:db-sync/name-collision-rebindable`) instead
     of enriching the existing one: rejected — keeps the API surface
     smaller and downstream code that pattern-matches on the existing
@@ -1175,37 +1251,30 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **Break signal — structural**:
   - `fail-upload-graph-already-exists!` is renamed or its signature
     changes such that the enriched fields don't reach the frontend.
-  - `:thread-api/db-sync-rebind-to-remote` is renamed.
   - `:rtc/graph-already-exists-resolve` event key is renamed or its
     payload shape changes.
-  - `rebind-to-remote-graph!` is moved/renamed in `worker/sync.cljs`'s
-    re-export layer.
+  - `<rtc-download-graph!` changes its signature.
 
 - **Break signal — semantic**:
   - Upstream adds its own name-collision resolution flow. Then the
     Hypha catch-differentiation can fold into upstream's path and this
-    patch's frontend half becomes redundant — verify the user can
-    still rebind without a regression.
-  - `set-graph-sync-metadata!` is restructured such that calling it
-    from outside an upload context no longer sets the bindings
-    correctly (e.g. additional side-effects are added that depend on
-    upload state).
+    patch's frontend half becomes redundant.
+  - The download path stops replacing an existing same-named local db
+    (`prepare-import!` no longer called with `reset? = true`).
 
 - **Detection**:
   - Structural, automatic:
     `rg -c 'HYPHA-PATCH-013' src/main/frontend/worker/sync/upload.cljs` ⇒ `1`
     (plus matches in `handler/db_based/sync.cljs`,
-    `handler/events/rtc.cljs`, `components/graph_rebind.cljs`,
-    `worker/db_core.cljs`, `worker/sync.cljs`, and the three dict
-    files via `:graph.rebind/*`).
+    `handler/events/rtc.cljs`, `components/graph_rebind.cljs`, and the
+    three dict files via `:graph.rebind/*`).
   - Semantic, manual at triage: the catch in `<rtc-upload-graph!` must
-    branch on `:db-sync/graph-already-exists`; the worker endpoint
-    must call `rebind-to-remote-graph!`; the dialog must offer the
-    rebind action (one of two buttons).
-  - Regression guard: tests `create-remote-graph-rejects-matching-remote-graph-test`
-    (enriched-error assertions) and `rebind-to-remote-graph-writes-kv-bindings-test`
-    + `rebind-to-remote-graph-fails-fast-on-empty-remote-graph-id-test`
-    in `frontend.worker.sync.upload-test`.
+    branch on `:db-sync/graph-already-exists`; the dialog's action must
+    call `<rtc-replace-local-with-remote!`.
+  - Regression guard: `create-remote-graph-rejects-matching-remote-graph-test`
+    (enriched-error assertions) in `frontend.worker.sync.upload-test`
+    and `rtc-replace-local-with-remote-downloads-then-starts-sync-test`
+    in `frontend.handler.db-based.sync-test`.
 
 - **On break**:
   - Structural rename → re-anchor the patch on the renamed entry point.
@@ -1284,7 +1353,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
      happens to match a remote. If the user never clicks upload, the
      collision stays invisible and a confusingly-similar local copy
      can drift. The banner makes this explicit on the graphs list
-     and offers the same one-click rebind.
+     and offers the same one-click resolve.
 
   Combined effect: a fresh browser login goes straight to an empty
   graph picker (which `frontend.hypha.init/<fetch-remote-graphs-after-login!`
@@ -1303,7 +1372,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Make the demo-graph repo Hypha-specific (e.g. a "Welcome to
     Hypha" graph): rejected for now — out of scope for a bugfix
     patch; can land separately as a real onboarding feature.
-  - Run the rebind flow automatically when a name collision is
+  - Run the resolve flow automatically when a name collision is
     detected at boot: rejected — strong data-mutating action; the
     user must consent. The banner explicitly offers, the user
     explicitly clicks.
@@ -1325,7 +1394,7 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Upstream's `combine-local-&-remote-graphs` starts merging
     same-name local + remote graphs into a single row (which
     eliminates the collision). Then the banner becomes dead and can
-    be removed; rebind still happens via Patch #13's upload-time
+    be removed; the resolve still happens via Patch #13's upload-time
     flow.
 
 - **Detection**:
@@ -1421,8 +1490,8 @@ during weekly upstream-sync, the detection grep is the first thing run; the
   - Upstream makes "/" literal itself (then the patch is redundant — drop it).
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs` ⇒ `1`
-    `rg -c 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs` ⇒ `1`
+    `rg -c 'HYPHA-LITERAL-SLASH' deps/common/src/logseq/common/util/namespace.cljs` ⇒ `3`
+    `rg -cF 'literal-slash?' deps/outliner/src/logseq/outliner/validate.cljs` ⇒ `2`
     `rg -c 'HYPHA-LITERAL-SLASH' bin/hypha-build` ⇒ `2`
   - Semantic, manual at triage: `namespace-page?`'s body must start with
     `(not literal-slash?)`, and the validate slash-check must be gated by
@@ -1436,249 +1505,96 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 ## Patch #16 — CLI `upsert page --parent/--remove-parent` (explicit namespace)
 
 - **ID**: HYPHA-PATCH-016
-- **Introduced**: Phase 1.7 (companion to Patch #15), 2026-06-04
-- **File**: `src/main/logseq/cli/command/upsert.cljs`
+- **Introduced**: Phase 1.7 (companion to Patch #15), 2026-06-04. Ported to
+  the OCaml CLI (`cli/`) in the upstream sync of 2026-11, after upstream
+  deleted the ClojureScript CLI.
+- **Files**:
+  - `cli/spec/commands/upsert.mli` (`page_opts` and `Upsert_page` gain
+    `parent` and `remove_parent`; spec change approved by the user)
+  - `cli/lib/upsert.ml` (validation, build, `page_parent_ops`)
+  - `cli/lib/cli_parse.ml`, `cli/lib/command_registry.ml` (options)
 - **Patch form**:
-  ```clojure
-  ;; require added
-  [logseq.db.common.order :as db-order]
+  ```ocaml
+  (* upsert.ml *)
+  type page_parent_change = Set_parent of string | Remove_parent
 
-  ;; upsert-page-spec gains:
-  :parent {:desc "Parent page name or db/id; nests this page under it ..."
-           :complete :pages}
-  :remove-parent {:desc "Remove the page's parent (make it top-level)"
-                  :coerce :boolean}
+  (* --parent: [:move-blocks [[page-uuid] parent-uuid {:sibling? false}]];
+     the worker assigns :block/order. The parent is found or created. *)
+  (* --remove-parent: [:transact [[[:db/retract id :block/parent]
+                                   [:db/retract id :block/order]] {}]] *)
 
-  ;; build-page-action carries :parent / :remove-parent into the action.
-
-  ;; execute-upsert-page, after the tag/property ops, sets the namespace parent
-  ;; via the existing :thread-api/transact, mirroring page-with-parent-and-order
-  ;; (parent + order); --remove-parent retracts both → top-level:
-  (when (:remove-parent action)
-    (transport/invoke cfg :thread-api/transact
-      [repo [[:db/retract page-id :block/parent] [:db/retract page-id :block/order]] {} {}]))
-  (when parent-page
-    (transport/invoke cfg :thread-api/transact
-      [repo [{:db/id page-id :block/parent (:db/id parent-page) :block/order (db-order/gen-key)}] {} {}]))
+  let page_result_with_resolved_plan ?restore ?rename ?parent_change ... =
+    bind (page_parent_ops ...) @@ function
+    | Error err -> ...   (* nothing written *)
+    | Ok parent_ops -> ... (* plan ops, then parent_ops *)
   ```
-- **Line count**: +~30 (spec keys + action carry + executor block + require).
-- **Rationale**: With Patch #15 "/" is literal, so the old "type A/B" namespace
-  shortcut is gone. A DB-native hierarchy needs an explicit `:block/parent`. The
-  CLI had no parent primitive and no `--parent` flag, and the MCP bridge
-  (`bin/hypha-mcp`) can only reach the graph through CLI subcommands. This adds
-  `--parent` (nest under a page, created if missing) and `--remove-parent`
-  (back to top-level), reusing the **existing** `:thread-api/transact` (no new
-  thread-api, per the CLI AGENTS.md rule). It mirrors the invariants of
-  `outliner/page.cljs/page-with-parent-and-order` (parent + `db-order/gen-key`
-  order); removing retracts both, matching how plain top-level pages store
-  neither attribute.
-- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs` gains
-  a `parent`/`removeParent` arg on `upsert_page` and a `set_page_parent` tool
-  (Hypha-own tooling, not upstream code).
-- **Additive alternatives considered**:
-  - New `:thread-api/set-page-parent` endpoint: rejected — AGENTS.md says don't
-    add thread-apis unless necessary; `:thread-api/transact` already suffices.
-  - `apply-outliner-ops` move-blocks: rejected — pages aren't block-tree
-    children; namespace parent is set by direct attribute transact, not a move.
-  - MCP wrapper POSTs to db-worker-node `/v1/invoke` directly: rejected —
-    duplicates transit transport + server discovery in JS, fragile.
-- **Break signal — structural**:
-  - `upsert-page-spec`, `build-page-action`, or `execute-upsert-page` is renamed
-    / restructured, or `:thread-api/transact` changes arity.
-  - `logseq.db.common.order/gen-key` is renamed/moved.
-- **Break signal — semantic**:
-  - Upstream adds its own page-parent CLI option → reconcile / drop.
-  - The page-parent invariants change (e.g. order no longer required).
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'remove-parent' src/main/logseq/cli/command/upsert.cljs` ⇒ `>=2`
-    `rg -c 'db-order/gen-key' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
-  - Semantic, manual at triage: `execute-upsert-page` must set
-    `:block/parent` + `:block/order` via `:thread-api/transact`, and
-    `--remove-parent` must retract both.
-- **On break**:
-  - Structural → re-anchor on the new executor shape.
-  - Semantic upstream-merged → drop the flags if upstream provides equivalents.
-
----
-
-## Patch #17 — Reliable ISO-8601 parsing for datetime properties
-
-- **ID**: HYPHA-PATCH-017
-- **Introduced**: Phase 1.7 follow-up (task scheduled/deadline reliability), 2026-06-04
-- **File**: `src/main/logseq/cli/command/add.cljs`
-- **Patch form**:
-  ```clojure
-  ;; ORIGINAL — bare js/Date string parse (locale/format dependent)
-  (defn- parse-datetime-value [value]
-    (cond
-      (number? value) {:ok? true :value value}
-      (string? value) (let [date (js/Date. value) ms (.getTime date)]
-                        (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))
-      :else {:ok? false}))
-
-  ;; HYPHA — gate on an unambiguous ISO-8601 regex before js/Date.
-  (def ^:private iso-datetime-re
-    #"(?i)^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d{1,3})?(z|[+-]\d{2}:?\d{2})?)?$")
-  (defn- parse-datetime-value [value]
-    (cond
-      (number? value) {:ok? true :value value}
-      (string? value) (let [s (string/trim value)]
-                        (if-not (re-matches iso-datetime-re s)
-                          {:ok? false}
-                          (let [ms (.getTime (js/Date. s))]
-                            (if (js/isNaN ms) {:ok? false} {:ok? true :value ms}))))
-      :else {:ok? false}))
-  ```
-  Plus a clearer error message at the `:datetime` branch of
-  `coerce-property-value-basic`.
-- **Line count**: +~12 (regex def + guard + comment), 1 message line changed.
-- **Rationale**: `upsert task --scheduled/--deadline` (and any `:datetime`
-  property) fed the raw string straight to `(js/Date. value)`. `new Date()` is
-  notoriously locale/format-dependent: `"12.02.2026"` (German DD.MM.YYYY) parsed
-  as **December 2026**, and `"2026/02/12"` vs `"2026-02-12"` flipped between
-  local and UTC midnight — all **silently**, since `new Date` returns a valid
-  (wrong) date that passes the isNaN check. Users reported the due-date field as
-  "not reliably settable". This restricts input to unambiguous ISO-8601
-  (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS][.mmm][Z|±HH:MM]`, space allowed for
-  `T`) and **fails fast** with a guiding message on anything else — matching the
-  repo's "fail-fast over fallback, never mask invalid state" rule. ISO inputs
-  behave exactly as before; out-of-range ISO dates still fail via isNaN.
+- **Line count**: about +190 in `upsert.ml`, +4 each in spec, parser and
+  registry.
+- **Rationale**: With Patch #15 "/" is literal, so a DB-native hierarchy needs
+  an explicit `:block/parent`. The MCP bridge (`bin/hypha-mcp`) reaches the
+  graph only through CLI subcommands. `ensure_valid_page_parent` refuses the
+  page itself, a parent below the page (a `:block/parent` cycle;
+  `:move-blocks` would silently do nothing) and a parent that already holds a
+  page with the same title. It runs before tags and properties are written.
 - **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
-  `upsert_task` scheduled/deadline tool descriptions document the ISO format.
+  `upsert_page` (`parent`/`removeParent`) and `set_page_parent`.
 - **Additive alternatives considered**:
-  - Support locale formats (DD.MM.YYYY): rejected — reintroduces ambiguity
-    (`01.02` = Jan 2 or Feb 1?) for a tool also driven by AI agents/scripts.
-  - Leave as-is and document ISO-only: rejected — silent wrong dates remain.
-  - Upstream PR: ideal long-term; the bug is generic, not Hypha-specific.
-- **Break signal — structural**:
-  - `parse-datetime-value` or `coerce-property-value-basic` is renamed/moved, or
-    `:datetime` coercion stops routing through `parse-datetime-value`.
-- **Break signal — semantic**:
-  - Upstream adds its own datetime normalization → reconcile/drop.
+  - Raw `:thread-api/transact` with `:block/order` (the old CLJS form):
+    rejected, the OCaml CLI cannot generate fractional order keys;
+    `:move-blocks` lets the worker do it.
+  - A separate `set-parent` command: needs a new `Command_id` (a larger spec
+    change) for no gain over two options on `upsert page`.
+- **Break signal — structural**: `page_result_with_resolved_plan` or the
+  `Upsert_page` record changes shape; the `:move-blocks` op changes its args.
+- **Break signal — semantic**: upstream adds its own page-parent option, or
+  `:move-blocks` stops accepting a page under a page.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'iso-datetime-re' src/main/logseq/cli/command/add.cljs` ⇒ `2`
-  - Semantic, manual at triage: `parse-datetime-value` must `re-matches`
-    `iso-datetime-re` before constructing `js/Date`.
-- **On break**:
-  - Structural → re-anchor the guard on the new coercion site.
-  - Semantic upstream-merged → drop the regex guard.
+    `rg -c 'HYPHA-PATCH-016' cli/lib/upsert.ml` ⇒ `3`
+    `rg -c 'remove_parent' cli/spec/commands/upsert.mli` ⇒ `2`
+  - Regression guard: the `Hypha upsert page --parent …` tests in
+    `cli/test/cli_parity_test_cases.ml`.
+- **On break**: re-anchor on the new page execution path; drop if upstream
+  provides an equivalent.
 
 ---
 
-## Patch #18 — Resolve :date properties by journal-day, not by formatted title
+## Patch #18 — Resolve :date property values by journal-day
 
 - **ID**: HYPHA-PATCH-018
-- **Introduced**: Phase 1.7 follow-up (date-property reliability), 2026-06-04
-- **File**: `src/main/logseq/cli/command/add.cljs`
+- **Introduced**: Phase 1.7 follow-up (date-property reliability), 2026-06-04.
+  Ported to the OCaml CLI in the upstream sync of 2026-11.
+- **File**: `cli/lib/upsert.ml` (`resolve_property_assignments`)
 - **Patch form**:
-  ```clojure
-  ;; ORIGINAL — resolve the journal page by its formatted title via ensure-page!
-  (let [... title (date-time-util/int->journal-title journal-day formatter)
-            page  (ensure-page! config repo title)]
-    (if-let [id (:db/id page)] id (throw ... "journal page not found")))
-
-  ;; HYPHA — resolve/create by :block/journal-day
-  (defn- find-journal-page-id-by-day [config repo journal-day]
-    (p/let [results (transport/invoke config :thread-api/q
-                      [repo [{:find '[[?e ...]] :in '[$ ?day]
-                              :where '[[?e :block/journal-day ?day]]} journal-day]])]
-      (first results)))
-  ;; resolve-date-page-id: existing = (find-journal-page-id-by-day …);
-  ;; if missing, create-page with the title, then look up by day again.
+  ```ocaml
+  (* An ISO date string for a :date property becomes the db/id of that day's
+     journal page: [:find [?e ...] :in $ ?day :where [?e :block/journal-day ?day]].
+     A missing day is created with create-page "YYYY-MM-DD", which the
+     outliner turns into the journal page of that day. *)
+  bind (resolve_date_property_value invoke_config repo ident assignment.value)
+    (fun value -> ... resolve_property_value_refs ... value)
   ```
-- **Line count**: +~14 (helper + day-based lookup/create), -2 (old title path).
-- **Rationale**: `upsert … --update-properties '{:some-date-prop "2026-02-12"}'`
-  for a `:date`-typed property failed with **"journal page not found"** even when
-  the journal day existed. A journal page's `:block/name` is always the canonical
-  `"MMM do, yyyy"` form (e.g. `feb 12th, 2026`), independent of the graph's
-  `:logseq.property.journal/title-format` (e.g. the German `"EEEE, dd.MM.yyyy"`
-  → `:block/title` `Thursday, 12.02.2026`). The old resolver built the lookup
-  name from the **custom title-format** and queried `:block/name`, which never
-  matched — so it fell through to creating a page under the wrong name and
-  returned no id. Journal pages are keyed by `:block/journal-day`; resolving by
-  day is format-independent and idempotent (find-or-create), fixing both the
-  "exists but not found" case and new-day creation.
-- **Companion change (NOT a patch)**: none.
-- **Additive alternatives considered**:
-  - Build the lookup name with the canonical `"MMM do, yyyy"` format instead of
-    the custom one: works, but still string-fragile (locale/format assumptions);
-    the journal-day key is the robust identity.
-  - Look up by `:block/title` instead of `:block/name`: rejected — title is the
-    display form and not the stable key; multiple formats have existed over a
-    graph's life (older journals store canonical titles).
-  - Upstream PR: ideal long-term; the bug is generic for custom journal formats.
-- **Break signal — structural**:
-  - `resolve-date-page-id` is renamed/moved, or `:block/journal-day` stops being
-    the journal key, or `:thread-api/q` changes arg shape.
-- **Break signal — semantic**:
-  - Upstream changes journal-page identity (e.g. day no longer stored).
+- **Line count**: about +80.
+- **Rationale**: `upsert page|block --update-properties '{:prop "2026-02-12"}'`
+  sent the raw string, and the worker rejected it ("should be a journal
+  date"). A journal page's identity is `:block/journal-day`; resolving by day
+  is independent of the graph's journal title format and idempotent. This
+  also runs under `--dry-run` of a block create; an empty journal page is
+  harmless.
+- **Additive alternatives considered**: a `[:block/name …]` lookup: the update
+  path has no `materialize_name_lookups`, and `:block/name` is not unique, so
+  the worker cannot resolve it.
+- **Break signal — structural**: `resolve_property_assignments` is renamed or
+  property values stop flowing through it.
+- **Break signal — semantic**: upstream coerces date values itself → drop.
 - **Detection**:
   - Structural, automatic:
-    `rg -c 'find-journal-page-id-by-day' src/main/logseq/cli/command/add.cljs` ⇒ `2`
-  - Semantic, manual at triage: `resolve-date-page-id` must resolve via
-    `:block/journal-day`, not via a title-name lookup.
-- **On break**:
-  - Structural → re-anchor the day-based lookup on the new resolver.
-  - Semantic upstream-merged → drop the helper.
-
----
-
-## Patch #19 — `rename page` CLI command (+ MCP rename_page)
-
-- **ID**: HYPHA-PATCH-019
-- **Introduced**: Phase 1.7 follow-up (page rename), 2026-06-04
-- **Files**:
-  - `src/main/logseq/cli/command/upsert.cljs` (spec, entry, build + execute fns)
-  - `src/main/logseq/cli/commands.cljs` (build-action + execute dispatch cases)
-- **Patch form**:
-  ```clojure
-  ;; upsert.cljs
-  (def ^:private rename-page-spec
-    {:page {...} :id {:coerce :long} :uuid {...} :to {:desc "New page title"}})
-  ;; entry: (core/command-entry ["rename" "page"] :rename-page "Rename a page" rename-page-spec ...)
-  (defn build-rename-page-action [options repo] ...)        ; validates page id|uuid|name + --to
-  (defn- resolve-existing-page! [cfg repo {:keys [id uuid page]}] ...) ; never creates
-  (defn execute-rename-page [action config]
-    ... (transport/invoke cfg :thread-api/apply-outliner-ops
-          [repo [[:rename-page [page-uuid (:to action)]]] {}]) ...)
-
-  ;; commands.cljs
-  :rename-page (upsert-command/build-rename-page-action options repo)   ; build-action case
-  :rename-page (upsert-command/execute-rename-page action config)       ; execute case
-  ```
-- **Line count**: +~70 in upsert.cljs (spec + entry + 3 fns), +4 in commands.cljs.
-- **Rationale**: The CLI/MCP could create and delete pages but not rename one.
-  Renaming a page (its `:block/title`, derived `:block/name`, and references) is
-  the `:rename-page` outliner op, already used by the frontend
-  (`handler/page/rename!`). This exposes it as `logseq rename page
-  --page|--id|--uuid … --to <new title>` (reusing `:thread-api/apply-outliner-ops`
-  — no new thread-api) and an MCP `rename_page` tool. Identification never
-  auto-creates (rename of a missing page is an error). Works with literal-"/"
-  titles (Patch #15) since the op goes through the gated validation.
-- **Companion change (NOT a patch)**: `bin/hypha-mcp/hypha-mcp-server.mjs`
-  `rename_page` tool (Hypha-own tooling).
-- **Additive alternatives considered**:
-  - Fold into `upsert page --rename-to`: rejected — the user asked for a
-    discrete command; a dedicated `rename page` reads clearer and matches
-    `remove page`/`upsert page` grouping.
-  - New thread-api: unnecessary — `apply-outliner-ops :rename-page` exists.
-- **Break signal — structural**:
-  - `:rename-page` op is renamed/removed from `deps/outliner`'s op set, or the
-    `build-action`/`execute` dispatch in `commands.cljs` is restructured so the
-    new cases are dropped, or `upsert-command/entries` no longer aggregated.
-- **Break signal — semantic**:
-  - Upstream ships its own page-rename CLI command → reconcile/drop.
-- **Detection**:
-  - Structural, automatic:
-    `rg -c 'execute-rename-page' src/main/logseq/cli/commands.cljs` ⇒ `1`
-    `rg -c '"rename" "page"' src/main/logseq/cli/command/upsert.cljs` ⇒ `1`
-  - Semantic, manual at triage: `execute-rename-page` must call
-    `:thread-api/apply-outliner-ops` with a `[:rename-page [uuid to]]` op.
-- **On break**:
-  - Structural → re-anchor the dispatch cases / entry / op name.
-  - Semantic upstream-merged → drop the command if upstream provides it.
+    `rg -c 'HYPHA-PATCH-018' cli/lib/upsert.ml` ⇒ `1`
+  - Regression guards: `Hypha :date property value …` in
+    `cli/test/cli_parity_test_cases.ml`;
+    `create-iso-date-title-reuses-journal-of-a-custom-title-format` in
+    `logseq.outliner.page-test`.
+- **On break**: re-anchor on the new property-value resolution.
 
 ---
 
@@ -1757,15 +1673,21 @@ during weekly upstream-sync, the detection grep is the first thing run; the
                     (:logseq.property.history/scalar-value item))
               … (date/int->local-time-2 (:block/created-at item)))])
 
-  ;; block-context-menu-content — gated menu item (only when history exists)
-  (when-let [history (seq (:logseq.property.history/_block block))]
+  ;; block-context-menu-content — history is queried from the worker
+  ;; (<get-property-history repo (:db/id block)) next to the block fetch;
+  ;; the menu item is gated on it
+  (when-let [history (seq property-history)]
     (shui/dropdown-menu-item
      {:key "Property history"
       :on-click (fn [_e] (shui/dialog-open! (fn [] (property-history-cp history))
                                             {:title (t :block/property-history)}))}
      (t :block/property-history)))
   ```
-- **Line count**: +~25 (component + menu item + require), +1 per dict.
+- **Line count**: +~40 (query, component, menu item, require), +1 per dict.
+- **Upstream sync 2026-11**: upstream's context menu now gets the block as a
+  plain map from the worker (`db-async/<get-block`), which has no reverse
+  refs. The history is queried from the worker with a nested pull instead of
+  read from `:logseq.property.history/_block`.
 - **Rationale**: The property-history mechanic (Patch #20 toggle +
   `:logseq.property.history/*` records) had no general read UI — only a
   status-specific `status-history-cp`. This adds a general viewer: a
@@ -1801,6 +1723,220 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 - **On break**:
   - Structural → re-anchor the menu item / reverse-ref read.
   - Semantic upstream-merged → remove ours.
+
+---
+
+## Patch #22 — Web download binds the worker runtime to the target graph
+
+- **ID**: HYPHA-PATCH-022
+- **Introduced**: Phase 1.8 follow-up (fresh-session download regression),
+  2026-07-02
+- **File**: `src/main/frontend/handler/db_based/sync.cljs`
+  (`<ensure-download-runtime-bound!`)
+- **Patch form**:
+  ```clojure
+  ;; ORIGINAL
+  (defn- <ensure-download-runtime-bound!
+    [repo]
+    (if (util/electron?)
+      (p/let [_ (persist-db/<fetch-init-data repo {:sync-download-graph? true})
+              _ (<sync-auth-state-to-db-worker!)]
+        nil)
+      (p/resolved nil)))
+
+  ;; HYPHA — web branch binds too, instead of no-op, and reports whether
+  ;; the bind created the db:
+  (p/let [dbs (state/<invoke-db-worker :thread-api/list-db)
+          existed? (some #(= repo (:name %)) dbs)
+          _ (state/<invoke-db-worker :thread-api/create-or-open-db
+                                     repo {:sync-download-graph? true})]
+    (not existed?))
+  ```
+  `<rtc-download-graph!` unlinks the db again
+  (`:thread-api/unsafe-unlink-db`) when the bind created it and the
+  download then fails or is cancelled. Otherwise an empty graph with the
+  remote's name stays behind (added 2026-11).
+- **Line count**: +5 logic lines (replacing `(p/resolved nil)`) plus a
+  13-line explanatory comment, and +9 lines for the cleanup in
+  `<rtc-download-graph!`.
+- **Rationale**: The browser db-worker's shared-service (tab master
+  election via Web Locks, `worker/shared_service.cljs`) is created ONLY
+  when `:thread-api/create-or-open-db` goes through the worker proxy
+  (`db_core.cljs/build-proxy-object` → `<init-service!`). Stock Logseq
+  guarantees this happens at boot: with zero local repos it auto-creates
+  the demo graph, otherwise `restore-and-setup!` opens the startup repo.
+  Patch #14 deliberately skips the demo graph in Hypha mode, so a fresh
+  browser session (or one whose OPFS was evicted — the
+  `:opfs-storage-may-be-cleared` case) boots with NO service and
+  `shared-service/*master-client?` stuck at its `defonce` default
+  `false`. The first remote-graph download then executes locally in that
+  never-elected worker; `prepare-import!` calls the raw
+  `create-or-open-db` thread-api fn whose `start-db!` silently no-ops
+  behind `(when @shared-service/*master-client? ...)`, and the download
+  dies at `:stage :prepare-import` with
+  `:db-sync/missing-field {:field :datascript-conn}` — Hypha's primary
+  onboarding path (fresh device → download own graph) was broken.
+
+  The fix restores the upstream invariant "a service exists before any
+  download": route one `create-or-open-db` through the proxy for the
+  download target, which creates the service and runs master election.
+  `:sync-download-graph? true` skips initial-data seeding and migration;
+  `prepare-import!` (reset? = true) unlinks and recreates the db anyway.
+  If another tab already owns the target graph, this tab becomes slave
+  and the download invoke is forwarded to the master — better than the
+  old behavior, where two service-less tabs would both run downloads
+  against the same OPFS pool. Electron branch unchanged.
+
+- **Companion change (NOT a patch)**: none. Uses
+  `state/<invoke-db-worker` directly instead of `persist-db/<new` to
+  avoid `<new`'s trailing `<export-db` side effect.
+
+- **Additive alternatives considered**:
+  - Worker-side fallback ("no service ⇒ act as master" in `start-db!`):
+    rejected — without an election nothing guarantees exclusivity; a
+    second tab could already own the graph's OPFS pool.
+  - Gate the bind on "no graph open yet" (`(nil? (state/get-current-repo))`):
+    rejected — a stale localStorage `:git/current-repo` survives an OPFS
+    wipe, so the signal is unreliable in exactly the failing scenario;
+    the unconditional bind is idempotent for the same graph and matches
+    the Electron branch semantics.
+  - Revert Patch #14's demo-graph skip: rejected — reintroduces the
+    tutorial-content onboarding problem Patch #14 exists to fix.
+  - Submit upstream: plausible — the same hole exists upstream for any
+    flow that downloads before ever opening a graph; upstream just never
+    reaches it because of the demo-graph fallback.
+
+- **Break signal — structural**:
+  - `<ensure-download-runtime-bound!` is renamed/removed, or
+    `<rtc-download-graph!` stops calling it before
+    `:thread-api/db-sync-download-graph-by-id`.
+  - `:thread-api/create-or-open-db` stops being the proxy's
+    service-(re)init trigger in `db_core.cljs/build-proxy-object`.
+- **Break signal — semantic**:
+  - Upstream moves master election out of the create-or-open-db proxy
+    path (e.g. elects at worker boot). Then the bind becomes redundant —
+    verify the fresh-session download story, then drop the patch.
+  - `start-db!` stops gating db creation on
+    `shared-service/*master-client?`.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-022' src/main/frontend/handler/db_based/sync.cljs`
+    ⇒ `1`
+  - Semantic, manual at triage: the non-electron branch of
+    `<ensure-download-runtime-bound!` must invoke
+    `:thread-api/create-or-open-db` with `{:sync-download-graph? true}`.
+  - Regression guard: tests
+    `rtc-download-graph-binds-web-runtime-before-download-test`,
+    `rtc-download-graph-delegates-to-worker-download-api-test` and
+    `rtc-download-graph-unlinks-db-it-created-when-download-fails-test`
+    in `frontend.handler.db-based.sync-test`.
+- **On break**:
+  - Structural → re-anchor the bind at whatever precedes the download
+    invoke.
+  - Semantic upstream-merged → remove the web branch and re-verify:
+    fresh browser profile → login → download remote graph must succeed.
+
+---
+
+## Patch #25 — Resent txs are acknowledged, not applied twice
+
+- **ID**: HYPHA-PATCH-025
+- **Introduced**: Sync-loop investigation after the upstream sync, 2026-11
+- **Files**:
+  - `deps/db-sync/src/logseq/db_sync/storage.cljs` (`tx-id-journaled?`,
+    index on `tx_log.tx_id`)
+  - `deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` (`apply-tx!`)
+  - `src/main/frontend/worker/sync/handle_message.cljs` (`handle-pull-ok!`
+    keeps `:tx-id`)
+  - `src/main/frontend/worker/sync/apply_txs.cljs`
+    (`ack-pending-txs-in-remote-txs!`)
+- **Patch form**:
+  ```clojure
+  ;; server: apply-tx!
+  applied-entry? (if (and tx-id (storage/tx-id-journaled? sql tx-id))
+                   false
+                   (try (boolean (apply-tx-entry! …)) …))
+
+  ;; client: apply-remote-txs!, before local txs are reverted and rebased
+  (let [_ (ack-pending-txs-in-remote-txs! repo remote-txs)
+        local-txs (pending-txs repo)] …)
+  ```
+- **Line count**: about +10 server, +20 client.
+- **Rationale**: On 2026-11-13 the CLI daemon lost a `tx/batch/ok`. The
+  watchdog reconnected, the pull returned the client's own txs, and the client
+  rebased its pending copies on top. They stayed pending as `:rebase` txs that
+  only rewrote `:block/updated-at` and were resent after every reconnect. The
+  server applied each resend again (it checked `t-before`, never the tx-id):
+  449 rounds, about 18,500 journal entries, which other clients (the iPad)
+  received as thousands of remote changes. Each fix ends that loop on its own:
+  the server confirms a journaled tx-id without applying it, and the client
+  treats its own tx-id in a pull as the acknowledgement.
+- **Additive alternatives considered**: stop resending after the watchdog's
+  kill limit: hides the stall and leaves the duplicates of the first rounds.
+- **Break signal — structural**: `apply-tx!` or `apply-remote-txs!` is
+  restructured; `pull/ok` stops carrying `:tx-id`.
+- **Break signal — semantic**: upstream adds its own tx-id idempotency → drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-025' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-025' src/main/frontend/worker/sync/apply_txs.cljs` ⇒ `1`
+  - Regression guards: `resent-tx-id-is-confirmed-not-reapplied-test`
+    (`logseq.db-sync.worker-handler-sync-test`),
+    `pull-ok-own-tx-id-acknowledges-pending-tx-test`
+    (`frontend.worker.db-sync-test`).
+- **On break**: re-anchor; drop when upstream deduplicates by tx-id.
+
+---
+
+## Patch #26 — Paged pull
+
+- **ID**: HYPHA-PATCH-026
+- **Introduced**: Deploy of v0.2.0.0, 2026-11-15
+- **Files**:
+  - `deps/db-sync/src/logseq/db_sync/storage.cljs` (`fetch-tx-page`)
+  - `deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs`
+    (`pull-response`, `pull-page-max-txs`, `pull-page-max-bytes`)
+  - `src/main/frontend/worker/sync/handle_message.cljs` (`handle-pull-ok!`)
+- **Patch form**:
+  ```clojure
+  ;; server: at most 2000 txs / 8 MiB per pull/ok; :t is the page end and
+  ;; :checksum is sent only with the last page
+  ;; client: after applying a page
+  (when (and (number? head-tx) (< remote-tx head-tx))
+    (request-pull! client remote-tx))
+  ```
+- **Rationale**: A pull/ok is one WebSocket message and the ws library caps a
+  message at 100 MiB. After the 2026-11-13 loop (#25) a browser 18,982 txs
+  behind got a 101.5 MB pull/ok, the proxy closed the socket, and the client
+  reconnected and pulled again about once a second without catching up.
+- **Additive alternatives considered**: raise `maxPayload`: moves the limit,
+  keeps 100 MB messages in browser and iPad memory.
+- **Break signal — structural**: `pull-response` or `handle-pull-ok!` is
+  restructured.
+- **Break signal — semantic**: upstream pages the pull itself → drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-026' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-026' src/main/frontend/worker/sync/handle_message.cljs` ⇒ `1`
+  - Regression guards: `pull-response-is-paged-test`,
+    `pull-ok-page-behind-the-head-pulls-the-next-page-test`.
+- **On break**: re-anchor; drop when upstream pages the pull.
+
+---
+
+## Retired patches
+
+- **#17 ISO-8601 parsing for datetime properties** and **#19 `rename page`**
+  were dropped in the upstream sync of 2026-11, when upstream replaced the
+  ClojureScript CLI with the OCaml CLI in `cli/`. Its `Time.parse_time`
+  accepts only RFC 3339 with seconds (fractions of any length), `YYYY-MM-DD`
+  and epoch ms, and rejects `12.02.2026`. `upsert page --rename` covers the
+  rename; the MCP `rename_page` tool now calls it.
+- **#23 Quick capture returns the insert promise** and **#24 RTC auto-start
+  survives a failed start** were dropped in the upstream sync of 2026-11.
+  Upstream's `quick-capture` no longer inserts from a detached timeout, and
+  upstream rewrote the RTC auto-start task as a per-event `p/do!` that a
+  failed start cannot end. The numbers are not reused.
 
 ---
 

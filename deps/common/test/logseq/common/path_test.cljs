@@ -39,6 +39,8 @@
     (is (= "//nas/share/x" (path/file-url-or-path->path "file://NAS/share/x")))
     (is (= "D:/a.txt" (path/file-url-or-path->path "file:///D%3A/a.txt")))
     (is (= "/home/admin/a.txt" (path/file-url-or-path->path "file:///home/admin/a.txt")))
+    ;; Electron assets:// URLs protect a Windows drive colon as /logseq__colon/
+    (is (= "C:/graph/assets/a.txt" (path/file-url-or-path->path "assets:///C/logseq__colon/graph/assets/a.txt")))
     (is (= "/D:/a.txt" (path/file-url-or-path->path "/D:/a.txt")))
     (is (= "/D:\\a.txt" (path/file-url-or-path->path "/D:\\a.txt")))
     (is (= "/home/admin/a.txt" (path/file-url-or-path->path "/home/admin/a.txt")))))
@@ -63,3 +65,11 @@
     (is (false? (path/protocol-url? "test.md")))
     (is (false? (path/protocol-url? "test")))
     (is (false? (path/protocol-url? "D:test.md")))))
+
+(deftest invalid-or-bare-protocol-urls
+  (testing "invalid or bare protocol URLs do not crash"
+    (is (string? (path/url-to-path "assets://")))
+    (is (string? (path/url-to-path "file://")))
+    (is (= "assets:///foo" (path/path-join "assets://" "foo")))
+    (is (string? (path/path-join "file://" "assets://")))
+    (is (string? (path/url-normalize "assets://")))))

@@ -7,12 +7,12 @@
             [frontend.context.i18n :as i18n :refer [t]]
             [frontend.handler.common :as common-handler]
             [frontend.handler.db-based.sync :as rtc-handler]
-            [frontend.handler.editor :as editor-handler]
+            [frontend.handler.editor.quick-add :as editor-quick-add]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.user :as user-handler]
             [frontend.extensions.fsrs :as fsrs]
             [frontend.mobile.util :as mobile-util]
-            [frontend.rum :as frum]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
@@ -29,14 +29,13 @@
             [mobile.components.header :as mobile-header]
             [mobile.components.popup :as popup]
             [mobile.components.selection-toolbar :as selection-toolbar]
-            [mobile.components.ui :as ui-component]
             [mobile.state :as mobile-state]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc component-with-restoring < rum/static rum/reactive
+(hsx/defc component-with-restoring
   [component]
-  (let [db-restoring? (state/sub :db/restoring?)]
+  (let [db-restoring? (rfx/use-sub [:db/restoring?])]
     (if db-restoring?
       [:div.space-y-2.mt-8.mx-0.opacity-75
        (shui/skeleton {:class "h-10 w-full mb-6"})
@@ -44,11 +43,12 @@
        (shui/skeleton {:class "h-6 w-full"})]
       component)))
 
-(rum/defc home < rum/static
-  {:did-mount (fn [state]
-                (ui/inject-document-devices-envs!)
-                state)}
+(hsx/defc home
   []
+  (hooks/use-effect!
+   (fn []
+     (ui/inject-document-devices-envs!))
+   [])
   (component-with-restoring (journal/all-journals)))
 
 (defn use-theme-effects!
@@ -58,7 +58,7 @@
      (state/sync-system-theme!)
      (ui/setup-system-theme-effect!)
      (let [handler (fn [^js e]
-                     (when (:ui/system-theme? @state/state)
+                     (when (:ui/system-theme? (state/get-state))
                        (let [is-dark? (boolean (some-> e .-detail .-isDark))]
                          (state/set-theme-mode! (if is-dark? "dark" "light") true))))]
        (.addEventListener js/window "logseq:native-system-theme-changed" handler)
@@ -200,15 +200,15 @@
 
 (defn- use-native-graphs-effects!
   []
-  (let [[id-token] (frum/use-atom-in state/state :auth/id-token)
-        [repos] (frum/use-atom-in state/state [:me :repos])
-        [remotes] (frum/use-atom-in state/state :rtc/graphs)
-        [downloading-graph-id] (frum/use-atom-in state/state :rtc/downloading-graph-uuid)
-        [loading-graphs?] (frum/use-atom-in state/state :rtc/loading-graphs?)
-        [route-match] (frum/use-atom-in state/state :route-match)
-        [_preferred-language] (frum/use-atom-in state/state :preferred-language)
-        [tab] (frum/use-atom mobile-state/*tab)
-        login? (boolean id-token)
+  (let [session (rfx/use-sub [:auth/graph-session])
+        repos (rfx/use-sub [:me :repos])
+        remotes (rfx/use-sub [:rtc/graphs])
+        downloading-graph-id (rfx/use-sub [:rtc/downloading-graph-uuid])
+        loading-graphs? (rfx/use-sub [:rtc/loading-graphs?])
+        route-match (rfx/use-sub [:route-match])
+        _preferred-language (rfx/use-sub [:preferred-language])
+        [tab] (hooks/use-atom mobile-state/*tab)
+        login? (boolean (rfx/use-sub [:auth/id-token]))
         route-name (get-in route-match [:data :name])
         visible? (and (= tab "graphs")
                       (not (contains? #{:import :export} route-name)))
@@ -220,10 +220,10 @@
      (fn []
        (when (and (mobile-util/native-ios?)
                   login?
-                  (user-handler/rtc-group?))
+                  (user-handler/can-list-remote-graphs?))
          (rtc-handler/<get-remote-graphs))
        nil)
-     [login?])
+     [session])
     (hooks/use-effect!
      (fn []
        (bottom-tabs/update-native-graphs! {:labels labels
@@ -233,33 +233,35 @@
        nil)
      [labels sections visible? loading-graphs?])))
 
-(rum/defc native-graphs-bridge
+(hsx/defc native-graphs-bridge
   []
   (use-native-graphs-effects!)
   [:<>])
 
-(rum/defc capture <
-  {:did-mount (fn [state]
-                (p/do!
-                 (editor-handler/quick-add-ensure-new-block-exists!)
-                 (when (mobile-util/native-ios?)
-                   ;; FIXME: android doesn't open keyboard automatically
-                   (editor-handler/quick-add-open-last-block!)))
-                state)}
+(hsx/defc capture
   []
+  (hooks/use-effect!
+   (fn []
+     (p/do!
+      (editor-quick-add/quick-add-ensure-new-block-exists!)
+      (when (mobile-util/native-ios?)
+        ;; FIXME: android doesn't open keyboard automatically
+        (editor-quick-add/quick-add-open-last-block!))))
+   [])
   (quick-add/quick-add))
 
-(rum/defc flashcards <
-  {:did-mount (fn [state]
-                (fsrs/update-due-cards-count)
-                state)}
+(hsx/defc flashcards
   []
+  (hooks/use-effect!
+   (fn []
+     (fsrs/update-due-cards-count))
+   [])
   [:div.ls-mobile-flashcards
    (fsrs/cards-view nil {:mobile? true
                          :on-header-change mobile-state/set-flashcards-header!
                          :on-selector-change mobile-state/set-flashcards-selector!})])
 
-(rum/defc other-page < rum/static
+(hsx/defc other-page
   [route-view tab route-match]
   (let [page-view? (= (get-in route-match [:data :name]) :page)]
     [:div#main-content-container.pl-3.ls-layer
@@ -275,7 +277,7 @@
          (= tab "flashcards") (component-with-restoring (flashcards))
          (= tab "capture") (component-with-restoring (capture))))]))
 
-(rum/defc main-content < rum/static
+(hsx/defc main-content
   [tab route-match]
   (let [view (get-in route-match [:data :view])
         home? (and (= tab "home") (nil? view))
@@ -302,11 +304,11 @@
      (when-not home?
        (other-page view tab route-match))]))
 
-(rum/defc app
+(hsx/defc app
   [current-repo route-match]
   (let [[tab] (mobile-state/use-tab)
-        preferred-language (state/sub :preferred-language)
-        [theme] (frum/use-atom-in state/state :ui/theme)]
+        preferred-language (rfx/use-sub [:preferred-language])
+        theme (rfx/use-sub [:ui/theme])]
     (use-screen-size-effects!)
     (use-theme-effects! current-repo theme)
     (hooks/use-effect!
@@ -340,29 +342,30 @@
    {:id mobile-util/mobile-keyboard-anchor-id
     :type "text"}])
 
-(rum/defc main < rum/reactive
+(hsx/defc main
   []
-  (let [current-repo (state/sub :git/current-repo)
-        show-action-bar? (state/sub :mobile/show-action-bar?)
-        {:keys [open? content-fn opts]} (rum/react mobile-state/*popup-data)
+  (let [current-repo (rfx/use-sub [:git/current-repo])
+        show-action-bar? (rfx/use-sub [:mobile/show-action-bar?])
+        [popup-data] (hooks/use-atom mobile-state/*popup-data)
+        [popup-presenting?] (hooks/use-atom mobile-state/*popup-presenting?)
+        {:keys [open? content-fn]} popup-data
         show-popup? (and open? content-fn)
-        route-match (state/sub :route-match)]
+        route-match (rfx/use-sub [:route-match])]
     [:main#app-container-wrapper.ls-fold-button-on-right
-     [:div#app-container {:class (when show-popup? "invisible")}
+     [:div#app-container {:class (when (and show-popup? popup-presenting?) "invisible")}
       [:div#main-container.flex.flex-1.overflow-x-hidden
        (app current-repo route-match)]]
      (when (mobile-util/native-ios?)
        (native-graphs-bridge))
      (when show-popup?
-       [:div.ls-layer
-        (popup/popup opts content-fn)])
+       [:div.ls-layer {:class (when-not popup-presenting? "invisible")}
+        (popup/popup popup-data)])
      (editor-toolbar/mobile-bar)
      (when show-action-bar?
        (selection-toolbar/action-bar))
      (shui-popup/install-popups)
-     (ui-component/install-notifications)
      (shui-toaster/install-toaster)
-     (shui-dialog/install-modals)
+     (shui-dialog/install-dialogs)
      [:div.download
       [:a#download.hidden]
       [:a#download-as-transit-debug.hidden]

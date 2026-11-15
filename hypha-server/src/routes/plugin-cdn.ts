@@ -28,7 +28,8 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, isSafeSubpath, serveCached } from "../plugin-cache.js";
+import { PluginCache, requireSession, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
+import type { SessionStore } from "../auth/session.js";
 
 const R2_TTL_SECONDS = 86_400;
 const ASSETS_TTL_SECONDS = 86_400;
@@ -44,6 +45,7 @@ const ASSETS_RESPONSE_HEADERS = {
 
 export interface PluginCdnDeps {
   cache: PluginCache;
+  sessions: SessionStore;
   /** e.g. "https://plugins.logseq.io/r2" (no trailing slash). */
   upstreamBase: string;
   /**
@@ -55,15 +57,18 @@ export interface PluginCdnDeps {
 }
 
 export const pluginCdnRoute: FastifyPluginAsync<PluginCdnDeps> = async (app, deps) => {
+  app.addHook("preHandler", requireSession(deps.sessions));
+
   app.get("/plugin-cdn/r2/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(deps.upstreamBase, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `cdn:r2:${subpath}`,
-      upstreamUrl: `${deps.upstreamBase}/${subpath}`,
+      cacheKey: `cdn:r2:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: R2_TTL_SECONDS,
       reply,
     });
@@ -71,13 +76,14 @@ export const pluginCdnRoute: FastifyPluginAsync<PluginCdnDeps> = async (app, dep
 
   app.get("/plugin-cdn/assets/*", async (request, reply) => {
     const subpath = (request.params as { "*": string })["*"];
-    if (!isSafeSubpath(subpath)) {
+    const upstreamUrl = resolveUpstreamUrl(deps.assetsUpstreamBase, subpath);
+    if (!upstreamUrl) {
       return reply.code(400).send({ error: "invalid_path" });
     }
     return serveCached({
       cache: deps.cache,
-      cacheKey: `cdn:assets:${subpath}`,
-      upstreamUrl: `${deps.assetsUpstreamBase}/${subpath}`,
+      cacheKey: `cdn:assets:${upstreamUrl}`,
+      upstreamUrl,
       ttlSeconds: ASSETS_TTL_SECONDS,
       reply,
       extraHeaders: ASSETS_RESPONSE_HEADERS,

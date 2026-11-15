@@ -2,14 +2,14 @@
   (:require [frontend.components.svg :as svg]
             [frontend.context.i18n :refer [t]]
             [frontend.handler.window :as window-handler]
-            [frontend.state :as state]
+            [frontend.rfx :as rfx]
             [frontend.ui :as ui]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc container < rum/reactive
+(hsx/defc container
   []
-  (let [maximized?  (state/sub :electron/window-maximized?)
-        fullscreen? (state/sub :electron/window-fullscreen?)]
+  (let [maximized?  (rfx/use-sub [:electron/window-maximized?])
+        fullscreen? (rfx/use-sub [:electron/window-fullscreen?])]
     [:div.window-controls.flex
      (if fullscreen?
        (ui/tooltip

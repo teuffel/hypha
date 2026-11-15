@@ -23,7 +23,7 @@
 (defn kondo-git-changes
   "Run clj-kondo across dirs and only for files that git diff detects as unstaged changes"
   []
-  (let [kondo-dirs ["src" "deps/common" "deps/db" "deps/graph-parser" "deps/outliner" "deps/publishing" "deps/publish" "deps/cli"]
+  (let [kondo-dirs ["src" "deps/common" "deps/db" "deps/graph-parser" "deps/outliner" "deps/publishing" "deps/publish"]
         dir-regex (re-pattern (str "^(" (string/join "|" kondo-dirs) ")"))
         dir-to-files (->> (shell {:out :string :shutdown nil} "git diff --name-only")
                           :out
@@ -47,9 +47,14 @@
   (let [res (shell {:out :string :shutdown nil}
                    "git grep -h" "\\[frontend.*:as"
                    "src/main/frontend/worker" "src/main/frontend/worker_common")
+        allowed-export-requires #{"            [frontend.handler.export.common-impl :as common-impl]"
+                                  "            [frontend.handler.export.html :as export-html]"
+                                  "            [frontend.handler.export.opml :as export-opml]"
+                                  "            [frontend.handler.export.text-impl :as export-text]"}
         req-lines (->> (:out res)
                        string/split-lines
-                       (remove #(re-find #"frontend\.worker|frontend\.common" %)))]
+                       (remove #(re-find #"frontend\.worker|frontend\.common" %))
+                       (remove allowed-export-requires))]
 
     (if (seq req-lines)
       (do

@@ -16,16 +16,26 @@
        usage. The estimate covers IDB + OPFS + Cache-API + ServiceWorker
        as one pool, so freeing IDB-backed asset files reduces it
        monotonically.
-    2. If usage / quota > 80%, enumerates asset files across every
-       LightningFS graph root via `window.pfs`, sorts by mtime
-       ascending (LRU surrogate; assets are write-once), and deletes
-       oldest-first until usage drops to the 60% target.
+    2. If usage / quota > 80%, asks the db-worker which assets the
+       server holds (`:thread-api/db-sync-evictable-asset-files`: synced
+       graph, remote metadata, no pending asset op), stats their local
+       copies via `window.pfs`, sorts by mtime ascending (LRU surrogate;
+       assets are write-once), and deletes oldest-first until usage
+       drops to the 60% target.
+
+  Assets of local-only graphs and assets that were never uploaded are
+  never candidates: the local copy is the only one, and neither are assets
+  of a graph whose sync is not live right now. The trigger is the overall
+  quota, which OPFS SQLite usually dominates, so a pass may not reach its
+  target; after every pass that ran the tick pauses for 10 minutes instead
+  of re-checking every 30 s.
 
   Evicted assets get re-downloaded on demand the next time a block
-  renders them, via the existing VA1 lazy-load path
-  (`asset-cp :did-mount` → `download-remote-asset!`). The user sees a
-  brief progress spinner, then the asset. Acceptable trade-off vs.
-  unbounded cache growth.
+  renders them, via the existing VA1 lazy-load path (`asset-cp` asks for
+  the asset, and `request-asset-download!` in
+  `worker/sync/assets.cljs` refetches it once no local copy is left).
+  The user sees a brief progress spinner, then the asset. Acceptable
+  trade-off vs. unbounded cache growth.
 
   Lives under `frontend.hypha` to avoid an upstream patch. A future
   Phase 2 may consolidate this into `worker/sync/assets.cljs` as a
@@ -40,14 +50,20 @@
 
   Public surface:
     start!         — idempotent; called once from frontend.hypha.init/start!
-    <evict-until!  — pure-ish helper; exposed for unit testing"
-  (:require [lambdaisland.glogi :as log]
+    <evict-until!  — pure-ish helper; exposed for unit testing
+    <evict-pass!   — one check-and-evict pass with injected deps; exposed
+                     for unit testing"
+  (:require [frontend.config :as config]
+            [frontend.state :as state]
+            [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
+            [logseq.common.path :as path]
             [promesa.core :as p]))
 
 (def ^:private ^:const evict-trigger-percent 0.8)
 (def ^:private ^:const evict-target-percent 0.6)
 (def ^:private ^:const tick-ms 30000)
+(def ^:private ^:const pass-backoff-ms (* 10 60 1000))
 
 (defn- <storage-estimate
   "Returns a promise of {:usage :quota} or nil when the Storage API
@@ -73,28 +89,24 @@
                    :size (or (.-size s) 0)})))
       (p/catch (constantly nil))))
 
-(defn- <list-assets-under
-  "Returns asset-file metadata under `<graph-root>/<local-assets-dir>`.
-  Yields [] when the directory is absent."
-  [^js pfs graph-root]
-  (let [assets-dir (str graph-root "/" common-config/local-assets-dir)]
-    (-> (p/let [^js entries (.readdir pfs assets-dir)
-                files (p/all (map (fn [name']
-                                    (<stat-file pfs (str assets-dir "/" name')))
-                                  (array-seq entries)))]
-          (vec (remove nil? files)))
-        (p/catch (constantly [])))))
+(defn asset-path
+  "LightningFS path of an asset's local copy, built the way the storage
+  layer builds it (`frontend.worker.platform.browser/asset-path`): the
+  graph segment stays URL-encoded, e.g. `/Lambda%20RTC/assets/<file>`."
+  [{:keys [repo file-name]}]
+  (path/url-to-path
+   (path/path-join (config/get-repo-dir repo)
+                   common-config/local-assets-dir
+                   file-name)))
 
-(defn- <all-asset-files
-  "Enumerates asset files across every top-level graph dir visible to
-  `window.pfs`. LightningFS uses one IDB database (`logseq`) with a
-  Unix-style layout; graph roots are direct children of `/`."
+(defn- <evictable-asset-files
+  "Asset-file metadata of the local copies the worker reports as safe to
+  evict. Assets without a local copy (not downloaded yet) drop out at the
+  stat."
   [^js pfs]
-  (-> (p/let [^js entries (.readdir pfs "/")
-              graph-roots (map #(str "/" %) (array-seq entries))
-              per-graph (p/all (map (partial <list-assets-under pfs) graph-roots))]
-        (vec (mapcat identity per-graph)))
-      (p/catch (constantly []))))
+  (p/let [assets (state/<invoke-db-worker :thread-api/db-sync-evictable-asset-files)
+          files (p/all (map #(<stat-file pfs (asset-path %)) assets))]
+    (vec (remove nil? files))))
 
 (defn- <try-unlink!
   "Resolves to the byte size freed by deleting `path` — either `size`
@@ -115,7 +127,7 @@
 
   Failures on individual `unlink` calls are logged and skipped — the
   loop continues with the next file. Exposed for unit testing;
-  production callers should use the private `<maybe-evict!`."
+  production callers go through `<evict-pass!`."
   [^js pfs files target-bytes-to-free]
   (let [sorted (sort-by :mtime files)]
     (p/loop [remaining sorted
@@ -126,27 +138,58 @@
           (p/let [delta (<try-unlink! pfs path size)]
             (p/recur (rest remaining) (+ freed delta))))))))
 
-(defn- <maybe-evict!
-  "Single check-and-evict pass. No-op when quota is comfortably below
-  the trigger threshold or when `window.pfs` is not installed yet."
-  []
-  (p/let [estimate (<storage-estimate)]
-    (when-let [{:keys [usage quota]} estimate]
-      (when (and (pos? quota)
-                 (> (/ usage quota) evict-trigger-percent))
-        (let [target-usage (* quota evict-target-percent)
-              bytes-to-free (- usage target-usage)
-              pfs (some-> js/globalThis .-window .-pfs)]
-          (when pfs
-            (p/let [files (<all-asset-files pfs)
-                    freed (<evict-until! pfs files bytes-to-free)]
-              (log/info :hypha/asset-cache-eviction-done
-                        {:quota quota
-                         :usage usage
-                         :freed freed
-                         :target-bytes-to-free bytes-to-free}))))))))
+(defn <evict-pass!
+  "Single check-and-evict pass. Resolves the bytes freed, or nil when
+  usage is below the trigger threshold or the Storage API is unavailable.
+
+  `<estimate` resolves {:usage :quota}; `<files` resolves the evictable
+  asset-file metadata for `pfs`. Exposed for unit testing."
+  [^js pfs <estimate <files]
+  (p/let [{:keys [usage quota]} (<estimate)]
+    (when (and quota
+               (pos? quota)
+               (> (/ usage quota) evict-trigger-percent))
+      (let [bytes-to-free (- usage (* quota evict-target-percent))]
+        (p/let [files (<files pfs)
+                freed (<evict-until! pfs files bytes-to-free)]
+          (log/info :hypha/asset-cache-eviction-done
+                    {:quota quota
+                     :usage usage
+                     :freed freed
+                     :target-bytes-to-free bytes-to-free})
+          freed)))))
 
 (defonce ^:private *started? (atom false))
+(defonce ^:private *running? (atom false))
+(defonce ^:private *idle-until (atom 0))
+
+(defn- tick!
+  "Runs one pass unless the previous one is still in flight, a pass that
+  freed nothing put the tick on backoff, or `window.pfs` / the db-worker
+  are not up yet."
+  []
+  (let [pfs (some-> js/globalThis .-window .-pfs)]
+    (when (and pfs
+               @state/*db-worker
+               (not @*running?)
+               (>= (js/Date.now) @*idle-until))
+      (reset! *running? true)
+      (-> (<evict-pass! pfs <storage-estimate <evictable-asset-files)
+          (p/then (fn [freed]
+                    ;; A pass that ran either brought usage below the
+                    ;; trigger, so the next ticks are cheap no-ops, or could
+                    ;; not, because the bytes belong to something it may not
+                    ;; touch. Re-running it every 30 s would only evict
+                    ;; whatever was viewed (and re-downloaded) in between.
+                    (when (some? freed)
+                      (reset! *idle-until (+ (js/Date.now) pass-backoff-ms)))))
+          (p/catch (fn [e]
+                     (log/warn :hypha/asset-cache-tick-failed
+                               {:error e})
+                     (reset! *idle-until (+ (js/Date.now) pass-backoff-ms))))
+          (p/finally (fn []
+                       (reset! *running? false)))
+          (p/then (constantly nil))))))
 
 (defn start!
   "Idempotent: starts the background eviction tick exactly once per
@@ -155,9 +198,4 @@
   of the page and is cleared by the browser on unload."
   []
   (when (compare-and-set! *started? false true)
-    (let [tick (fn []
-                 (-> (<maybe-evict!)
-                     (p/catch (fn [e]
-                                (log/warn :hypha/asset-cache-tick-failed
-                                          {:error e})))))]
-      (js/setInterval tick tick-ms))))
+    (js/setInterval tick! tick-ms)))
