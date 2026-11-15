@@ -134,6 +134,24 @@
   [sql tx-id]
   (some? (select-one sql "select 1 from tx_log where tx_id = ? limit 1" (str tx-id))))
 
+(defn- tx-rows->txs [rows]
+  (mapv (fn [row]
+          (cond-> {:t (aget row "t")
+                   :tx (aget row "tx")
+                   :outliner-op (sql->outliner-op (aget row "outliner_op"))}
+            (some? (aget row "tx_id")) (assoc :tx-id (uuid (aget row "tx_id")))))
+        rows))
+
+(defn fetch-tx-page
+  "HYPHA-PATCH-026: at most `limit` txs after `since-t`, in order."
+  [sql since-t limit]
+  (tx-rows->txs
+   (common/get-sql-rows
+    (common/sql-exec sql
+                     "select t, tx, outliner_op, tx_id from tx_log where t > ? order by t asc limit ?"
+                     since-t
+                     limit))))
+
 (defn fetch-tx-since [sql since-t]
   (let [rows (common/get-sql-rows
               (common/sql-exec sql

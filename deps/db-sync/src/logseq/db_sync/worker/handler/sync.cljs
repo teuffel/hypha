@@ -342,12 +342,37 @@
        (fn [error]
          (throw error))))))
 
+;; HYPHA-PATCH-026: a pull/ok is one WebSocket message, and the ws library
+;; caps a message at 100 MiB. A client far behind (19k txs, 101 MB) lost the
+;; connection on every pull and never caught up. Pull in pages; the client
+;; pulls the next page while it is behind the head it learned from hello or
+;; changed.
+(def pull-page-max-txs 2000)
+(def pull-page-max-bytes (* 8 1024 1024))
+
+(defn- take-page-bytes
+  "The leading txs whose payloads fit `max-bytes`, at least one."
+  [txs max-bytes]
+  (loop [remaining txs
+         page []
+         page-size 0]
+    (if-let [tx (first remaining)]
+      (let [page-size' (+ page-size (count (:tx tx)))]
+        (if (and (seq page) (> page-size' max-bytes))
+          page
+          (recur (rest remaining) (conj page tx) page-size')))
+      page)))
+
 (defn pull-response [^js self since]
   (let [sql (.-sql self)
-        txs (storage/fetch-tx-since sql since)
-        checksum (current-checksum self)]
+        head-t (t-now self)
+        txs (-> (storage/fetch-tx-page sql since pull-page-max-txs)
+                (take-page-bytes pull-page-max-bytes))
+        page-t (or (:t (peek txs)) head-t)
+        last-page? (= page-t head-t)
+        checksum (when last-page? (current-checksum self))]
     (cond-> {:type "pull/ok"
-             :t (t-now self)
+             :t page-t
              :txs txs}
       (string? checksum) (assoc :checksum checksum))))
 

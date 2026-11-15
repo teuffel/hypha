@@ -2276,6 +2276,43 @@
                              (is (= 3 @(:pending-pull-since client)))))
                    (p/finally (fn [] (done)))))))))
 
+(deftest pull-ok-page-behind-the-head-pulls-the-next-page-test
+  (testing "HYPHA-PATCH-026: a pull/ok page that ends before the known head requests the next page"
+    (async done
+           (let [{:keys [conn client-ops-conn parent]} (setup-parent-child)
+                 parent-id (:db/id parent)
+                 *sent (atom [])
+                 ws (doto (js-obj)
+                      (aset "readyState" 1)
+                      (aset "send" (fn [raw]
+                                     (swap! *sent conj (js->clj (js/JSON.parse raw) :keywordize-keys true)))))
+                 latest-prev @db-sync/*repo->latest-remote-tx
+                 client {:repo test-repo
+                         :graph-id "graph-1"
+                         :ws ws
+                         :send-queue (atom (p/resolved nil))
+                         :pending-pull-since (atom nil)
+                         :inflight (atom [])
+                         :online-users (atom [])
+                         :ws-state (atom :open)}
+                 page (js/JSON.stringify
+                       (clj->js {:type "pull/ok"
+                                 :t 1
+                                 :txs [{:t 1 :tx (sqlite-util/write-transit-str
+                                                  [[:db/add parent-id :block/title "page 1"]])}]}))]
+             (reset! db-sync/*repo->latest-remote-tx {test-repo 2})
+             (with-datascript-conns conn client-ops-conn
+               (fn []
+                 (-> (p/let [_ (sync-handle-message/handle-message! test-repo client page)
+                             _ (p/delay remote-apply-test-settle-ms)
+                             _ @(:send-queue client)]
+                       (is (= 1 (client-op/get-local-tx test-repo)))
+                       (is (= [{:type "pull" :since 1}] @*sent)))
+                     (p/catch (fn [error] (is false (str error))))
+                     (p/finally (fn []
+                                  (reset! db-sync/*repo->latest-remote-tx latest-prev)
+                                  (done))))))))))
+
 (deftest pull-ok-clears-pending-pull-request-marker-test
   (testing "pull/ok clears pending pull marker so future changed can request next pull"
     (let [raw-message (js/JSON.stringify

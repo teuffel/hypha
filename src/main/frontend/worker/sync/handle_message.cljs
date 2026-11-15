@@ -371,6 +371,11 @@
                          (log/error ::apply-remote-tx e)
                          (throw e)))]
              (client-op/update-local-tx repo remote-tx)
+             ;; HYPHA-PATCH-026: the server pulls in pages; keep pulling while
+             ;; this page ends before the head known from hello/changed.
+             (let [head-tx (get @sync-apply/*repo->latest-remote-tx repo)]
+               (when (and (number? head-tx) (< remote-tx head-tx))
+                 (request-pull! client remote-tx)))
              (broadcast-rtc-state! client)
              (verify-sync-checksum! repo client remote-tx remote-tx remote-checksum {:type "pull/ok"})
              (sync-apply/enqueue-flush-pending! repo client))
