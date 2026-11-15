@@ -1915,12 +1915,28 @@
       (::retry-result apply-result)
       (finish-apply-remote-txs! repo client remote-tx-data (:remote-asset-tx-data apply-result)))))
 
+(defn- ack-pending-txs-in-remote-txs!
+  "HYPHA-PATCH-025: a remote tx carrying the id of a pending local tx is that
+  tx, already on the server (its tx/batch/ok got lost, e.g. across a
+  reconnect). It is acknowledged instead of rebased: rebasing kept it pending,
+  so it was resent after every reconnect as a :rebase tx that only rewrote
+  :block/updated-at."
+  [repo remote-txs]
+  (let [remote-tx-ids (into #{} (keep :tx-id) remote-txs)]
+    (when (seq remote-tx-ids)
+      (mark-pending-txs-false! repo
+                               (into []
+                                     (comp (map :tx-id)
+                                           (filter remote-tx-ids))
+                                     (pending-txs repo))))))
+
 (defn apply-remote-txs!
   ([repo client remote-txs]
    (apply-remote-txs! repo client remote-txs 0))
   ([repo client remote-txs snapshot-retry-count]
    (if-let [conn (worker-state/get-datascript-conn repo)]
-     (let [local-txs (pending-txs repo)
+     (let [_ (ack-pending-txs-in-remote-txs! repo remote-txs)
+           local-txs (pending-txs repo)
            has-local-changes? (boolean (seq local-txs))
            remote-tx-data* (mapcat :tx-data remote-txs)
            db-migrate? (remote-txs-db-migrate? remote-txs)

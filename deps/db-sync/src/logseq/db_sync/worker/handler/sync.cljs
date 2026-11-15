@@ -679,18 +679,24 @@
              successful-tx-ids []]
         (if-let [tx-entry (first remaining)]
           (let [tx-id (:tx-id tx-entry)
-                applied-entry? (try
-                                 (boolean (apply-tx-entry! self conn tx-entry request-context))
-                                 (catch :default e
-                                   (log/error :db-sync/transact-failed e)
-                                   (let [missing-block-uuids (missing-block-uuids-from-error e)]
-                                     (throw (ex-info "tx entry apply failed"
-                                                     (cond-> {:type :db-sync/tx-entry-failed
-                                                              :successful-tx-ids successful-tx-ids}
-                                                       tx-id (assoc :failed-tx-id tx-id)
-                                                       (seq missing-block-uuids)
-                                                       (assoc :missing-block-uuids missing-block-uuids))
-                                                     e)))))
+                ;; HYPHA-PATCH-025: a client whose tx/batch/ok got lost resends
+                ;; the same tx-ids. They are already applied and journaled;
+                ;; applying them again would duplicate them for every other
+                ;; client and could revert later changes.
+                applied-entry? (if (and tx-id (storage/tx-id-journaled? sql tx-id))
+                                 false
+                                 (try
+                                   (boolean (apply-tx-entry! self conn tx-entry request-context))
+                                   (catch :default e
+                                     (log/error :db-sync/transact-failed e)
+                                     (let [missing-block-uuids (missing-block-uuids-from-error e)]
+                                       (throw (ex-info "tx entry apply failed"
+                                                       (cond-> {:type :db-sync/tx-entry-failed
+                                                                :successful-tx-ids successful-tx-ids}
+                                                         tx-id (assoc :failed-tx-id tx-id)
+                                                         (seq missing-block-uuids)
+                                                         (assoc :missing-block-uuids missing-block-uuids))
+                                                       e))))))
                 next-successful-tx-ids (cond-> successful-tx-ids
                                          tx-id (conj tx-id))]
             (recur (next remaining)

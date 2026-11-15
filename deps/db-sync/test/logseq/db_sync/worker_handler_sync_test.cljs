@@ -193,6 +193,41 @@
         (is (= [{:t 1 :tx (protocol/tx->transit []) :outliner-op :delete-blocks :tx-id tx-id}]
                (:txs (sync-handler/pull-response self 0))))))))
 
+(deftest resent-tx-id-is-confirmed-not-reapplied-test
+  ;; HYPHA-PATCH-025: a client whose tx/batch/ok got lost resends the same
+  ;; tx-ids after reconnecting. Applying them again appended every resend to
+  ;; the journal (18k phantom txs for other clients) and could revert later
+  ;; changes to the same attributes.
+  (with-memory-sql
+    (fn [sql]
+      (let [conn (storage/open-conn sql)
+            self #js {:sql sql :conn conn :schema-ready true}
+            block-uuid (random-uuid)
+            entry (fn [tx-id title]
+                    {:tx-id tx-id :outliner-op :save-block
+                     :tx (protocol/tx->transit [{:block/uuid block-uuid :block/title title}])})
+            tx-a (random-uuid)
+            tx-b (random-uuid)
+            tx-c (random-uuid)
+            batch! (fn [entries t-before]
+                     (with-redefs [ws/broadcast! (fn [& _] nil)]
+                       (sync-handler/handle-tx-batch! self nil entries t-before)))
+            title (fn [] (:block/title (d/entity @(.-conn self) [:block/uuid block-uuid])))]
+        (is (= 1 (:t (batch! [(entry tx-a "from a")] 0))))
+        (is (= 2 (:t (batch! [(entry tx-b "from b")] 1))))
+        (testing "a resent batch is acknowledged without a new journal entry"
+          (let [response (batch! [(entry tx-a "from a")] 2)]
+            (is (= "tx/batch/ok" (:type response)))
+            (is (= 2 (:t response)))
+            (is (= "from b" (title)) "the resend must not revert a later change")))
+        (testing "new tx-ids in a partly resent batch are applied"
+          (let [response (batch! [(entry tx-a "from a") (entry tx-c "from c")] 2)]
+            (is (= "tx/batch/ok" (:type response)))
+            (is (= 3 (:t response)))
+            (is (= "from c" (title)))))
+        (is (= [tx-a tx-b tx-c]
+               (mapv :tx-id (storage/fetch-tx-since sql 0))))))))
+
 (deftest pull-http-json-serializes-tx-id-as-string-and-round-trips-test
   (async done
          (with-memory-sql-async

@@ -37,6 +37,8 @@
                         ");"))
   (ensure-tx-log-column! sql "outliner_op")
   (ensure-tx-log-column! sql "tx_id")
+  ;; HYPHA-PATCH-025: tx-id-journaled? runs for every incoming tx entry.
+  (common/sql-exec sql "create index if not exists tx_log_tx_id on tx_log (tx_id)")
   (common/sql-exec sql
                    (str "create table if not exists sync_meta ("
                         "key TEXT primary key,"
@@ -126,6 +128,11 @@
                    created-at
                    (outliner-op->sql outliner-op)
                    (when tx-id (str tx-id))))
+
+(defn tx-id-journaled?
+  "Whether a tx with this client tx-id is already in the journal."
+  [sql tx-id]
+  (some? (select-one sql "select 1 from tx_log where tx_id = ? limit 1" (str tx-id))))
 
 (defn fetch-tx-since [sql since-t]
   (let [rows (common/get-sql-rows

@@ -1838,6 +1838,56 @@ during weekly upstream-sync, the detection grep is the first thing run; the
 
 ---
 
+## Patch #25 — Resent txs are acknowledged, not applied twice
+
+- **ID**: HYPHA-PATCH-025
+- **Introduced**: Sync-loop investigation after the upstream sync, 2026-11
+- **Files**:
+  - `deps/db-sync/src/logseq/db_sync/storage.cljs` (`tx-id-journaled?`,
+    index on `tx_log.tx_id`)
+  - `deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` (`apply-tx!`)
+  - `src/main/frontend/worker/sync/handle_message.cljs` (`handle-pull-ok!`
+    keeps `:tx-id`)
+  - `src/main/frontend/worker/sync/apply_txs.cljs`
+    (`ack-pending-txs-in-remote-txs!`)
+- **Patch form**:
+  ```clojure
+  ;; server: apply-tx!
+  applied-entry? (if (and tx-id (storage/tx-id-journaled? sql tx-id))
+                   false
+                   (try (boolean (apply-tx-entry! …)) …))
+
+  ;; client: apply-remote-txs!, before local txs are reverted and rebased
+  (let [_ (ack-pending-txs-in-remote-txs! repo remote-txs)
+        local-txs (pending-txs repo)] …)
+  ```
+- **Line count**: about +10 server, +20 client.
+- **Rationale**: On 2026-11-13 the CLI daemon lost a `tx/batch/ok`. The
+  watchdog reconnected, the pull returned the client's own txs, and the client
+  rebased its pending copies on top. They stayed pending as `:rebase` txs that
+  only rewrote `:block/updated-at` and were resent after every reconnect. The
+  server applied each resend again (it checked `t-before`, never the tx-id):
+  449 rounds, about 18,500 journal entries, which other clients (the iPad)
+  received as thousands of remote changes. Each fix ends that loop on its own:
+  the server confirms a journaled tx-id without applying it, and the client
+  treats its own tx-id in a pull as the acknowledgement.
+- **Additive alternatives considered**: stop resending after the watchdog's
+  kill limit: hides the stall and leaves the duplicates of the first rounds.
+- **Break signal — structural**: `apply-tx!` or `apply-remote-txs!` is
+  restructured; `pull/ok` stops carrying `:tx-id`.
+- **Break signal — semantic**: upstream adds its own tx-id idempotency → drop.
+- **Detection**:
+  - Structural, automatic:
+    `rg -c 'HYPHA-PATCH-025' deps/db-sync/src/logseq/db_sync/worker/handler/sync.cljs` ⇒ `1`
+    `rg -c 'HYPHA-PATCH-025' src/main/frontend/worker/sync/apply_txs.cljs` ⇒ `1`
+  - Regression guards: `resent-tx-id-is-confirmed-not-reapplied-test`
+    (`logseq.db-sync.worker-handler-sync-test`),
+    `pull-ok-own-tx-id-acknowledges-pending-tx-test`
+    (`frontend.worker.db-sync-test`).
+- **On break**: re-anchor; drop when upstream deduplicates by tx-id.
+
+---
+
 ## Retired patches
 
 - **#17 ISO-8601 parsing for datetime properties** and **#19 `rename page`**

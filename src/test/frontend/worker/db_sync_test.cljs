@@ -1747,6 +1747,48 @@
                                  (reset! db-sync/*repo->latest-remote-tx latest-prev)
                                  (done))))))))))
 
+(deftest pull-ok-own-tx-id-acknowledges-pending-tx-test
+  (testing "HYPHA-PATCH-025: a pulled tx with a pending tx's id acknowledges it instead of rebasing it"
+    ;; When tx/batch/ok is lost, the server already holds the batch and the
+    ;; next pull returns it. Rebasing the pending copy on top kept it pending
+    ;; and resent it after every reconnect.
+    (async done
+           (let [{:keys [conn client-ops-conn child1]} (setup-parent-child)
+                 latest-prev @db-sync/*repo->latest-remote-tx
+                 client {:repo test-repo
+                         :graph-id "graph-1"
+                         :inflight (atom [])
+                         :online-users (atom [])
+                         :ws-state (atom :open)}]
+             (reset! db-sync/*repo->latest-remote-tx {})
+             (with-datascript-conns conn client-ops-conn
+               (fn []
+                 (apply-ops! conn
+                             [[:save-block [{:block/uuid (:block/uuid child1)
+                                             :block/title "edited while the ack got lost"} {}]]]
+                             (assoc local-tx-meta :outliner-op :save-block))
+                 (let [pending (first (sync-apply/pending-txs test-repo))
+                       raw (js/JSON.stringify
+                            (clj->js {:type "pull/ok"
+                                      :t 1
+                                      :checksum (sync-checksum/recompute-checksum @conn)
+                                      :txs [{:t 1
+                                             :tx-id (str (:tx-id pending))
+                                             :outliner-op "save-block"
+                                             :tx (sqlite-util/write-transit-str (:tx pending))}]}))]
+                   (is (some? (:tx-id pending)))
+                   (-> (p/let [_ (sync-handle-message/handle-message! test-repo client raw)
+                               _ (p/delay remote-apply-test-settle-ms)]
+                         (is (empty? (sync-apply/pending-txs test-repo))
+                             "the acknowledged tx must not stay pending")
+                         (is (= "edited while the ack got lost"
+                                (:block/title (d/entity @conn (:db/id child1)))))
+                         (is (= 1 (client-op/get-local-tx test-repo))))
+                       (p/catch (fn [error] (is false (str error))))
+                       (p/finally (fn []
+                                    (reset! db-sync/*repo->latest-remote-tx latest-prev)
+                                    (done)))))))))))
+
 (deftest pull-ok-does-not-anchor-remote-checksum-before-verify-test
   (testing "pull/ok compares the incrementally updated local checksum instead of anchoring the remote checksum"
     (async done
