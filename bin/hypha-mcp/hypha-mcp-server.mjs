@@ -30,13 +30,21 @@ const REPO = resolve(HERE, "..", "..");
 
 const CLI = process.env.HYPHA_CLI ?? resolve(REPO, "static", "logseq-cli.js");
 const AUTH = resolve(HERE, "hypha-auth.mjs");
-const GRAPH = process.env.HYPHA_GRAPH ?? "example.org";
+const requireEnv = (name, hint) => {
+  const v = process.env[name];
+  if (!v) {
+    console.error(`[hypha-mcp] set ${name} (${hint})`);
+    process.exit(1);
+  }
+  return v;
+};
+const GRAPH = requireEnv("HYPHA_GRAPH", "remote graph name");
 const ROOT = process.env.HYPHA_ROOT ?? resolve(homedir(), ".local", "share", "hypha-cli-graph");
 // cli.edn lives at ~/logseq/cli.edn regardless of --root-dir; --config decouples
 // the (global) sync config from the (replica) root-dir, so writes hit Hypha.
 const CONFIG = process.env.HYPHA_CONFIG ?? resolve(homedir(), "logseq", "cli.edn");
-const HYPHA_URL = process.env.HYPHA_URL ?? "https://hypha.example.com";
-const WS_URL = process.env.HYPHA_WS_URL ?? "wss://hypha.example.com/sync/%s";
+const HYPHA_URL = requireEnv("HYPHA_URL", "e.g. https://hypha.example.com");
+const WS_URL = process.env.HYPHA_WS_URL ?? `${HYPHA_URL.replace(/^http/, "ws")}/sync/%s`;
 const DB_PATH = join(ROOT, "graphs", GRAPH, "db.sqlite");
 const LOCK_PATH = join(ROOT, "graphs", GRAPH, "db-worker.lock");
 const NO_BOOTSTRAP = process.env.HYPHA_NO_BOOTSTRAP === "1";

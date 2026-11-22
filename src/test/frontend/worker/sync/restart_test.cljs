@@ -5,6 +5,7 @@
             [frontend.worker.state :as worker-state]
             [frontend.worker.sync :as sync]
             [frontend.worker.sync.client-op :as client-op]
+            [frontend.worker.sync.handle-message :as sync-handle-message]
             [frontend.worker.sync.util :as sync-util]
             [promesa.core :as p]))
 
@@ -152,6 +153,62 @@
           (set! js/setInterval original-set-interval)
           (set! js/clearInterval original-clear-interval))))))
 
+(deftest reconnect-backoff-resets-only-after-server-replies-test
+  ;; The proxy in front of db-sync completes the handshake before the upstream
+  ;; accepts, so a rejected socket opens and closes right away. Opening alone
+  ;; must not reset the backoff, or the client reconnects every second.
+  (let [original-set-timeout js/setTimeout
+        original-clear-timeout js/clearTimeout
+        original-set-interval js/setInterval
+        original-clear-interval js/clearInterval
+        sockets (atom [])
+        handled (atom [])
+        url "wss://sync.example.test/sync/graph-1"
+        client (assoc (#'sync/ensure-client-state! "backoff-repo") :graph-id "graph-1")
+        open-and-close! (fn [c]
+                          (let [c' (#'sync/connect! "backoff-repo" c url "token")
+                                ws (:ws c')]
+                            ((.-onopen ws) #js {})
+                            ((.-onclose ws) #js {})
+                            ;; the stubbed timer never fires; let the next close schedule again
+                            (swap! (:reconnect c') assoc :timer nil)
+                            c'))]
+    (set! js/setTimeout (fn [_f _ms] :timeout-id))
+    (set! js/clearTimeout (fn [_id] nil))
+    (set! js/setInterval (fn [_f _ms] :interval-id))
+    (set! js/clearInterval (fn [_id] nil))
+    (try
+      (with-redefs [platform/current (fn [] {})
+                    platform/websocket-connect (fn [_platform _url]
+                                                 (let [ws #js {:readyState 3
+                                                               :close (fn [] nil)}]
+                                                   (swap! sockets conj ws)
+                                                   ws))
+                    shared-service/broadcast-to-clients! (fn [& _] nil)
+                    sync-handle-message/handle-message!
+                    (fn [_repo _client data]
+                      (swap! handled conj data)
+                      nil)]
+        (let [c (-> client open-and-close! open-and-close!)]
+          (is (= 2 (:attempt @(:reconnect c)))
+              "open-then-close without a server reply keeps backing off")
+          (let [c' (#'sync/connect! "backoff-repo" c url "token")
+                ws (:ws c')]
+            ((.-onopen ws) #js {})
+            (is (= 2 (:attempt @(:reconnect c'))))
+            ((.-onmessage ws) #js {:data "{\"type\":\"hello\",\"t\":0}"})
+            (is (= 0 (:attempt @(:reconnect c')))
+                "the first server message resets the backoff")
+            (swap! (:reconnect c') assoc :attempt 5)
+            ((.-onmessage ws) #js {:data "{\"type\":\"changed\",\"t\":1}"})
+            (is (= 5 (:attempt @(:reconnect c')))
+                "only the first message on a socket resets the backoff"))))
+      (finally
+        (set! js/setTimeout original-set-timeout)
+        (set! js/clearTimeout original-clear-timeout)
+        (set! js/setInterval original-set-interval)
+        (set! js/clearInterval original-clear-interval)))))
+
 (deftest ws-close-clears-inflight-before-reconnect-test
   (let [broadcasts (atom [])
         original-set-timeout js/setTimeout
@@ -174,7 +231,7 @@
                   (fn [topic payload]
                     (swap! broadcasts conj [topic payload]))]
       (try
-        (#'sync/attach-ws-handlers! "stale-repo" client ws "wss://sync.example.test/sync/graph-1")
+        (#'sync/attach-ws-handlers! "stale-repo" client ws "wss://sync.example.test/sync/graph-1" (fn [] nil))
         ((.-onclose ws) #js {})
         (is (= :closed @(:ws-state client)))
         (is (empty? @(:inflight client)))

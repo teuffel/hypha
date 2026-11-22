@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up a headless, RTC-synced Hypha graph client on this machine.
 #
-# Flow (all verified against hypha.example.com):
+# Flow (verified against a live Hypha server):
 #   1. hypha-auth.mjs  -> exchange access code for id-token, write ~/logseq/auth.json
 #   2. sync config     -> point ws-url/http-base at the Hypha server (global ~/logseq/cli.edn)
 #   3. sync download   -> pull the remote graph into the local replica (first time)
@@ -25,11 +25,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
 NODE="${HYPHA_NODE:-$HOME/.local/node22/bin/node}"
-HYPHA_URL="${HYPHA_URL:-https://hypha.example.com}"
-HYPHA_GRAPH="${HYPHA_GRAPH:-example.org}"
+HYPHA_URL="${HYPHA_URL:?hypha-sync-up: set HYPHA_URL (e.g. https://hypha.example.com)}"
+HYPHA_GRAPH="${HYPHA_GRAPH:?hypha-sync-up: set HYPHA_GRAPH (remote graph name)}"
 HYPHA_ROOT="${HYPHA_ROOT:-$HOME/.local/share/hypha-cli-graph}"
 HYPHA_CONFIG="${HYPHA_CONFIG:-$HOME/logseq/cli.edn}"
-WS_URL="${HYPHA_WS_URL:-wss://hypha.example.com/sync/%s}"
+WS_URL="${HYPHA_WS_URL:-${HYPHA_URL/#http/ws}/sync/%s}"
 
 [ -x "$NODE" ] || { echo "hypha-sync-up: node >=22.5 not found at $NODE (set HYPHA_NODE)"; exit 1; }
 

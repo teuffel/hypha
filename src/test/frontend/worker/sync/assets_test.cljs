@@ -472,3 +472,94 @@
                (p/catch (fn [error]
                           (is false (str "unexpected error: " error))))
                (p/finally done)))))
+
+(defn- fake-xhr-ctor
+  "XMLHttpRequest stand-in whose `send` runs `behavior` on the instance."
+  [behavior]
+  (fn []
+    (this-as ^js xhr
+      (set! (.-upload xhr) #js {})
+      (set! (.-open xhr) (fn [& _] nil))
+      (set! (.-setRequestHeader xhr) (fn [& _] nil))
+      (set! (.-send xhr) (fn [_payload] (behavior xhr)))
+      xhr)))
+
+(defn- xhr-progress!
+  [^js xhr loaded total]
+  ((.. xhr -upload -onprogress) #js {:lengthComputable true :loaded loaded :total total}))
+
+(defn- <upload-with-fake-xhr
+  [behavior broadcasts]
+  (let [db-sync-config @worker-state/*db-sync-config]
+    (reset! worker-state/*db-sync-config {:http-base "https://sync.example.test"})
+    (aset js/globalThis "XMLHttpRequest" (fake-xhr-ctor behavior))
+    (-> (p/with-redefs [sync-assets/graph-aes-key (fn [_repo _graph-id _fail-fast-f]
+                                                    (p/resolved nil))
+                        platform/current (fn [] {})
+                        platform/asset-read-bytes! (fn [_platform _repo _file-name]
+                                                     (p/resolved (js/Uint8Array. 100)))
+                        shared-service/broadcast-to-clients!
+                        (fn [event payload]
+                          (when (= :rtc-asset-upload-download-progress event)
+                            (swap! broadcasts conj (select-keys (:progress payload) [:loaded :total]))))]
+          (sync-assets/upload-remote-asset! "xhr-repo" "graph-1" (random-uuid) "png" "sha-256-value"))
+        (p/finally
+          (fn []
+            (js-delete js/globalThis "XMLHttpRequest")
+            (reset! worker-state/*db-sync-config db-sync-config))))))
+
+(deftest upload-remote-asset-reports-xhr-progress-test
+  (async done
+         (let [broadcasts (atom [])]
+           (-> (<upload-with-fake-xhr
+                (fn [^js xhr]
+                  (xhr-progress! xhr 25 100)
+                  (xhr-progress! xhr 25 100)
+                  (xhr-progress! xhr 50 100)
+                  (xhr-progress! xhr 100 100)
+                  (set! (.-status xhr) 200)
+                  ((.-onload xhr)))
+                broadcasts)
+               (p/then
+                (fn [_]
+                  (is (= [{:loaded 0 :total 100}
+                          {:loaded 25 :total 100}
+                          {:loaded 50 :total 100}
+                          {:loaded 100 :total 100}
+                          {:loaded 100 :total 100}]
+                         @broadcasts)
+                      "progress climbs once per whole percent, then completes")))
+               (p/catch (fn [error] (is false (str "unexpected error: " error))))
+               (p/finally done)))))
+
+(deftest upload-remote-asset-closes-progress-on-network-error-test
+  (async done
+         (let [broadcasts (atom [])]
+           (-> (<upload-with-fake-xhr
+                (fn [^js xhr]
+                  (xhr-progress! xhr 50 100)
+                  ((.-onerror xhr)))
+                broadcasts)
+               (p/then (fn [_] (is false "expected the upload to reject")))
+               (p/catch
+                (fn [error]
+                  (is (= :rtc.exception/upload-asset-failed (:type (ex-data error))))
+                  (is (= {:loaded 100 :total 100} (last @broadcasts))
+                      "a failed upload must not leave the bar at its last percent")))
+               (p/finally done)))))
+
+(deftest upload-remote-asset-rejects-on-xhr-error-status-test
+  (async done
+         (let [broadcasts (atom [])]
+           (-> (<upload-with-fake-xhr
+                (fn [^js xhr]
+                  (set! (.-status xhr) 401)
+                  ((.-onload xhr)))
+                broadcasts)
+               (p/then (fn [_] (is false "expected the upload to reject")))
+               (p/catch
+                (fn [error]
+                  (is (= :rtc.exception/upload-asset-failed (:type (ex-data error))))
+                  (is (= {:status 401} (:data (ex-data error))))
+                  (is (= {:loaded 100 :total 100} (last @broadcasts)))))
+               (p/finally done)))))
