@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 
-const HYPHA_URL = process.env.HYPHA_URL ?? "https://hypha.example.com";
+const HYPHA_URL = process.env.HYPHA_URL;
 const CODE_FILE = process.env.HYPHA_ACCESS_CODE_FILE ?? join(homedir(), ".config", "hypha", "access-code");
 const AUTH_PATH = join(homedir(), "logseq", "auth.json");
 
@@ -23,6 +23,8 @@ function fail(msg) {
   console.error(`hypha-auth: ${msg}`);
   process.exit(1);
 }
+
+if (!HYPHA_URL) fail("set HYPHA_URL (e.g. https://hypha.example.com)");
 
 let code;
 try {

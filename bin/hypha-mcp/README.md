@@ -74,7 +74,7 @@ Register it with your MCP client; for opencode (`~/.config/opencode/opencode.jso
       "command": ["/path/to/node22/bin/node", "/path/to/repo/bin/hypha-mcp/hypha-mcp-server.mjs"],
       "enabled": true,
       "timeout": 120000,
-      "environment": { "HYPHA_GRAPH": "<your-graph>" }
+      "environment": { "HYPHA_URL": "https://hypha.example.com", "HYPHA_GRAPH": "<your-graph>" }
     }
   }
 }
@@ -83,18 +83,18 @@ Register it with your MCP client; for opencode (`~/.config/opencode/opencode.jso
 `timeout` is generous so the first cold tool call (which may download the graph)
 does not exceed the MCP request timeout.
 
-## Configuration (env vars, all optional)
+## Configuration (env vars)
 
 | Var            | Default                              | Meaning                              |
 | -------------- | ------------------------------------ | ------------------------------------ |
-| `HYPHA_URL`    | `https://hypha.example.com`           | Hypha server base URL                |
-| `HYPHA_GRAPH`  | `example.org`                         | Graph name                           |
-| `HYPHA_WS_URL` | `wss://hypha.example.com/sync/%s`     | RTC WebSocket URL (`%s` = graph id)  |
+| `HYPHA_URL`    | required                             | Hypha server base URL, e.g. `https://hypha.example.com` |
+| `HYPHA_GRAPH`  | required                             | Graph name                           |
+| `HYPHA_WS_URL` | derived: `wss://<host>/sync/%s`      | RTC WebSocket URL (`%s` = graph id)  |
 | `HYPHA_ROOT`   | `~/.local/share/hypha-cli-graph`     | Local replica root dir               |
 | `HYPHA_CONFIG` | `~/logseq/cli.edn`                   | logseq CLI sync config path          |
 | `HYPHA_NODE`   | `~/.local/node22/bin/node`           | Node >= 22.5 binary                  |
 
-Override `HYPHA_URL`/`HYPHA_GRAPH`/`HYPHA_WS_URL` for a different Hypha instance.
+`HYPHA_URL` and `HYPHA_GRAPH` must be set; the scripts exit if they are missing.
 
 ## Tools
 
