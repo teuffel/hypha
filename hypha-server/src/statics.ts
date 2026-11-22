@@ -21,9 +21,56 @@ import { join, resolve } from "node:path";
 import fastifyStatic from "@fastify/static";
 import type { FastifyPluginAsync } from "fastify";
 
+/**
+ * Where the browser reaches the plugin-assets listener (plugin-app.ts).
+ * Exactly one of the two is used by the frontend:
+ *   - `origin`: full public origin, for reverse-proxy setups
+ *     (e.g. "https://plugins.hypha.example.com").
+ *   - `port`: the frontend combines it with the protocol + hostname the
+ *     app itself was loaded from (zero-config for localhost / LAN use).
+ */
+export interface PluginFrontendLocation {
+  origin?: string;
+  port?: number;
+}
+
 interface StaticsDeps {
   /** Absolute path to the workspace `static/` directory. */
   staticDir: string;
+  /**
+   * Injected into index.html as a <meta> tag so frontend.hypha.plugin-init
+   * can read it synchronously — no inline script, no config fetch, no patch
+   * against upstream's resources/index.html.
+   */
+  pluginFrontend?: PluginFrontendLocation;
+}
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function pluginMetaTag(loc: PluginFrontendLocation | undefined): string {
+  if (!loc) return "";
+  if (loc.origin) {
+    return `<meta name="hypha-plugin-origin" content="${escapeAttr(loc.origin)}">`;
+  }
+  if (loc.port !== undefined) {
+    return `<meta name="hypha-plugin-port" content="${escapeAttr(String(loc.port))}">`;
+  }
+  return "";
+}
+
+export function injectPluginMeta(html: string, loc: PluginFrontendLocation | undefined): string {
+  const tag = pluginMetaTag(loc);
+  if (tag.length === 0) return html;
+  if (!html.includes("</head>")) {
+    throw new Error("statics: index.html has no </head> to inject the plugin-origin meta tag into");
+  }
+  return html.replace("</head>", `  ${tag}\n</head>`);
 }
 
 const MANIFEST_LINK = '<link rel="manifest" href="/manifest.webmanifest">';
@@ -53,7 +100,10 @@ export const staticsRoute: FastifyPluginAsync<StaticsDeps> = async (app, deps) =
 
   // index.html is a build artifact and never changes while the process
   // lives, so read + inject once at registration rather than per request.
-  const indexHtml = injectManifestLink(await readFile(join(root, "index.html"), "utf8"));
+  const indexHtml = injectPluginMeta(
+    injectManifestLink(await readFile(join(root, "index.html"), "utf8")),
+    deps.pluginFrontend,
+  );
 
   app.get("/", async (_request, reply) =>
     reply.type("text/html; charset=utf-8").send(indexHtml));

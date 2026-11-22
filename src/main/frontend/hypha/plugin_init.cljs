@@ -27,11 +27,15 @@
 
   3. `install-plugin-asset-rewrite!` (Phase 1.6.2) wraps
      `window.LSPlugin.PluginLocal.prototype._resolveResourceFullUrl` so
-     web-plugin iframe entry URLs go through the same-origin
-     `/plugin-cdn/assets/*` proxy instead of the cross-origin R2 bucket
-     directly. Under hypha-server's required COEP=credentialless, the
-     R2 bucket's missing CORP/CORS headers block every plugin iframe load,
-     causing recurring `handshake Timeout` errors every 8 s.
+     web-plugin iframe entry URLs go through hypha-server's
+     `/plugin-cdn/assets/*` proxy instead of the R2 bucket directly. Under
+     hypha-server's required COEP=credentialless, the R2 bucket's missing
+     CORP/CORS headers block every plugin iframe load, causing recurring
+     `handshake Timeout` errors every 8 s.
+
+     That proxy lives on a SEPARATE origin (own port or hostname) from the
+     app, so plugin code stays cross-origin exactly as in upstream Logseq
+     and cannot read the Hypha session. See `plugin-origin` below.
 
   See `docs/hypha/phase-1.5-plugin-marketplace.md` §§ 2.2 + 2.3 for steps
   1+2, and `docs/hypha/phase-1.6.2-plugin-iframe-corp.md` for step 3."
@@ -178,24 +182,75 @@
 (def ^:private plugin-assets-prefix
   "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev/")
 
-(defn- rewrite-plugin-asset-url
-  "Rewrite a web-plugin iframe entry URL from the upstream R2 bucket to the
-  same-origin Hypha proxy. Non-R2 URLs pass through unchanged.
+(defn- meta-content
+  "Content of `<meta name=...>` in the document head, or nil when absent/blank."
+  [meta-name]
+  (let [v (some-> (.querySelector js/document (str "meta[name=\"" meta-name "\"]"))
+                  (.getAttribute "content"))]
+    (when-not (string/blank? v) v)))
 
-  The result is an ABSOLUTE URL (with `window.location.origin` prepended)
-  because `LSPlugin.caller.ts:260` feeds the value straight into
-  `new URL(pl.options.entry!)`, and the URL constructor throws
-  `URL constructor: <path> is not a valid URL` on bare-relative paths."
+(defn- plugin-origin
+  "Origin of hypha-server's plugin-assets listener, or nil when it is unknown
+  or unsafe.
+
+  hypha-server injects one of two meta tags into index.html (statics.ts):
+
+      <meta name=\"hypha-plugin-origin\" content=\"https://plugins.example.com\">
+      <meta name=\"hypha-plugin-port\"   content=\"3010\">
+
+  The port form is combined with the protocol + hostname the app itself was
+  loaded from, so localhost/LAN setups need no configuration.
+
+  SECURITY: plugin iframes run third-party code. They MUST NOT share the
+  app's origin, or that code can read `/auth/session` (cookie → JWT) and the
+  app window directly. A candidate equal to `window.location.origin` is
+  therefore rejected — the plugin then fails to load instead of loading
+  unsandboxed."
+  []
+  (let [^js loc (.-location js/window)
+        candidate (or (meta-content "hypha-plugin-origin")
+                      (when-let [port (meta-content "hypha-plugin-port")]
+                        (str (.-protocol loc) "//" (.-hostname loc) ":" port)))
+        origin (when candidate
+                 (try (.-origin (js/URL. candidate))
+                      (catch :default _ nil)))]
+    (when (and (string? origin)
+               (not= origin "null")
+               (not= origin (.-origin loc)))
+      origin)))
+
+(defonce ^:private *warned-no-plugin-origin? (atom false))
+
+(defn- rewrite-plugin-asset-url
+  "Rewrite a web-plugin iframe entry URL from the upstream R2 bucket to
+  hypha-server's plugin-assets origin (a SEPARATE origin from the app — see
+  `plugin-origin`). Non-R2 URLs pass through unchanged.
+
+  The result is an absolute URL: `LSPlugin.caller.ts` feeds the value
+  straight into `new URL(pl.options.entry!)`, and Postmate derives the
+  iframe's expected postMessage origin from it.
+
+  When no usable plugin origin is known the R2 URL is returned unchanged.
+  COEP then blocks the iframe (handshake timeout) — a visible failure, and
+  the safe one: never fall back to the app's own origin."
   [url]
   (if (and (string? url) (string/starts-with? url plugin-assets-prefix))
-    (str (.. js/window -location -origin)
-         "/plugin-cdn/assets/"
-         (subs url (count plugin-assets-prefix)))
+    (if-let [origin (plugin-origin)]
+      (str origin "/plugin-cdn/assets/" (subs url (count plugin-assets-prefix)))
+      (do
+        (when (compare-and-set! *warned-no-plugin-origin? false true)
+          (js/console.warn
+           (str "[hypha] no separate plugin-assets origin configured "
+                "(hypha-plugin-origin / hypha-plugin-port meta tag missing or "
+                "equal to the app origin); web plugins will not load. "
+                "See docs/hypha/operations.md → Plugin origin.")))
+        url))
     url))
 
 (defn install-plugin-asset-rewrite!
   "Wrap `window.LSPlugin.PluginLocal.prototype._resolveResourceFullUrl` so
-  web-plugin iframe URLs flow through `/plugin-cdn/assets/*` (which injects
+  web-plugin iframe URLs flow through `/plugin-cdn/assets/*` on
+  hypha-server's separate plugin-assets origin (which injects
   `cross-origin-resource-policy: cross-origin`) instead of going directly
   to `pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev` (which sends neither
   CORP nor CORS headers and so gets blocked by COEP=credentialless).

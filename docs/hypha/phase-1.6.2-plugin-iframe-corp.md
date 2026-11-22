@@ -7,6 +7,23 @@
 identifizierte schon die "zu lange zum Laden"-Symptom-Schicht;
 diese Phase löst die unterliegende CORP-Mechanik.
 
+> **Sicherheits-Nachtrag (ersetzt die Same-Origin-Variante unten).**
+> Die ursprüngliche Umsetzung lieferte `/plugin-cdn/assets/*` vom
+> App-Origin aus. Damit liefen Plugin-iframes same-origin mit der App:
+> Plugin-Code konnte `GET /auth/session` mit dem Session-Cookie aufrufen,
+> das JWT lesen und direkt auf das App-Fenster zugreifen; ein präparierter
+> Link auf eine Datei im Bucket genügte als Stored-XSS.
+>
+> Jetzt gilt: Der Proxy läuft als **eigener Listener auf eigenem Origin**
+> (`hypha-server/src/plugin-app.ts`, Default-Port 3010 bzw.
+> `HYPHA_PLUGIN_ORIGIN`). Er setzt CORP `cross-origin` **und** COEP
+> `credentialless`, weil ein cross-origin-iframe in einer isolierten Seite
+> beides braucht. Der App-Origin kennt die Route nicht mehr; das Frontend
+> erfährt den Plugin-Origin über ein `<meta>`-Tag in `index.html` und
+> verweigert den eigenen Origin. Überall, wo dieses Dokument „same-origin
+> `/plugin-cdn/assets/*`" sagt, ist der separate Plugin-Origin gemeint.
+> Betrieb: `docs/hypha/operations.md` → Plugin origin.
+
 ## 0. Warum 1.6.2
 
 Phase 1.5 hat den Marketplace operationalisiert: Plugin-JSON + R2-Manifest

@@ -161,6 +161,11 @@ Once TLS is terminated:
 HYPHA_JWT_ISSUER=https://hypha.example.com
 ```
 
+If you use marketplace plugins, route a second hostname to container port
+3010 and set `HYPHA_PLUGIN_ORIGIN=https://plugins.hypha.example.com`.
+Plugin iframes must come from a different origin than the app; see
+[operations.md#plugin-origin](operations.md#plugin-origin).
+
 With an `https://` issuer the session cookie carries `Secure`
 automatically, so it is never sent over plain HTTP. The port is published
 on `127.0.0.1` only, so the proxy must run on the same host; if it runs

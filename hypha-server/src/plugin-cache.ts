@@ -20,13 +20,17 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { SessionStore, SESSION_COOKIE_NAME } from "./auth/session.js";
 
 /**
- * preHandler for the plugin proxies: only a logged-in browser may use them.
+ * preHandler for the plugin proxies on the APP origin (/plugin-market/*,
+ * /plugin-cdn/r2/*): only a logged-in browser may use them.
  *
- * Their responses (plugin HTML and JS) are served from the Hypha origin, so
- * a script in them can call /auth/session. Requiring the session cookie
- * stops anonymous use and drive-by navigations from other sites: the cookie
- * is SameSite=Strict, so a cross-site navigation does not carry it, while
- * the app's own fetches and plugin iframes do.
+ * Requiring the session cookie stops anonymous use and drive-by navigations
+ * from other sites: the cookie is SameSite=Strict, so a cross-site
+ * navigation does not carry it, while the app's own fetches do.
+ *
+ * Deliberately NOT used by the plugin-assets listener (plugin-app.ts): that
+ * runs on a separate origin, which on its own hostname never receives the
+ * session cookie, and whose whole point is that nothing session-related
+ * lives there.
  */
 export function requireSession(sessions: SessionStore) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
@@ -158,6 +162,21 @@ export function resolveUpstreamUrl(base: string, subpath: string): string | null
   if (!url.pathname.startsWith(baseUrl.pathname)) return null;
   return url.href;
 }
+
+/**
+ * Headers for third-party content that is proxied through the MAIN app
+ * origin (/plugin-market/*, /plugin-cdn/r2/*). These routes are consumed via
+ * `fetch()` only, so the bytes must never be interpreted as an active
+ * document on the app origin if someone navigates to the URL directly:
+ *   - nosniff: no content-type guessing.
+ *   - CSP sandbox: if the upstream ever answers with text/html or SVG, the
+ *     browser renders it in an opaque origin with scripts disabled. CSP on
+ *     a fetch()/img response is ignored, so regular consumers are unaffected.
+ */
+export const INERT_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "sandbox; default-src 'none'",
+};
 
 export interface ServeCachedOptions {
   cache: PluginCache;

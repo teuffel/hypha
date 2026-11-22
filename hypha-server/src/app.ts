@@ -24,7 +24,7 @@ import { jwksRoute } from "./routes/jwks.js";
 import { proxyRoute } from "./proxy.js";
 import { captureRoute } from "./routes/capture.js";
 import { manifestRoute } from "./routes/manifest.js";
-import { staticsRoute } from "./statics.js";
+import { staticsRoute, type PluginFrontendLocation } from "./statics.js";
 import { PluginCache } from "./plugin-cache.js";
 import { pluginMarketRoute } from "./routes/plugin-market.js";
 import { pluginCdnRoute } from "./routes/plugin-cdn.js";
@@ -47,24 +47,27 @@ export interface BuildAppOptions {
   syncUpstreamUrl?: string;
   /**
    * Optional plugin marketplace + R2 CDN upstream bases. When unset the
-   * /plugin-market/* and /plugin-cdn/* routes are skipped — tests that
+   * /plugin-market/* and /plugin-cdn/r2/* routes are skipped — tests that
    * don't exercise the plugin surface leave this out.
+   *
+   * Plugin iframe assets (/plugin-cdn/assets/*) are intentionally NOT part
+   * of this app: they are served from a separate origin by
+   * buildPluginAssetsApp() in plugin-app.ts.
    */
   pluginUpstream?: {
     /** e.g. "https://raw.githubusercontent.com/logseq/marketplace/master". */
     marketBase: string;
     /** e.g. "https://plugins.logseq.io/r2". */
     cdnBase: string;
-    /**
-     * e.g. "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev". Public
-     * R2 bucket where plugin iframe assets live. Phase 1.6.2 proxies
-     * these so COEP=credentialless passes; see
-     * docs/hypha/phase-1.6.2-plugin-iframe-corp.md.
-     */
-    assetsBase: string;
     /** Override default cache capacity (entries). */
     cacheMaxEntries?: number;
   };
+  /**
+   * Where the browser reaches the plugin-assets listener. Injected into
+   * index.html as a <meta> tag so the frontend can point plugin iframes at
+   * that origin. Requires `staticDir`.
+   */
+  pluginFrontend?: PluginFrontendLocation;
   logLevel?: string;
 }
 
@@ -153,12 +156,14 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       cache: pluginCache,
       sessions,
       upstreamBase: opts.pluginUpstream.cdnBase,
-      assetsUpstreamBase: opts.pluginUpstream.assetsBase,
     });
   }
 
   if (opts.staticDir) {
-    await app.register(staticsRoute, { staticDir: opts.staticDir });
+    await app.register(staticsRoute, {
+      staticDir: opts.staticDir,
+      pluginFrontend: opts.pluginFrontend,
+    });
   }
 
   return app;

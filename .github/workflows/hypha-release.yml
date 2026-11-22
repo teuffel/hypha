@@ -92,6 +92,7 @@ jobs:
           chmod 777 ci-data
           docker run --rm -d --name hypha-release-smoke \
             -p 13000:3000 \
+            -p 13010:3010 \
             -v "$(pwd)/ci-data:/data" \
             -e HYPHA_ACCESS_CODE_HASH="$DEV_HASH" \
             -e HYPHA_JWT_ISSUER=http://localhost:13000 \
@@ -110,6 +111,14 @@ jobs:
           curl -fs -X POST http://127.0.0.1:13000/auth/login \
             -H 'content-type: application/json' \
             -d '{"code":"dev"}' | grep -q 'id-token'
+
+          # Plugin-origin isolation: third-party plugin documents are served
+          # by the separate listener only, never by the app origin, and the
+          # app tells the frontend where that listener is.
+          curl -fs http://127.0.0.1:13010/health | grep -q '"status":"ok"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:13000/plugin-cdn/assets/x/y/index.html)" = "404"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:13010/auth/session)" = "404"
+          curl -fs http://127.0.0.1:13000/ | grep -q 'name="hypha-plugin-port" content="3010"'
 
           docker stop hypha-release-smoke
 

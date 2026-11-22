@@ -16,7 +16,13 @@
  */
 
 import type { FastifyPluginAsync } from "fastify";
-import { PluginCache, requireSession, resolveUpstreamUrl, serveCached } from "../plugin-cache.js";
+import {
+  INERT_RESPONSE_HEADERS,
+  PluginCache,
+  requireSession,
+  resolveUpstreamUrl,
+  serveCached,
+} from "../plugin-cache.js";
 import type { SessionStore } from "../auth/session.js";
 
 const INDEX_TTL_SECONDS = 3600;
@@ -39,6 +45,7 @@ export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (ap
       upstreamUrl: `${deps.upstreamBase}/plugins.json`,
       ttlSeconds: INDEX_TTL_SECONDS,
       reply,
+      extraHeaders: INERT_RESPONSE_HEADERS,
     }),
   );
 
@@ -49,6 +56,7 @@ export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (ap
       upstreamUrl: `${deps.upstreamBase}/stats.json`,
       ttlSeconds: INDEX_TTL_SECONDS,
       reply,
+      extraHeaders: INERT_RESPONSE_HEADERS,
     }),
   );
 
@@ -64,6 +72,7 @@ export const pluginMarketRoute: FastifyPluginAsync<PluginMarketDeps> = async (ap
       upstreamUrl,
       ttlSeconds: PACKAGE_TTL_SECONDS,
       reply,
+      extraHeaders: INERT_RESPONSE_HEADERS,
     });
   });
 };

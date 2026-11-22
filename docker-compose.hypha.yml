@@ -23,6 +23,10 @@ services:
       # same host in front. Set HYPHA_BIND=0.0.0.0 to expose the port on all
       # interfaces (LAN use; traffic is plain HTTP).
       - "${HYPHA_BIND:-127.0.0.1}:${HYPHA_HOST_PORT:-3000}:3000"
+      # Plugin-assets origin. Third-party plugin iframes are served from
+      # this second port so they are NOT same-origin with the app. The
+      # browser must be able to reach it; see docs/hypha/operations.md.
+      - "${HYPHA_BIND:-127.0.0.1}:${HYPHA_PLUGIN_HOST_PORT:-3010}:3010"
     volumes:
       # Bind-mount: data survives container removal. On host, ensure the
       # directory is owned by UID 1000 (the `node` user inside the image)
@@ -39,5 +43,11 @@ services:
       HYPHA_COOKIE_SECURE: ${HYPHA_COOKIE_SECURE:-}
       # Optional: extend the JWT lifetime, default 30d.
       HYPHA_JWT_TTL: ${HYPHA_JWT_TTL:-30d}
+      # Plugin-assets origin (separate from the app origin — do not merge).
+      # Port mode (default): the browser uses <app hostname>:<this port>.
+      HYPHA_PLUGIN_PUBLIC_PORT: ${HYPHA_PLUGIN_HOST_PORT:-3010}
+      # Reverse-proxy mode: full public origin on its own hostname, e.g.
+      # https://plugins.hypha.example.com. Overrides the port when set.
+      HYPHA_PLUGIN_ORIGIN: ${HYPHA_PLUGIN_ORIGIN:-}
       # Internal — keep at /data; the volume mount above is the persistence.
       HYPHA_DATA_DIR: /data

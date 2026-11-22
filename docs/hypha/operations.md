@@ -49,6 +49,67 @@ For a reverse-proxy setup (recommended for any non-localhost deployment):
 front Hypha with Caddy, nginx, or Traefik on TLS. When TLS is in front,
 set `HYPHA_COOKIE_SECURE=true` and `HYPHA_JWT_ISSUER=https://your.host` in
 `.env` and restart. (TLS termination + Caddy example will land in M4.)
+If you use marketplace plugins, also give the plugin listener its own
+hostname — see [Plugin origin](#plugin-origin).
+
+## Plugin origin
+
+Marketplace plugins are third-party code that runs in iframes. Hypha proxies
+the plugin files (the upstream bucket lacks the headers a cross-origin
+isolated page requires), but serves them from a **second listener with its
+own origin** — never from the app's origin. A plugin document that shared
+the app origin could call `GET /auth/session` with your session cookie,
+obtain a JWT, and read every graph.
+
+| Variable | Where | Meaning |
+|---|---|---|
+| `HYPHA_PLUGIN_HOST_PORT` | `.env` (compose) | Host port for the plugin listener. Default `3010`. |
+| `HYPHA_PLUGIN_ORIGIN` | `.env` | Full public origin of the plugin listener, for reverse-proxy setups. Overrides the port. |
+| `HYPHA_PLUGIN_PORT` | container | Port the listener binds inside the container. Default `3010`; rarely changed. |
+| `HYPHA_PLUGIN_PUBLIC_PORT` | container | Port the browser uses. Compose sets it from `HYPHA_PLUGIN_HOST_PORT`. |
+
+**Port mode (default).** The browser loads plugin iframes from
+`<same scheme>://<same hostname>:3010`. Nothing to configure on localhost
+or a LAN — the port just has to be reachable from the browser. It is
+published on the same address as the app port (`HYPHA_BIND`, loopback by
+default), so `HYPHA_BIND=0.0.0.0` for LAN access exposes both.
+
+**Reverse-proxy mode.** Give the plugin listener its own hostname and
+point it at container port 3010:
+
+```
+hypha.example.com          → hypha:3000
+plugins.hypha.example.com  → hypha:3010
+```
+
+```bash
+HYPHA_JWT_ISSUER=https://hypha.example.com
+HYPHA_PLUGIN_ORIGIN=https://plugins.hypha.example.com
+```
+
+Rules:
+
+- The plugin origin **must differ** from the app origin. hypha-server
+  refuses to start when `HYPHA_PLUGIN_ORIGIN` equals the origin of
+  `HYPHA_JWT_ISSUER`, and the frontend refuses to load plugins from its own
+  origin.
+- Do **not** route `/plugin-cdn/assets/*` on the app hostname to port 3010
+  ("to save a hostname"). That recreates the same-origin problem.
+- A separate hostname isolates better than a separate port: cookies are not
+  port-scoped, so in port mode the browser attaches the (HttpOnly) session
+  cookie to requests for the plugin listener. The listener ignores it and
+  plugin scripts cannot read it, but with a separate hostname it is never
+  sent at all.
+- If the plugin origin is unreachable or unset, plugins fail with a
+  handshake timeout and the console logs
+  `[hypha] no separate plugin-assets origin configured`. The app itself is
+  unaffected.
+
+This restores the isolation stock Logseq has (plugin iframe is cross-origin
+and talks to the app through `postMessage`). It does not sandbox the plugin
+API itself: an installed plugin can still read and modify the open graph
+through that API, exactly as in upstream Logseq. Only install plugins you
+trust.
 
 ## Routine operation
 

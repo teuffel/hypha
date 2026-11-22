@@ -113,6 +113,7 @@ LABEL org.opencontainers.image.source="https://github.com/teuffel/hypha" \
 ENV NODE_ENV=production \
     HYPHA_DATA_DIR=/data \
     PORT=3000 \
+    HYPHA_PLUGIN_PORT=3010 \
     HOST=0.0.0.0
 
 WORKDIR /opt/hypha
@@ -138,7 +139,8 @@ COPY --from=builder /build/hypha-server/docker-entrypoint.sh /usr/local/bin/dock
 # Data directory — bind-mounted in compose so contents survive container life.
 RUN mkdir -p /data && chown -R node:node /data /opt/hypha
 
-EXPOSE 3000
+# 3000: app origin. 3010: plugin-assets origin (third-party plugin iframes).
+EXPOSE 3000 3010
 VOLUME ["/data"]
 
 USER node

@@ -197,6 +197,10 @@ function startHyphaServer(opts: {
     // Cloudflare traffic; no flakiness from upstream rate limits).
     HYPHA_PLUGIN_MARKET_UPSTREAM: `${fixtureBase}/market`,
     HYPHA_PLUGIN_CDN_UPSTREAM: `${fixtureBase}/cdn`,
+    // Plugin-assets listener: ephemeral port (no clash with a running dev
+    // server) and the fixture as upstream so nothing leaves the machine.
+    HYPHA_PLUGIN_PORT: "0",
+    HYPHA_PLUGIN_ASSETS_UPSTREAM: `${fixtureBase}/assets`,
   };
   // Use the compiled dist/ so the test exercises the same artifact as the
   // Docker image. Pre-condition: tsc has been run (Dockerfile.hypha + CI

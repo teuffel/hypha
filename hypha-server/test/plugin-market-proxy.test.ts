@@ -22,6 +22,8 @@
  *   - Upstream unreachable returns 502 `{ error: "upstream_unreachable" }`.
  *   - /health?detail=cache surfaces cache stats; /health stays minimal.
  *   - Routes are skipped entirely when `pluginUpstream` is not supplied.
+ *   - /plugin-cdn/assets/* is NOT served by the main app, and the remaining
+ *     proxies carry nosniff + CSP sandbox.
  */
 
 import test from "node:test";
@@ -119,7 +121,6 @@ async function buildPluginApp(
   market: FakeUpstream,
   cdn: FakeUpstream,
   cacheMaxEntries = 64,
-  assets?: FakeUpstream,
 ) {
   const config = await makeRuntime();
   const app = await buildApp({
@@ -128,11 +129,6 @@ async function buildPluginApp(
     pluginUpstream: {
       marketBase: market.url,
       cdnBase: cdn.url,
-      // Phase 1.6.2 added assetsBase. Tests that don't exercise the
-      // /plugin-cdn/assets/* route may pass nothing — we point at the
-      // cdn fake just to keep the type contract honest (the route only
-      // fires if the test makes the matching request).
-      assetsBase: assets?.url ?? cdn.url,
       cacheMaxEntries,
     },
   });
@@ -244,31 +240,29 @@ test("/plugin-market/packages/* — rejects path traversal with 400 invalid_path
   }
 });
 
-// The proxied plugin HTML/JS is served from the Hypha origin; without a
-// session nobody (and no cross-site navigation) may load it.
+// The remaining app-origin proxies are for the app's own fetches; without a
+// session nobody (and no cross-site navigation) may use them. (Plugin iframe
+// assets live on the separate plugin origin — see plugin-app.test.ts.)
 test("plugin proxies — require a session, no upstream call without one", async () => {
   const market = await startFakeUpstream();
   const cdn = await startFakeUpstream();
-  const assets = await startFakeUpstream();
-  const app = await buildPluginApp(market, cdn, 64, assets);
+  const app = await buildPluginApp(market, cdn);
   try {
     for (const url of [
       "/plugin-market/plugins.json",
       "/plugin-market/packages/x/icon.png",
       "/plugin-cdn/r2/org/plugin",
-      "/plugin-cdn/assets/org/plugin/1.0.0/index.html",
     ]) {
       for (const headers of [{}, { cookie: "hypha-session=not-a-session" }]) {
         const res = await app.inject({ method: "GET", url, headers });
         assert.equal(res.statusCode, 401, `${url} ${JSON.stringify(headers)}`);
       }
     }
-    assert.equal(market.calls.length + cdn.calls.length + assets.calls.length, 0);
+    assert.equal(market.calls.length + cdn.calls.length, 0);
   } finally {
     await app.close();
     await market.close();
     await cdn.close();
-    await assets.close();
   }
 });
 
@@ -279,14 +273,11 @@ test("plugin proxies — require a session, no upstream call without one", async
 test("plugin proxies — reject double-encoded traversal, no upstream call", async () => {
   const market = await startFakeUpstream();
   const cdn = await startFakeUpstream();
-  const assets = await startFakeUpstream();
-  const app = await buildPluginApp(market, cdn, 64, assets);
+  const app = await buildPluginApp(market, cdn);
   try {
     for (const url of [
       "/plugin-market/packages/%252e%252e/%252e%252e/attacker/repo/main/evil.svg",
       "/plugin-cdn/r2/%252e%252e/other/path.json",
-      "/plugin-cdn/assets/%252e%252e/elsewhere/index.html",
-      "/plugin-cdn/assets/a/%252E%252e/b/index.html",
     ]) {
       const res = await app.inject({ method: "GET", url });
       assert.equal(res.statusCode, 400, url);
@@ -294,12 +285,10 @@ test("plugin proxies — reject double-encoded traversal, no upstream call", asy
     }
     assert.equal(market.calls.length, 0);
     assert.equal(cdn.calls.length, 0);
-    assert.equal(assets.calls.length, 0);
   } finally {
     await app.close();
     await market.close();
     await cdn.close();
-    await assets.close();
   }
 });
 
@@ -362,125 +351,56 @@ test("/plugin-cdn/r2/* — rejects path traversal with 400 invalid_path", async 
   }
 });
 
-// Phase 1.6.2: /plugin-cdn/assets/* must inject cross-origin-resource-policy
-// so plugin iframes pass Hypha's COEP=credentialless gate.
+// /plugin-cdn/assets/* moved to the separate plugin-assets origin (see
+// test/plugin-app.test.ts). The MAIN app must not serve third-party plugin
+// documents, and what it still proxies must be inert on direct navigation.
 
-test("/plugin-cdn/assets/* — injects cross-origin-resource-policy on MISS, HIT, and BYPASS", async () => {
+test("main app does NOT serve /plugin-cdn/assets/* (plugin documents live on a separate origin)", async () => {
   const market = await startFakeUpstream();
   const cdn = await startFakeUpstream();
-  const assets = await startFakeUpstream();
-  const htmlBytes = Buffer.from("<!doctype html><html><body>plugin</body></html>", "utf8");
-  assets.responses.set("/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html", {
+  cdn.responses.set("/foo/bar/v1.0.0/dist/index.html", {
     contentType: "text/html",
-    body: htmlBytes,
+    body: Buffer.from("<script>alert(1)</script>", "utf8"),
   });
-  const app = await buildPluginApp(market, cdn, 64, assets);
-  try {
-    // MISS — first request fetches upstream and sets the header.
-    const miss = await app.inject({
-      method: "GET",
-      url: "/plugin-cdn/assets/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html",
-    });
-    assert.equal(miss.statusCode, 200);
-    assert.equal(miss.headers["cross-origin-resource-policy"], "cross-origin",
-      "MISS response must carry CORP=cross-origin so COEP credentialless passes");
-    assert.equal(miss.headers["x-hypha-cache"], "MISS");
-    assert.deepEqual(miss.rawPayload, htmlBytes);
-
-    // HIT — second request hits cache and must STILL set the header (cache
-    // re-emit, not just on-the-wire-fetch).
-    const hit = await app.inject({
-      method: "GET",
-      url: "/plugin-cdn/assets/gidongkwon/logseq-plugin-tags/v0.1.2/dist/index.html",
-    });
-    assert.equal(hit.headers["cross-origin-resource-policy"], "cross-origin",
-      "HIT response must also carry CORP — the gate is on every reply, not just upstream-touched ones");
-    assert.equal(hit.headers["x-hypha-cache"], "HIT");
-    assert.equal(assets.calls.length, 1, "second hit must come from cache, not upstream");
-
-    // BYPASS — upstream 404 path must still set CORP so error pages don't
-    // bypass the policy.
-    const fourOhFour = await app.inject({
-      method: "GET",
-      url: "/plugin-cdn/assets/unknown/repo/v9.9.9/dist/missing.html",
-    });
-    assert.equal(fourOhFour.statusCode, 404);
-    assert.equal(fourOhFour.headers["cross-origin-resource-policy"], "cross-origin",
-      "BYPASS response must carry CORP — defense in depth, in case the browser surfaces the error page");
-    assert.equal(fourOhFour.headers["x-hypha-cache"], "BYPASS");
-  } finally {
-    await app.close();
-    await market.close();
-    await cdn.close();
-    await assets.close();
-  }
-});
-
-test("/plugin-cdn/assets/* — sniffs Content-Type from extension when upstream omits it", async () => {
-  // The real R2 bucket (pub-…r2.dev) responds 200 OK but WITHOUT a
-  // Content-Type header. The proxy must fill in text/html for *.html so
-  // the browser actually renders the iframe (rather than treating it as
-  // a binary download), otherwise plugin code never runs and the
-  // 8s handshake timeout fires anyway. Mirrors that real upstream by
-  // sending NO contentType on the fake response.
-  const market = await startFakeUpstream();
-  const cdn = await startFakeUpstream();
-  const assets = await startFakeUpstream();
-  const htmlBytes = Buffer.from("<!doctype html><html><body>plugin</body></html>", "utf8");
-  assets.responses.set("/foo/bar/v1.0.0/dist/index.html", {
-    // contentType: null → fake-upstream returns the body without a
-    // Content-Type header, identical to the real R2 behavior.
-    contentType: null,
-    body: htmlBytes,
-  });
-  const jsBytes = Buffer.from("export default 1;", "utf8");
-  assets.responses.set("/foo/bar/v1.0.0/dist/index.js", {
-    contentType: null,
-    body: jsBytes,
-  });
-  const app = await buildPluginApp(market, cdn, 64, assets);
-  try {
-    const html = await app.inject({
-      method: "GET",
-      url: "/plugin-cdn/assets/foo/bar/v1.0.0/dist/index.html",
-    });
-    assert.equal(html.statusCode, 200);
-    assert.equal(html.headers["content-type"], "text/html; charset=utf-8",
-      ".html → text/html (browser renders the iframe instead of downloading)");
-
-    const js = await app.inject({
-      method: "GET",
-      url: "/plugin-cdn/assets/foo/bar/v1.0.0/dist/index.js",
-    });
-    assert.equal(js.statusCode, 200);
-    assert.equal(js.headers["content-type"], "application/javascript; charset=utf-8",
-      ".js → application/javascript (browser executes it as a script)");
-  } finally {
-    await app.close();
-    await market.close();
-    await cdn.close();
-    await assets.close();
-  }
-});
-
-test("/plugin-cdn/assets/* — rejects path traversal with 400 invalid_path", async () => {
-  const market = await startFakeUpstream();
-  const cdn = await startFakeUpstream();
-  const assets = await startFakeUpstream();
-  const app = await buildPluginApp(market, cdn, 64, assets);
+  const app = await buildPluginApp(market, cdn);
   try {
     const res = await app.inject({
       method: "GET",
-      url: "/plugin-cdn/assets/..%2Fsecret",
+      url: "/plugin-cdn/assets/foo/bar/v1.0.0/dist/index.html",
     });
-    assert.equal(res.statusCode, 400);
-    assert.deepEqual(res.json(), { error: "invalid_path" });
-    assert.equal(assets.calls.length, 0, "no upstream fetch on traversal reject");
+    assert.equal(res.statusCode, 404);
+    assert.equal(cdn.calls.length, 0, "no upstream fetch for the removed route");
   } finally {
     await app.close();
     await market.close();
     await cdn.close();
-    await assets.close();
+  }
+});
+
+test("main-origin plugin proxies are inert on direct navigation (nosniff + CSP sandbox) on MISS, HIT, BYPASS", async () => {
+  const market = await startFakeUpstream();
+  const cdn = await startFakeUpstream();
+  cdn.responses.set("/evil/repo/v1", {
+    contentType: "text/html",
+    body: Buffer.from("<script>alert(1)</script>", "utf8"),
+  });
+  const app = await buildPluginApp(market, cdn);
+  try {
+    for (const [url, marker] of [
+      ["/plugin-cdn/r2/evil/repo/v1", "MISS"],
+      ["/plugin-cdn/r2/evil/repo/v1", "HIT"],
+      ["/plugin-cdn/r2/missing/repo/v1", "BYPASS"],
+      ["/plugin-market/packages/missing/icon.svg", "BYPASS"],
+    ] as const) {
+      const res = await app.inject({ method: "GET", url });
+      assert.equal(res.headers["x-hypha-cache"], marker, url);
+      assert.equal(res.headers["x-content-type-options"], "nosniff", url);
+      assert.match(String(res.headers["content-security-policy"]), /^sandbox;/, url);
+    }
+  } finally {
+    await app.close();
+    await market.close();
+    await cdn.close();
   }
 });
 

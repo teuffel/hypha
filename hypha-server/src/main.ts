@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DbSyncRunner } from "./db-sync-runner.js";
+import { buildPluginAssetsApp } from "./plugin-app.js";
+import { parsePluginOrigin, parsePort } from "./plugin-origin.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 // dist/main.js → repo root: ../../../ from compiled location; from src/main.ts
@@ -60,6 +62,36 @@ const pluginAssetsUpstream =
   process.env.HYPHA_PLUGIN_ASSETS_UPSTREAM ??
   "https://pub-80f42b85b62c40219354a834fcf2bbfa.r2.dev";
 
+// ── Plugin-assets listener (separate origin) ───────────────────────────────
+//
+// Third-party plugin iframe documents are served from their OWN port, and
+// therefore their own browser origin, so plugin code cannot read
+// /auth/session or touch the app window. See plugin-app.ts.
+//
+//   HYPHA_PLUGIN_PORT         port the listener binds inside the container.
+//   HYPHA_PLUGIN_PUBLIC_PORT  port the BROWSER uses to reach it (differs from
+//                             the above only when the host port mapping
+//                             differs). Default: the bound port.
+//   HYPHA_PLUGIN_ORIGIN       full public origin, for reverse-proxy setups
+//                             (e.g. https://plugins.hypha.example.com).
+//                             Takes precedence over the port variant.
+const pluginPort = parsePort("HYPHA_PLUGIN_PORT", process.env.HYPHA_PLUGIN_PORT ?? "3010");
+const pluginOrigin = parsePluginOrigin(process.env.HYPHA_PLUGIN_ORIGIN, config.jwtIssuer);
+
+const pluginApp = await buildPluginAssetsApp({ assetsBase: pluginAssetsUpstream });
+await pluginApp.listen({ port: pluginPort, host: config.host });
+const pluginAddr = pluginApp.server.address();
+const pluginBoundPort =
+  typeof pluginAddr === "object" && pluginAddr !== null ? pluginAddr.port : pluginPort;
+const pluginPublicPort = process.env.HYPHA_PLUGIN_PUBLIC_PORT
+  ? parsePort("HYPHA_PLUGIN_PUBLIC_PORT", process.env.HYPHA_PLUGIN_PUBLIC_PORT)
+  : pluginBoundPort;
+pluginApp.log.info(
+  `hypha plugin-assets origin up on port ${pluginBoundPort} (browser reaches it at ${
+    pluginOrigin ?? `<app host>:${pluginPublicPort}`
+  })`,
+);
+
 const app = await buildApp({
   config,
   staticDir,
@@ -67,8 +99,8 @@ const app = await buildApp({
   pluginUpstream: {
     marketBase: pluginMarketUpstream,
     cdnBase: pluginCdnUpstream,
-    assetsBase: pluginAssetsUpstream,
   },
+  pluginFrontend: pluginOrigin ? { origin: pluginOrigin } : { port: pluginPublicPort },
 });
 
 const runner = new DbSyncRunner({
@@ -91,6 +123,7 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
     app.log.info(`received ${sig}; shutting down`);
     try {
       await app.close();
+      await pluginApp.close();
     } catch (err) {
       app.log.error({ err }, "fastify close failed");
     }
@@ -111,5 +144,6 @@ try {
 } catch (err) {
   app.log.error({ err }, "hypha-server bootstrap failed");
   await runner.stop();
+  await pluginApp.close();
   process.exit(1);
 }
